@@ -1,7 +1,7 @@
 {
-  "name": "logos",
-  "private": true,
-  "version": "0.0.0",
+  "name": "logos-editor",
+  "private": false,
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "nasti dev",
@@ -9,8 +9,11 @@
     "preview": "nasti preview",
     "electron": "nasti electron",
     "electron:build": "nasti electron-build && electron-builder",
-    "postinstall": "electron-rebuild"
+    "postinstall": "electron-rebuild",
+    "typecheck": "tsc --noEmit"
   },
+  "author": "Zixiao Laboratories",
+  "license": "MIT",
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.159",
     "@gravity-ui/icons": "^2.18.0",
