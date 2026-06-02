@@ -2,8 +2,40 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, type AgentItem, type AgentSession } from "../state/store";
 import { useT } from "../i18n";
 import { listWorkspaceFiles } from "../lib/workspaceFiles";
-import type { AgentQuestion } from "../shared/types";
+import type {
+  AgentEffortLevel,
+  AgentModelInfo,
+  AgentQuestion,
+} from "../shared/types";
 import { Icon } from "./Icon";
+
+const ALL_EFFORT: AgentEffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Static fallback model list so the picker is usable before (or without) a
+ * live `supportedModels()` probe. Replaced by live data once it arrives.
+ */
+const STATIC_MODELS: AgentModelInfo[] = [
+  {
+    value: "claude-opus-4-8",
+    displayName: "Opus 4.8",
+    description: "Most capable",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    value: "claude-sonnet-4-6",
+    displayName: "Sonnet 4.6",
+    description: "Balanced",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    value: "claude-haiku-4-5-20251001",
+    displayName: "Haiku 4.5",
+    description: "Fastest",
+  },
+];
 
 export function AgentPanel({
   onClose,
@@ -89,14 +121,24 @@ function AgentConversation({ session }: { session: AgentSession }) {
   const root = useStore((s) => s.root);
   const sendAgentPrompt = useStore((s) => s.sendAgentPrompt);
   const interruptAgent = useStore((s) => s.interruptAgent);
+  const agentCommands = useStore((s) => s.agentCommands);
+  const loadAgentModels = useStore((s) => s.loadAgentModels);
+  const loadAgentCommands = useStore((s) => s.loadAgentCommands);
   const logRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState("");
   const [files, setFiles] = useState<string[]>([]);
   const [mention, setMention] = useState<{ token: string } | null>(null);
+  const [slash, setSlash] = useState<{ token: string } | null>(null);
 
   useEffect(() => {
     if (root) void listWorkspaceFiles(root).then(setFiles);
   }, [root]);
+
+  // D1/D4: probe the SDK for models + slash-commands once the panel is open.
+  useEffect(() => {
+    void loadAgentModels();
+    void loadAgentCommands();
+  }, [loadAgentModels, loadAgentCommands]);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -111,15 +153,31 @@ function AgentConversation({ session }: { session: AgentSession }) {
       .map((f) => (f.startsWith(root) ? f.slice(root.length + 1) : f));
   }, [mention, files, root]);
 
+  const slashMatches = useMemo(() => {
+    if (!slash) return [];
+    const q = slash.token.toLowerCase();
+    return agentCommands
+      .filter((c) => c.name.toLowerCase().startsWith(q))
+      .slice(0, 8);
+  }, [slash, agentCommands]);
+
   function onChange(value: string) {
     setText(value);
     const m = /(?:^|\s)@(\S*)$/.exec(value);
     setMention(m ? { token: m[1] } : null);
+    // D4: a leading "/word" opens the slash-command menu.
+    const sl = /^\/(\w*)$/.exec(value);
+    setSlash(sl ? { token: sl[1] } : null);
   }
 
   function pickMention(rel: string) {
     setText((prev) => prev.replace(/@(\S*)$/, `@${rel} `));
     setMention(null);
+  }
+
+  function pickSlash(name: string) {
+    setText(`/${name} `);
+    setSlash(null);
   }
 
   function send() {
@@ -128,7 +186,12 @@ function AgentConversation({ session }: { session: AgentSession }) {
     void sendAgentPrompt(value);
     setText("");
     setMention(null);
+    setSlash(null);
   }
+
+  const menuOpen =
+    (mention && mentionMatches.length > 0) ||
+    (slash && slashMatches.length > 0);
 
   return (
     <>
@@ -163,14 +226,7 @@ function AgentConversation({ session }: { session: AgentSession }) {
       <div className="agent-input">
         <div className="agent-input-box">
           {mention && mentionMatches.length > 0 && (
-            <div
-              style={{
-                marginBottom: 6,
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                overflow: "hidden",
-              }}
-            >
+            <div className="agent-menu">
               {mentionMatches.map((rel) => (
                 <div
                   key={rel}
@@ -182,22 +238,35 @@ function AgentConversation({ session }: { session: AgentSession }) {
               ))}
             </div>
           )}
+          {slash && slashMatches.length > 0 && (
+            <div className="agent-menu">
+              {slashMatches.map((c) => (
+                <div
+                  key={c.name}
+                  className="search-result slash"
+                  onClick={() => pickSlash(c.name)}
+                >
+                  <Icon name="terminal" size={12} />
+                  <span className="cmd">/{c.name}</span>
+                  {c.argumentHint && <span className="hint">{c.argumentHint}</span>}
+                  <span className="desc">{c.description}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <textarea
             value={text}
             placeholder={t("agent.placeholder")}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !mention) {
+              if (e.key === "Enter" && !e.shiftKey && !menuOpen) {
                 e.preventDefault();
                 send();
               }
             }}
           />
           <div className="agent-input-row">
-            <div className="left">
-              <Icon name="globe" size={13} /> {t("agent.local")}
-              <Icon name="chevron-updown" size={12} />
-            </div>
+            <AgentControls />
             {session.status === "running" ? (
               <button className="send-btn stop" onClick={() => void interruptAgent()}>
                 <Icon name="stop" size={13} /> {t("agent.stop")}
@@ -214,8 +283,107 @@ function AgentConversation({ session }: { session: AgentSession }) {
   );
 }
 
+/** D1–D3: compact model / effort / thinking / permission controls. */
+function AgentControls() {
+  const t = useT();
+  const settings = useStore((s) => s.settings);
+  const setSetting = useStore((s) => s.setSetting);
+  const liveModels = useStore((s) => s.agentModels);
+
+  const models = liveModels.length ? liveModels : STATIC_MODELS;
+  const model = settings["agent.model"];
+  const selected = models.find((m) => m.value === model);
+  // Default (no model) => all effort levels; a specific model => its own.
+  const effortLevels = model
+    ? selected?.supportsEffort === false
+      ? []
+      : (selected?.supportedEffortLevels ?? ALL_EFFORT)
+    : ALL_EFFORT;
+
+  return (
+    <div className="agent-controls">
+      <select
+        className="agent-mini"
+        title={t("agent.model")}
+        value={model}
+        onChange={(e) => void setSetting("agent.model", e.target.value)}
+      >
+        <option value="">{t("agent.modelDefault")}</option>
+        {models.map((m) => (
+          <option key={m.value} value={m.value}>
+            {m.displayName}
+          </option>
+        ))}
+      </select>
+
+      {effortLevels.length > 0 && (
+        <select
+          className="agent-mini"
+          title={t("agent.effort")}
+          value={settings["agent.effort"]}
+          onChange={(e) =>
+            void setSetting(
+              "agent.effort",
+              e.target.value as typeof settings["agent.effort"],
+            )
+          }
+        >
+          <option value="">{t("agent.effortAuto")}</option>
+          {effortLevels.map((lvl) => (
+            <option key={lvl} value={lvl}>
+              {lvl}
+            </option>
+          ))}
+        </select>
+      )}
+
+      <select
+        className="agent-mini"
+        title={t("agent.thinking")}
+        value={settings["agent.thinking"]}
+        onChange={(e) =>
+          void setSetting(
+            "agent.thinking",
+            e.target.value as typeof settings["agent.thinking"],
+          )
+        }
+      >
+        <option value="adaptive">{t("agent.thinkingAdaptive")}</option>
+        <option value="enabled">{t("agent.thinkingOn")}</option>
+        <option value="disabled">{t("agent.thinkingOff")}</option>
+      </select>
+
+      <select
+        className="agent-mini"
+        title={t("settings.agentPermission")}
+        value={settings["agent.permissionMode"]}
+        onChange={(e) =>
+          void setSetting(
+            "agent.permissionMode",
+            e.target.value as typeof settings["agent.permissionMode"],
+          )
+        }
+      >
+        <option value="default">{t("agent.permDefault")}</option>
+        <option value="acceptEdits">acceptEdits</option>
+        <option value="plan">plan</option>
+        <option value="bypassPermissions">bypass</option>
+      </select>
+    </div>
+  );
+}
+
+/** Detects whether an agent error is an authentication failure (F3). */
+function isAuthError(message: string): boolean {
+  return /401|unauthor|authenticat|api[\s_-]?key|credit balance|x-api-key|ANTHROPIC_/i.test(
+    message,
+  );
+}
+
 function AgentItemView({ item }: { item: AgentItem }) {
   const [open, setOpen] = useState(false);
+  const openSpecial = useStore((s) => s.openSpecial);
+  const t = useT();
   switch (item.kind) {
     case "user":
       return <div className="msg user">{item.text}</div>;
@@ -265,6 +433,17 @@ function AgentItemView({ item }: { item: AgentItem }) {
       return (
         <div className="agent-error">
           <Icon name="error" size={13} /> {item.message}
+          {isAuthError(item.message) && (
+            <div className="agent-error-action">
+              <button
+                className="btn"
+                style={{ width: "auto" }}
+                onClick={() => openSpecial("settings")}
+              >
+                {t("agent.setApiKey")}
+              </button>
+            </div>
+          )}
         </div>
       );
     default:
@@ -283,10 +462,20 @@ function PermissionCard({
 }) {
   const t = useT();
   const respondPermission = useStore((s) => s.respondPermission);
+  const settings = useStore((s) => s.settings);
+  const setSetting = useStore((s) => s.setSetting);
   const summary =
     (input as { command?: string; file_path?: string })?.command ??
     (input as { file_path?: string })?.file_path ??
     JSON.stringify(input);
+
+  function alwaysAllow() {
+    const allowed = settings["agent.allowedTools"];
+    if (!allowed.includes(toolName))
+      void setSetting("agent.allowedTools", [...allowed, toolName]);
+    void respondPermission(requestId, "allow");
+  }
+
   return (
     <div className="perm-card">
       <div>
@@ -308,6 +497,9 @@ function PermissionCard({
           onClick={() => void respondPermission(requestId, "allow")}
         >
           {t("agent.allow")}
+        </button>
+        <button className="btn secondary" onClick={alwaysAllow}>
+          {t("agent.alwaysAllow")}
         </button>
         <button
           className="btn ghost"

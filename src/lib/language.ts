@@ -93,10 +93,11 @@ export function serverIdForLanguage(lang: string): string | null {
     case "json":
       return "json";
     case "html":
+      return "html";
     case "css":
     case "scss":
     case "less":
-      return "html";
+      return "css";
     case "shell":
       return "bash";
     default:

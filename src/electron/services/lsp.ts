@@ -48,11 +48,20 @@ const REGISTRY: (LanguageServerDescriptor & {
   },
   {
     id: "html",
-    label: "HTML / CSS",
-    languages: ["html", "css", "scss", "less"],
+    label: "HTML",
+    languages: ["html"],
     npmPackage: "vscode-langservers-extracted",
-    description: "HTML & CSS language features.",
+    description: "HTML language features (completion, hover, formatting).",
     bin: "vscode-html-language-server",
+    args: ["--stdio"],
+  },
+  {
+    id: "css",
+    label: "CSS / SCSS / LESS",
+    languages: ["css", "scss", "less"],
+    npmPackage: "vscode-langservers-extracted",
+    description: "CSS, SCSS & LESS language features.",
+    bin: "vscode-css-language-server",
     args: ["--stdio"],
   },
   {
@@ -94,18 +103,68 @@ export function registerLspService(ctx: ServiceContext): () => void {
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
   const binExt = process.platform === "win32" ? ".cmd" : "";
 
+  // G1: a packaged app launched from the GUI inherits no login-shell PATH, so
+  // bare `npm`/`node` are usually absent. Prepend the common install locations
+  // (and any bundled bin dir) so spawns resolve. This is strictly additive.
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string })
+    .resourcesPath;
+  function augmentedEnv(): NodeJS.ProcessEnv {
+    const sep = process.platform === "win32" ? ";" : ":";
+    const extra = [
+      "/usr/local/bin",
+      "/opt/homebrew/bin",
+      "/usr/bin",
+      "/bin",
+      resourcesPath ? path.join(resourcesPath, "bin") : "",
+    ].filter(Boolean);
+    const current = process.env.PATH ?? "";
+    return {
+      ...process.env,
+      PATH: [...extra, current].filter(Boolean).join(sep),
+    };
+  }
+  function isMissingBinaryError(e: unknown): boolean {
+    return (e as { code?: string } | null)?.code === "ENOENT";
+  }
+
+  // G1: prefer servers bundled under resources/language-servers (shipped with a
+  // release, no npm needed); fall back to the npm-managed userData dir.
+  const bundledDir = resourcesPath
+    ? path.join(resourcesPath, "language-servers")
+    : null;
+  const searchDirs = [bundledDir, managedDir].filter(Boolean) as string[];
+
   function descriptor(id: string) {
     return REGISTRY.find((s) => s.id === id);
   }
 
   async function installedVersion(pkg: string): Promise<string | null> {
-    try {
-      const pj = path.join(managedDir, "node_modules", pkg, "package.json");
-      const raw = await fs.readFile(pj, "utf8");
-      return JSON.parse(raw).version ?? null;
-    } catch {
-      return null;
+    for (const dir of searchDirs) {
+      try {
+        const pj = path.join(dir, "node_modules", pkg, "package.json");
+        const raw = await fs.readFile(pj, "utf8");
+        return (JSON.parse(raw).version as string) ?? null;
+      } catch {
+        /* try the next search dir */
+      }
     }
+    return null;
+  }
+
+  /** First on-disk path to a server's executable across the search dirs. */
+  async function resolveBin(
+    s: LanguageServerDescriptor & { bin: string },
+  ): Promise<string | null> {
+    for (const dir of searchDirs) {
+      const p = path.join(dir, "node_modules", ".bin", s.bin + binExt);
+      try {
+        await fs.access(p);
+        return p;
+      } catch {
+        /* try the next search dir */
+      }
+    }
+    return null;
   }
 
   function latestVersion(pkg: string): Promise<string | null> {
@@ -114,6 +173,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
       let out = "";
       const child = spawn(npmCmd, ["view", pkg, "version"], {
         cwd: managedDir,
+        env: augmentedEnv(),
       });
       child.stdout?.on("data", (d) => (out += d.toString()));
       child.on("error", () => resolve(null));
@@ -177,7 +237,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
     if (!s?.npmPackage) return Promise.resolve();
     return ensureManagedDir().then(
       () =>
-        new Promise<void>((resolve) => {
+        new Promise<void>((resolve, reject) => {
           progress(id, "installing", `Installing ${s.npmPackage}…`);
           const child = spawn(
             npmCmd,
@@ -190,22 +250,32 @@ export function registerLspService(ctx: ServiceContext): () => void {
               "--no-fund",
               "--no-save",
             ],
-            { cwd: managedDir },
+            { cwd: managedDir, env: augmentedEnv() },
           );
           let err = "";
           child.stderr?.on("data", (d) => (err += d.toString()));
+          // Spawn failure (npm/node not on PATH) — must surface, not swallow.
           child.on("error", (e) => {
-            progress(id, "error", e.message);
-            resolve();
+            const msg = isMissingBinaryError(e)
+              ? "Node.js / npm not found. Install Node.js and ensure it is on PATH."
+              : e.message;
+            progress(id, "error", msg);
+            reject(new Error(msg));
           });
           child.on("close", async (code) => {
             if (code === 0) {
               const v = await installedVersion(s.npmPackage!);
               progress(id, "installed", `Installed ${s.npmPackage}@${v}`);
+              resolve();
             } else {
-              progress(id, "error", err.split("\n").slice(-3).join("\n"));
+              // Non-zero exit means the package is NOT on disk — reject so
+              // ensureServer never proceeds to start() against a missing bin.
+              const detail =
+                err.split("\n").filter(Boolean).slice(-3).join("\n").trim() ||
+                `npm exited with code ${code}`;
+              progress(id, "error", detail);
+              reject(new Error(detail));
             }
-            resolve();
           });
         }),
     );
@@ -229,12 +299,19 @@ export function registerLspService(ctx: ServiceContext): () => void {
     if (!s) throw new Error(`Unknown language server: ${id}`);
     if (running.has(id)) return;
 
-    const binPath = path.join(managedDir, "node_modules", ".bin", s.bin + binExt);
+    // A2: verify the executable is actually on disk before spawning, so a
+    // failed/half install surfaces a clear error instead of a swallowed spawn.
+    const binPath = await resolveBin(s);
+    if (!binPath) {
+      const msg = `${s.label} is not installed`;
+      progress(id, "error", msg);
+      throw new Error(msg);
+    }
     progress(id, "starting", `Starting ${s.label}…`);
 
     const proc = spawn(binPath, s.args, {
       cwd: root,
-      env: process.env,
+      env: augmentedEnv(),
     }) as ChildProcessWithoutNullStreams;
 
     proc.on("error", (e) => {

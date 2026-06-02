@@ -47,6 +47,23 @@ export function GitPanel() {
   const staged = git?.changes.filter((c) => c.staged) ?? [];
   const unstaged = git?.changes.filter((c) => !c.staged) ?? [];
 
+  // F4: commit must not silently no-op. Disable when there's nothing to commit,
+  // and stage-all-then-commit when changes exist but nothing is staged yet.
+  const canCommit = message.trim().length > 0 && (staged.length > 0 || unstaged.length > 0);
+  async function commit() {
+    if (!canCommit || !root) return;
+    await run(async () => {
+      if (staged.length === 0 && unstaged.length > 0) {
+        await window.logos.git.stage(
+          root,
+          unstaged.map((c) => c.path),
+        );
+      }
+      await window.logos.git.commit(root, message);
+      setMessage("");
+    });
+  }
+
   const FileRow = ({
     change,
     actions,
@@ -100,13 +117,7 @@ export function GitPanel() {
           <button
             className="icon-btn"
             title={t("git.commit")}
-            onClick={() =>
-              message.trim() &&
-              void run(async () => {
-                await window.logos.git.commit(root, message);
-                setMessage("");
-              })
-            }
+            onClick={() => void commit()}
           >
             <Icon name="check" />
           </button>
@@ -127,24 +138,17 @@ export function GitPanel() {
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && message.trim()) {
-              void run(async () => {
-                await window.logos.git.commit(root, message);
-                setMessage("");
-              });
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              void commit();
             }
           }}
         />
         <button
           className="btn"
           style={{ marginTop: 6 }}
-          disabled={!message.trim()}
-          onClick={() =>
-            void run(async () => {
-              await window.logos.git.commit(root, message);
-              setMessage("");
-            })
-          }
+          disabled={!canCommit}
+          title={canCommit ? "" : t("git.nothingToCommit")}
+          onClick={() => void commit()}
         >
           <Icon name="check" /> {t("git.commit")}
           {staged.length > 0 ? ` (${staged.length})` : ""}

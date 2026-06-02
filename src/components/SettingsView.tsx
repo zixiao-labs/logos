@@ -21,6 +21,39 @@ function Switch({
   );
 }
 
+/** Masked text input with a reveal toggle, for credentials. */
+function Secret({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <input
+        className="field"
+        type={show ? "text" : "password"}
+        value={value}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <button
+        className="btn ghost"
+        style={{ width: "auto" }}
+        onClick={() => setShow((s) => !s)}
+      >
+        {show ? "Hide" : "Show"}
+      </button>
+    </div>
+  );
+}
+
 interface RowProps {
   name: string;
   settingKey: string;
@@ -196,7 +229,7 @@ export function SettingsView() {
               onChange={(e) => set("terminal.fontSize", Number(e.target.value))}
             />
           </Row>
-          <Row name="Agent Permission" settingKey="agent.permissionMode">
+          <Row name={t("settings.agentPermission")} settingKey="agent.permissionMode">
             <select
               className="select"
               value={settings["agent.permissionMode"]}
@@ -212,6 +245,128 @@ export function SettingsView() {
               <option value="plan">plan</option>
               <option value="bypassPermissions">bypassPermissions</option>
             </select>
+          </Row>
+          <Row name={t("settings.agentApiKey")} settingKey="agent.apiKey">
+            <Secret
+              value={settings["agent.apiKey"]}
+              placeholder="sk-ant-…"
+              onChange={(v) => set("agent.apiKey", v)}
+            />
+          </Row>
+          <Row name={t("settings.agentAuthToken")} settingKey="agent.authToken">
+            <Secret
+              value={settings["agent.authToken"]}
+              placeholder="ANTHROPIC_AUTH_TOKEN"
+              onChange={(v) => set("agent.authToken", v)}
+            />
+          </Row>
+          <Row name={t("settings.agentBaseUrl")} settingKey="agent.baseUrl">
+            <input
+              className="field"
+              value={settings["agent.baseUrl"]}
+              placeholder="https://api.anthropic.com"
+              spellCheck={false}
+              onChange={(e) => set("agent.baseUrl", e.target.value)}
+            />
+          </Row>
+          <Row name={t("settings.agentModel")} settingKey="agent.model">
+            <input
+              className="field"
+              value={settings["agent.model"]}
+              placeholder={t("agent.modelDefault")}
+              spellCheck={false}
+              onChange={(e) => set("agent.model", e.target.value)}
+            />
+          </Row>
+          <Row name={t("agent.effort")} settingKey="agent.effort">
+            <select
+              className="select"
+              value={settings["agent.effort"]}
+              onChange={(e) =>
+                set("agent.effort", e.target.value as Settings["agent.effort"])
+              }
+            >
+              <option value="">{t("agent.effortAuto")}</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
+          </Row>
+          <Row name={t("agent.thinking")} settingKey="agent.thinking">
+            <select
+              className="select"
+              value={settings["agent.thinking"]}
+              onChange={(e) =>
+                set(
+                  "agent.thinking",
+                  e.target.value as Settings["agent.thinking"],
+                )
+              }
+            >
+              <option value="adaptive">{t("agent.thinkingAdaptive")}</option>
+              <option value="enabled">{t("agent.thinkingOn")}</option>
+              <option value="disabled">{t("agent.thinkingOff")}</option>
+            </select>
+          </Row>
+          <Row
+            name={t("settings.agentThinkingBudget")}
+            settingKey="agent.thinkingBudget"
+          >
+            <input
+              className="field"
+              type="number"
+              value={settings["agent.thinkingBudget"]}
+              onChange={(e) =>
+                set("agent.thinkingBudget", Number(e.target.value))
+              }
+            />
+          </Row>
+          <Row name={t("settings.agentAllowedTools")} settingKey="agent.allowedTools">
+            <input
+              className="field"
+              value={settings["agent.allowedTools"].join(", ")}
+              placeholder="Read, Bash(npm test)"
+              spellCheck={false}
+              onChange={(e) =>
+                set(
+                  "agent.allowedTools",
+                  e.target.value
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                )
+              }
+            />
+          </Row>
+          <Row
+            name={t("settings.agentDisallowedTools")}
+            settingKey="agent.disallowedTools"
+          >
+            <input
+              className="field"
+              value={settings["agent.disallowedTools"].join(", ")}
+              spellCheck={false}
+              onChange={(e) =>
+                set(
+                  "agent.disallowedTools",
+                  e.target.value
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                )
+              }
+            />
+          </Row>
+          <Row
+            name={t("settings.agentLoadProjectSettings")}
+            settingKey="agent.loadProjectSettings"
+          >
+            <Switch
+              on={settings["agent.loadProjectSettings"]}
+              onChange={(v) => set("agent.loadProjectSettings", v)}
+            />
           </Row>
           <Row name={t("settings.autoDownloadLsp")} settingKey="lsp.autoDownload">
             <Switch
