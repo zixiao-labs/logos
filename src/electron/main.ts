@@ -10,6 +10,7 @@ import { registerLspService } from "./services/lsp";
 import { registerSettingsService } from "./services/settings";
 import { registerTerminalService } from "./services/terminal";
 import { registerWorkspaceService } from "./services/workspace";
+import { setupAutoUpdater } from "./services/updater";
 
 let mainWindow: BrowserWindow | null = null;
 const disposers: (() => void)[] = [];
@@ -104,6 +105,9 @@ app.whenReady().then(() => {
     registerLspService(ctx),
   );
   void createWindow();
+
+  // Background self-update from GitHub Releases (packaged builds only).
+  setupAutoUpdater();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();

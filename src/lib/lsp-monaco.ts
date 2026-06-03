@@ -264,6 +264,85 @@ export function setupLspMonaco() {
   if (providersRegistered) return;
   providersRegistered = true;
 
+  // Monaco bundles its own TS/JS language service (the `typescript` worker). It
+  // type-checks WITHOUT the workspace's node_modules or tsconfig, so it emits
+  // false "Cannot find module 'react'" (2792) errors and would duplicate the
+  // completions/hovers/definitions the providers below already forward to the
+  // real language server. This editor is LSP-first, so silence the built-in
+  // worker's diagnostics + the features the bridge owns. setModeConfiguration
+  // REPLACES (does not merge), so spread the current config to keep the
+  // syntactic fallbacks (outline, occurrence highlight, rename, signature help)
+  // on; colorization is a separate subsystem and is unaffected either way.
+  //
+  // NB: read the worker defaults from the top-level `monaco.typescript`/`.json`/
+  // `.css` namespaces. In monaco 0.55 the older `monaco.languages.*` accessors
+  // are deprecated stubs (typed `{ deprecated: true }`); the real defaults live
+  // at the top level.
+  const tsLangs = monaco.typescript;
+  if (tsLangs) {
+    for (const d of [tsLangs.typescriptDefaults, tsLangs.javascriptDefaults]) {
+      d.setModeConfiguration({
+        ...d.modeConfiguration,
+        diagnostics: false,
+        completionItems: false,
+        hovers: false,
+        definitions: false,
+      });
+      d.setDiagnosticsOptions({
+        ...d.getDiagnosticsOptions(),
+        noSemanticValidation: true,
+        noSyntaxValidation: true,
+        noSuggestionDiagnostics: true,
+      });
+    }
+  }
+
+  // Same LSP-first reasoning for the bundled JSON worker: it validates against
+  // its built-in schemas and reports comments (e.g. in tsconfig.json) as errors
+  // — false positives for an editor that defers to the json language server —
+  // and its completions/hovers duplicate the ones the bridge below forwards.
+  // `validate: false` silences the diagnostics; mode config drops the duplicate
+  // providers while keeping outline (documentSymbols), tokens, and colors.
+  const jsonLang = monaco.json;
+  if (jsonLang) {
+    jsonLang.jsonDefaults.setDiagnosticsOptions({
+      ...jsonLang.jsonDefaults.diagnosticsOptions,
+      validate: false,
+    });
+    jsonLang.jsonDefaults.setModeConfiguration({
+      ...jsonLang.jsonDefaults.modeConfiguration,
+      diagnostics: false,
+      completionItems: false,
+      hovers: false,
+    });
+  }
+
+  // ...and the CSS/SCSS/LESS workers: their linter flags vendor prefixes, unknown
+  // properties, and at-rules like Tailwind's `@apply`/`@tailwind` as errors on
+  // otherwise-valid stylesheets. Defer to the css language server: kill
+  // validation (`setOptions`) and the duplicate providers, keep color decorators
+  // and folding ranges (`colors`/`foldingRanges` left untouched).
+  const cssLang = monaco.css;
+  if (cssLang) {
+    for (const d of [
+      cssLang.cssDefaults,
+      cssLang.scssDefaults,
+      cssLang.lessDefaults,
+    ]) {
+      d.setOptions({ ...d.options, validate: false });
+      d.setModeConfiguration({
+        ...d.modeConfiguration,
+        diagnostics: false,
+        completionItems: false,
+        hovers: false,
+        definitions: false,
+        references: false,
+        documentHighlights: false,
+        rename: false,
+      });
+    }
+  }
+
   monaco.languages.registerCompletionItemProvider(MONACO_LANGS, {
     triggerCharacters: [".", '"', "'", "/", "@", "<", ":", " "],
     async provideCompletionItems(model, position, context) {

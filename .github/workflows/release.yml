@@ -1,0 +1,56 @@
+name: Release
+
+# Triggered by pushing a version tag, e.g. `git tag v1.0.1 && git push --tags`.
+# Each OS runner builds its own installers and publishes them (plus the
+# `latest*.yml` metadata electron-updater reads) to a GitHub Release for the tag.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # needed to create/update the GitHub Release
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Full install — postinstall electron-rebuild builds node-pty against
+      # Electron's ABI for this runner's OS/arch.
+      - name: Install dependencies
+        run: npm ci
+
+      # Stage the bundled language servers (G1). Runs per-OS so the .bin shims
+      # are platform-correct (.cmd on Windows).
+      - name: Stage bundled language servers
+        run: npm run prepackage:servers
+
+      - name: Build (renderer + main + preload)
+        run: npm run build:app
+
+      - name: Build & publish installers
+        run: npx --no-install electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional code-signing / notarization credentials. When the secrets
+          # are absent these resolve to empty strings and electron-builder
+          # produces an UNSIGNED build (still succeeds). Add the secrets later to
+          # enable signing — and macOS auto-update — with no workflow change.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}

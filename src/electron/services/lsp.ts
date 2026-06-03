@@ -16,7 +16,10 @@ const rpc = require("vscode-jsonrpc/node") as typeof import("vscode-jsonrpc/node
 
 /** Built-in catalogue of common language servers, all installable from npm. */
 const REGISTRY: (LanguageServerDescriptor & {
-  bin: string;
+  /** npm package directory under node_modules/ that contains the server. */
+  pkg: string;
+  /** Path to the server's JS entry within its package (from its `bin` map). */
+  entry: string;
   args: string[];
 })[] = [
   {
@@ -25,7 +28,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["typescript", "typescriptreact", "javascript", "javascriptreact"],
     npmPackage: "typescript-language-server",
     description: "tsserver-backed language features for TS & JS.",
-    bin: "typescript-language-server",
+    pkg: "typescript-language-server",
+    entry: "lib/cli.mjs",
     args: ["--stdio"],
   },
   {
@@ -34,7 +38,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["python"],
     npmPackage: "pyright",
     description: "Static type checker & language server for Python.",
-    bin: "pyright-langserver",
+    pkg: "pyright",
+    entry: "langserver.index.js",
     args: ["--stdio"],
   },
   {
@@ -43,7 +48,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["json", "jsonc"],
     npmPackage: "vscode-langservers-extracted",
     description: "JSON language features (schema validation, completion).",
-    bin: "vscode-json-language-server",
+    pkg: "vscode-langservers-extracted",
+    entry: "bin/vscode-json-language-server",
     args: ["--stdio"],
   },
   {
@@ -52,7 +58,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["html"],
     npmPackage: "vscode-langservers-extracted",
     description: "HTML language features (completion, hover, formatting).",
-    bin: "vscode-html-language-server",
+    pkg: "vscode-langservers-extracted",
+    entry: "bin/vscode-html-language-server",
     args: ["--stdio"],
   },
   {
@@ -61,7 +68,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["css", "scss", "less"],
     npmPackage: "vscode-langservers-extracted",
     description: "CSS, SCSS & LESS language features.",
-    bin: "vscode-css-language-server",
+    pkg: "vscode-langservers-extracted",
+    entry: "bin/vscode-css-language-server",
     args: ["--stdio"],
   },
   {
@@ -70,7 +78,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["shellscript"],
     npmPackage: "bash-language-server",
     description: "Shell script language server.",
-    bin: "bash-language-server",
+    pkg: "bash-language-server",
+    entry: "out/cli.js",
     args: ["start"],
   },
 ];
@@ -101,7 +110,6 @@ export function registerLspService(ctx: ServiceContext): () => void {
   const latestCache = new Map<string, string>();
 
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const binExt = process.platform === "win32" ? ".cmd" : "";
 
   // G1: a packaged app launched from the GUI inherits no login-shell PATH, so
   // bare `npm`/`node` are usually absent. Prepend the common install locations
@@ -151,12 +159,12 @@ export function registerLspService(ctx: ServiceContext): () => void {
     return null;
   }
 
-  /** First on-disk path to a server's executable across the search dirs. */
-  async function resolveBin(
-    s: LanguageServerDescriptor & { bin: string },
+  /** First on-disk path to a server's JS entry across the search dirs. */
+  async function resolveEntry(
+    s: LanguageServerDescriptor & { pkg: string; entry: string },
   ): Promise<string | null> {
     for (const dir of searchDirs) {
-      const p = path.join(dir, "node_modules", ".bin", s.bin + binExt);
+      const p = path.join(dir, "node_modules", s.pkg, s.entry);
       try {
         await fs.access(p);
         return p;
@@ -253,9 +261,11 @@ export function registerLspService(ctx: ServiceContext): () => void {
             { cwd: managedDir, env: augmentedEnv() },
           );
           let err = "";
+          let errored = false;
           child.stderr?.on("data", (d) => (err += d.toString()));
           // Spawn failure (npm/node not on PATH) — must surface, not swallow.
           child.on("error", (e) => {
+            errored = true;
             const msg = isMissingBinaryError(e)
               ? "Node.js / npm not found. Install Node.js and ensure it is on PATH."
               : e.message;
@@ -263,6 +273,10 @@ export function registerLspService(ctx: ServiceContext): () => void {
             reject(new Error(msg));
           });
           child.on("close", async (code) => {
+            // After a spawn failure Node also fires `close` (code = the negative
+            // errno, e.g. -2 for ENOENT). The `error` handler already reported a
+            // clear message — don't clobber it with a bogus "exited with code -2".
+            if (errored) return;
             if (code === 0) {
               const v = await installedVersion(s.npmPackage!);
               progress(id, "installed", `Installed ${s.npmPackage}@${v}`);
@@ -270,9 +284,13 @@ export function registerLspService(ctx: ServiceContext): () => void {
             } else {
               // Non-zero exit means the package is NOT on disk — reject so
               // ensureServer never proceeds to start() against a missing bin.
+              // A null/negative code is a launch failure (signal / could not
+              // run), not a real exit status, so report it as such.
               const detail =
                 err.split("\n").filter(Boolean).slice(-3).join("\n").trim() ||
-                `npm exited with code ${code}`;
+                (code == null || code < 0
+                  ? "Could not run npm. Install Node.js and ensure it is on PATH."
+                  : `npm exited with code ${code}`);
               progress(id, "error", detail);
               reject(new Error(detail));
             }
@@ -299,19 +317,23 @@ export function registerLspService(ctx: ServiceContext): () => void {
     if (!s) throw new Error(`Unknown language server: ${id}`);
     if (running.has(id)) return;
 
-    // A2: verify the executable is actually on disk before spawning, so a
+    // A2: verify the entry is actually on disk before spawning, so a
     // failed/half install surfaces a clear error instead of a swallowed spawn.
-    const binPath = await resolveBin(s);
-    if (!binPath) {
+    const entry = await resolveEntry(s);
+    if (!entry) {
       const msg = `${s.label} is not installed`;
       progress(id, "error", msg);
       throw new Error(msg);
     }
     progress(id, "starting", `Starting ${s.label}…`);
 
-    const proc = spawn(binPath, s.args, {
+    // G1: run the server with Electron's own Node (ELECTRON_RUN_AS_NODE) instead
+    // of its `#!/usr/bin/env node` bin shim. A GUI-launched packaged app has no
+    // node/npm on PATH, so spawning the shim would fail with ENOENT (the
+    // "exited with code -2" symptom). process.execPath is always present.
+    const proc = spawn(process.execPath, [entry, ...s.args], {
       cwd: root,
-      env: augmentedEnv(),
+      env: { ...augmentedEnv(), ELECTRON_RUN_AS_NODE: "1" },
     }) as ChildProcessWithoutNullStreams;
 
     proc.on("error", (e) => {
