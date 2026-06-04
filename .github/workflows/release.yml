@@ -42,7 +42,7 @@ jobs:
       - name: Build & publish installers
         run: npx --no-install electron-builder --publish always
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
           # Optional code-signing / notarization credentials. When the secrets
           # are absent these resolve to empty strings and electron-builder
           # produces an UNSIGNED build (still succeeds). Add the secrets later to
