@@ -21,6 +21,15 @@ const REGISTRY: (LanguageServerDescriptor & {
   /** Path to the server's JS entry within its package (from its `bin` map). */
   entry: string;
   args: string[];
+  /** Extra npm packages to install alongside this server's own package. */
+  extraPackages?: string[];
+  /**
+   * Relative path under node_modules/ to a `tsserver.js`, handed to the server
+   * as `initializationOptions.tsserver.fallbackPath`. typescript-language-server
+   * ships no tsserver of its own and errors on initialize when the opened
+   * workspace has no local `typescript`; a workspace-local copy still wins.
+   */
+  tsserverFallback?: string;
 })[] = [
   {
     id: "typescript",
@@ -31,6 +40,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     pkg: "typescript-language-server",
     entry: "lib/cli.mjs",
     args: ["--stdio"],
+    extraPackages: ["typescript"],
+    tsserverFallback: "typescript/lib/tsserver.js",
   },
   {
     id: "python",
@@ -159,12 +170,10 @@ export function registerLspService(ctx: ServiceContext): () => void {
     return null;
   }
 
-  /** First on-disk path to a server's JS entry across the search dirs. */
-  async function resolveEntry(
-    s: LanguageServerDescriptor & { pkg: string; entry: string },
-  ): Promise<string | null> {
+  /** First on-disk path to a file under node_modules/ across the search dirs. */
+  async function resolveModuleFile(relPath: string): Promise<string | null> {
     for (const dir of searchDirs) {
-      const p = path.join(dir, "node_modules", s.pkg, s.entry);
+      const p = path.join(dir, "node_modules", relPath);
       try {
         await fs.access(p);
         return p;
@@ -173,6 +182,13 @@ export function registerLspService(ctx: ServiceContext): () => void {
       }
     }
     return null;
+  }
+
+  /** First on-disk path to a server's JS entry across the search dirs. */
+  function resolveEntry(
+    s: LanguageServerDescriptor & { pkg: string; entry: string },
+  ): Promise<string | null> {
+    return resolveModuleFile(path.join(s.pkg, s.entry));
   }
 
   function latestVersion(pkg: string): Promise<string | null> {
@@ -247,11 +263,14 @@ export function registerLspService(ctx: ServiceContext): () => void {
       () =>
         new Promise<void>((resolve, reject) => {
           progress(id, "installing", `Installing ${s.npmPackage}…`);
+          // Co-install any runtime deps (e.g. `typescript` for the TS server,
+          // which bundles no tsserver) in the same atomic npm invocation.
+          const pkgs = [s.npmPackage!, ...(s.extraPackages ?? [])];
           const child = spawn(
             npmCmd,
             [
               "install",
-              `${s.npmPackage}@latest`,
+              ...pkgs.map((p) => `${p}@latest`),
               "--prefix",
               managedDir,
               "--no-audit",
@@ -363,11 +382,22 @@ export function registerLspService(ctx: ServiceContext): () => void {
 
     running.set(id, { proc, connection, root });
 
+    // typescript-language-server has no tsserver of its own. Hand it our staged
+    // `typescript` as a fallback so TS/JS features work even when the opened
+    // workspace has no local copy (a workspace-local typescript still wins).
+    let initializationOptions: Record<string, unknown> | undefined;
+    if (s.tsserverFallback) {
+      const tsserverPath = await resolveModuleFile(s.tsserverFallback);
+      if (tsserverPath)
+        initializationOptions = { tsserver: { fallbackPath: tsserverPath } };
+    }
+
     const rootUri = pathToFileURL(root).toString();
     await connection.sendRequest("initialize", {
       processId: process.pid,
       rootUri,
       rootPath: root,
+      initializationOptions,
       capabilities: {
         textDocument: {
           synchronization: { dynamicRegistration: false },

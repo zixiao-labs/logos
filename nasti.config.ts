@@ -41,7 +41,8 @@ export default defineConfig({
       // through cssPlugin (each .css -> injected <style>). editor.main.js
       // re-exports the full API + language contributions, so `import * as monaco
       // from "monaco-editor"` keeps working unchanged.
-      "monaco-editor": "node_modules/monaco-editor/esm/vs/editor/editor.main.js",
+      "monaco-editor":
+        "node_modules/monaco-editor/esm/vs/editor/editor.main.js",
     },
   },
   electron: {
@@ -65,6 +66,6 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    sourcemap: false,
   },
 });

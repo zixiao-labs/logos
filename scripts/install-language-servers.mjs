@@ -12,10 +12,15 @@
 // has to be produced on the same OS that packages it.
 //
 // Four npm packages cover all six server ids in the lsp.ts registry:
-//   typescript-language-server  -> typescript
+//   typescript-language-server  -> typescript, javascript
 //   pyright                     -> python
 //   vscode-langservers-extracted-> json, html, css
 //   bash-language-server        -> bash
+//
+// typescript-language-server ships no tsserver of its own, so the `typescript`
+// package is staged beside it (and handed to the server as
+// `tsserver.fallbackPath` in lsp.ts) — otherwise it errors on initialize when
+// the opened workspace has no local TypeScript.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -27,6 +32,7 @@ const SERVERS_DIR = join(ROOT, "build", "language-servers");
 
 const PACKAGES = [
   "typescript-language-server",
+  "typescript", // tsserver runtime for typescript-language-server (it bundles none)
   "pyright",
   "vscode-langservers-extracted",
   "bash-language-server",
@@ -91,6 +97,22 @@ const missing = EXPECTED_BINS.filter((b) => !existsSync(join(binDir, b + binExt)
 if (missing.length) {
   console.error(
     `[install-language-servers] expected server binaries missing in ${binDir}: ${missing.join(", ")}`,
+  );
+  process.exit(1);
+}
+
+// typescript-language-server locates tsserver.js in a sibling `typescript`
+// package; without it the server throws on initialize. Verify it landed.
+const tsserverPath = join(
+  SERVERS_DIR,
+  "node_modules",
+  "typescript",
+  "lib",
+  "tsserver.js",
+);
+if (!existsSync(tsserverPath)) {
+  console.error(
+    `[install-language-servers] typescript not staged: missing ${tsserverPath}`,
   );
   process.exit(1);
 }
