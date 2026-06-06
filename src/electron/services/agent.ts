@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { sep } from "node:path";
 import { CH } from "../../shared/channels";
 import type {
   AgentAskResponse,
@@ -30,6 +33,59 @@ const importEsm = new Function(
   "m",
   "return import(m)",
 ) as (m: string) => Promise<typeof import("@anthropic-ai/claude-agent-sdk")>;
+
+/**
+ * Resolve the native `claude` CLI binary the SDK spawns, returning a path the OS
+ * can actually execute when we run packaged inside an Electron asar.
+ *
+ * The SDK locates this binary with `createRequire(import.meta.url).resolve(...)`
+ * and hands it straight to `child_process.spawn`. In a packaged build that path
+ * lands *inside* `app.asar` (`…/app.asar/node_modules/@anthropic-ai/
+ * claude-agent-sdk-<plat>-<arch>/claude`). Electron transparently redirects fs
+ * *reads* of unpacked files to `app.asar.unpacked`, but `spawn` is a raw syscall
+ * that is **not** redirected — so the kernel tries to descend into `app.asar`
+ * (a single file, not a directory) and the call fails with `spawn ENOTDIR`. Dev
+ * has no asar, so the SDK's own resolution works there — hence prod-only breakage.
+ *
+ * We pre-resolve the binary ourselves and rewrite the `app.asar` path segment to
+ * `app.asar.unpacked`, where electron-builder placed the real, signed binary (see
+ * the `asarUnpack` globs in package.json). Returns undefined when not running
+ * from an asar (dev) or when the platform binary isn't installed, leaving the SDK
+ * to fall back to its own resolution exactly as before.
+ */
+function resolveClaudeExecutable(): string | undefined {
+  try {
+    const exe = process.platform === "win32" ? "claude.exe" : "claude";
+    const base = "@anthropic-ai/claude-agent-sdk";
+    const { platform, arch } = process;
+    // Mirror the SDK's own candidate order (musl before glibc on linux).
+    const candidates =
+      platform === "linux"
+        ? [`${base}-linux-${arch}-musl`, `${base}-linux-${arch}`]
+        : [`${base}-${platform}-${arch}`];
+    const req = createRequire(__filename);
+    const marker = `app.asar${sep}`;
+    for (const pkg of candidates) {
+      let resolved: string;
+      try {
+        resolved = req.resolve(`${pkg}/${exe}`);
+      } catch {
+        continue; // not the platform variant installed for this build
+      }
+      // Only intervene for the packaged asar case; dev resolves to a real path
+      // already and should keep using the SDK's own resolution unchanged.
+      if (!resolved.includes(marker)) return undefined;
+      const unpacked = resolved.replace(marker, `app.asar.unpacked${sep}`);
+      if (existsSync(unpacked)) return unpacked;
+    }
+  } catch {
+    /* fall through to the SDK's built-in resolution */
+  }
+  return undefined;
+}
+
+/** Packaged-asar-safe path to the CLI binary, resolved once. undefined in dev. */
+const CLAUDE_EXECUTABLE = resolveClaudeExecutable();
 
 /**
  * Build the subprocess environment from supplied credentials. The SDK
@@ -232,6 +288,12 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       model: req.model || undefined,
       permissionMode: req.permissionMode ?? "default",
       includePartialMessages: true,
+      // Packaged builds must spawn the unpacked CLI binary, not the asar path
+      // the SDK would resolve itself (which yields `spawn ENOTDIR`). undefined
+      // in dev, where the SDK's own resolution already works.
+      ...(CLAUDE_EXECUTABLE
+        ? { pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE }
+        : {}),
       // B1: when credentials were supplied, `env` is a MERGE of process.env +
       // ANTHROPIC_* overrides (see authEnv). When omitted, the subprocess
       // inherits process.env as before.
@@ -373,6 +435,10 @@ export function registerAgentService(ctx: ServiceContext): () => void {
           cwd: ctx.cwd,
           includePartialMessages: false,
           ...(env ? { env } : {}),
+          // Same packaged-asar spawn fix as startSession (see CLAUDE_EXECUTABLE).
+          ...(CLAUDE_EXECUTABLE
+            ? { pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE }
+            : {}),
         },
       });
       // Drain in the background so the control-message read loop runs.
