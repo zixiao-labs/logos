@@ -1,18 +1,26 @@
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { sep } from "node:path";
 import { CH } from "../../shared/channels";
 import type {
   AgentAskResponse,
+  AgentAuthContext,
   AgentEvent,
+  AgentModelInfo,
   AgentPermissionResponse,
   AgentQuestion,
+  AgentSlashCommand,
   AgentStartRequest,
 } from "../../shared/types";
 import type { ServiceContext } from "./context";
 import type {
+  ModelInfo,
   Options,
   PermissionResult,
   Query,
   SDKMessage,
   SDKUserMessage,
+  SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
 
 /**
@@ -25,6 +33,79 @@ const importEsm = new Function(
   "m",
   "return import(m)",
 ) as (m: string) => Promise<typeof import("@anthropic-ai/claude-agent-sdk")>;
+
+/**
+ * Resolve the native `claude` CLI binary the SDK spawns, returning a path the OS
+ * can actually execute when we run packaged inside an Electron asar.
+ *
+ * The SDK locates this binary with `createRequire(import.meta.url).resolve(...)`
+ * and hands it straight to `child_process.spawn`. In a packaged build that path
+ * lands *inside* `app.asar` (`…/app.asar/node_modules/@anthropic-ai/
+ * claude-agent-sdk-<plat>-<arch>/claude`). Electron transparently redirects fs
+ * *reads* of unpacked files to `app.asar.unpacked`, but `spawn` is a raw syscall
+ * that is **not** redirected — so the kernel tries to descend into `app.asar`
+ * (a single file, not a directory) and the call fails with `spawn ENOTDIR`. Dev
+ * has no asar, so the SDK's own resolution works there — hence prod-only breakage.
+ *
+ * We pre-resolve the binary ourselves and rewrite the `app.asar` path segment to
+ * `app.asar.unpacked`, where electron-builder placed the real, signed binary (see
+ * the `asarUnpack` globs in package.json). Returns undefined when not running
+ * from an asar (dev) or when the platform binary isn't installed, leaving the SDK
+ * to fall back to its own resolution exactly as before.
+ */
+function resolveClaudeExecutable(): string | undefined {
+  try {
+    const exe = process.platform === "win32" ? "claude.exe" : "claude";
+    const base = "@anthropic-ai/claude-agent-sdk";
+    const { platform, arch } = process;
+    // Mirror the SDK's own candidate order (musl before glibc on linux).
+    const candidates =
+      platform === "linux"
+        ? [`${base}-linux-${arch}-musl`, `${base}-linux-${arch}`]
+        : [`${base}-${platform}-${arch}`];
+    const req = createRequire(__filename);
+    const marker = `app.asar${sep}`;
+    for (const pkg of candidates) {
+      let resolved: string;
+      try {
+        resolved = req.resolve(`${pkg}/${exe}`);
+      } catch {
+        continue; // not the platform variant installed for this build
+      }
+      // Only intervene for the packaged asar case; dev resolves to a real path
+      // already and should keep using the SDK's own resolution unchanged.
+      if (!resolved.includes(marker)) return undefined;
+      const unpacked = resolved.replace(marker, `app.asar.unpacked${sep}`);
+      if (existsSync(unpacked)) return unpacked;
+    }
+  } catch {
+    /* fall through to the SDK's built-in resolution */
+  }
+  return undefined;
+}
+
+/** Packaged-asar-safe path to the CLI binary, resolved once. undefined in dev. */
+const CLAUDE_EXECUTABLE = resolveClaudeExecutable();
+
+/**
+ * Build the subprocess environment from supplied credentials. The SDK
+ * *replaces* `env` wholesale (it does not merge), so we must spread
+ * `process.env`. When the user supplied no credential we return `undefined` and
+ * omit `env` entirely — the subprocess then inherits the main process env as
+ * before, preserving the terminal-launched dev flow (ANTHROPIC_* / ~/.claude).
+ */
+function authEnv(ctx: {
+  apiKey?: string;
+  authToken?: string;
+  baseUrl?: string;
+}): NodeJS.ProcessEnv | undefined {
+  const overrides: Record<string, string> = {};
+  if (ctx.apiKey) overrides.ANTHROPIC_API_KEY = ctx.apiKey;
+  if (ctx.authToken) overrides.ANTHROPIC_AUTH_TOKEN = ctx.authToken;
+  if (ctx.baseUrl) overrides.ANTHROPIC_BASE_URL = ctx.baseUrl;
+  if (Object.keys(overrides).length === 0) return undefined;
+  return { ...process.env, ...overrides };
+}
 
 /** Minimal push/pull async queue used as the SDK's streaming input. */
 class InputQueue implements AsyncIterable<SDKUserMessage> {
@@ -201,15 +282,33 @@ export function registerAgentService(ctx: ServiceContext): () => void {
   async function startSession(req: AgentStartRequest): Promise<Session> {
     const sdk = await importEsm("@anthropic-ai/claude-agent-sdk");
     const input = new InputQueue();
+    const env = authEnv(req);
     const options: Options = {
       cwd: req.cwd,
       model: req.model || undefined,
       permissionMode: req.permissionMode ?? "default",
       includePartialMessages: true,
-      // `env` is intentionally omitted: the SDK subprocess then inherits the
-      // main process's environment (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN,
-      // PATH, HOME) and may add its own variables. Passing env would *replace*
-      // the environment wholesale.
+      // Packaged builds must spawn the unpacked CLI binary, not the asar path
+      // the SDK would resolve itself (which yields `spawn ENOTDIR`). undefined
+      // in dev, where the SDK's own resolution already works.
+      ...(CLAUDE_EXECUTABLE
+        ? { pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE }
+        : {}),
+      // B1: when credentials were supplied, `env` is a MERGE of process.env +
+      // ANTHROPIC_* overrides (see authEnv). When omitted, the subprocess
+      // inherits process.env as before.
+      ...(env ? { env } : {}),
+      // B2/F2: conditional-spread so an unset control means "no override".
+      ...(req.resume ? { resume: req.resume } : {}),
+      ...(req.effort ? { effort: req.effort } : {}),
+      ...(req.thinking ? { thinking: req.thinking } : {}),
+      ...(req.allowedTools?.length ? { allowedTools: req.allowedTools } : {}),
+      ...(req.disallowedTools?.length
+        ? { disallowedTools: req.disallowedTools }
+        : {}),
+      ...(req.settingSources?.length
+        ? { settingSources: req.settingSources }
+        : {}),
       canUseTool: (toolName, toolInput) => {
         const requestId = `req-${++permCounter}`;
         return new Promise<PermissionResult>((resolve) => {
@@ -305,6 +404,113 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       : { questions: pending.questions ?? [], answers: res.answers };
     pending.resolve({ behavior: "allow", updatedInput });
   });
+
+  // D1/D4: probe the SDK for the model + slash-command lists. Control requests
+  // require streaming mode, so we spin a short-lived streaming query, read the
+  // lists from the init handshake, then tear it down. Cached after the first
+  // success (subprocess cost paid once); failures (e.g. no auth) are not cached
+  // so a later call after credentials are set can retry.
+  let infoCache: {
+    models: AgentModelInfo[];
+    commands: AgentSlashCommand[];
+  } | null = null;
+  let infoInflight: Promise<{
+    models: AgentModelInfo[];
+    commands: AgentSlashCommand[];
+  }> | null = null;
+
+  async function probeInfo(ctx: AgentAuthContext): Promise<{
+    models: AgentModelInfo[];
+    commands: AgentSlashCommand[];
+  }> {
+    if (infoCache) return infoCache;
+    if (infoInflight) return infoInflight;
+    infoInflight = (async () => {
+      const sdk = await importEsm("@anthropic-ai/claude-agent-sdk");
+      const input = new InputQueue();
+      const env = authEnv(ctx);
+      const query = sdk.query({
+        prompt: input,
+        options: {
+          cwd: ctx.cwd,
+          includePartialMessages: false,
+          ...(env ? { env } : {}),
+          // Same packaged-asar spawn fix as startSession (see CLAUDE_EXECUTABLE).
+          ...(CLAUDE_EXECUTABLE
+            ? { pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE }
+            : {}),
+        },
+      });
+      // Drain in the background so the control-message read loop runs.
+      void (async () => {
+        try {
+          for await (const _msg of query) void _msg;
+        } catch {
+          /* ignore */
+        }
+      })();
+      try {
+        // Guard against a subprocess that starts but never answers control
+        // requests — don't leave the probe (and its child process) pending.
+        const timeout = new Promise<never>((_, reject) => {
+          const tm = setTimeout(() => reject(new Error("probe timeout")), 15000);
+          if (typeof tm === "object" && "unref" in tm) tm.unref();
+        });
+        const [models, commands] = await Promise.race([
+          Promise.all([
+            query.supportedModels().catch(() => [] as ModelInfo[]),
+            query.supportedCommands().catch(() => [] as SlashCommand[]),
+          ]),
+          timeout,
+        ]);
+        const result = {
+          models: models.map(
+            (m): AgentModelInfo => ({
+              value: m.value,
+              displayName: m.displayName,
+              description: m.description,
+              supportsEffort: m.supportsEffort,
+              supportedEffortLevels: m.supportedEffortLevels,
+              supportsAdaptiveThinking: m.supportsAdaptiveThinking,
+            }),
+          ),
+          commands: commands.map(
+            (c): AgentSlashCommand => ({
+              name: c.name,
+              description: c.description,
+              argumentHint: c.argumentHint,
+              aliases: c.aliases,
+            }),
+          ),
+        };
+        if (result.models.length || result.commands.length) infoCache = result;
+        return result;
+      } finally {
+        input.close();
+        try {
+          await query.interrupt();
+        } catch {
+          /* ignore */
+        }
+      }
+    })();
+    try {
+      return await infoInflight;
+    } finally {
+      infoInflight = null;
+    }
+  }
+
+  ipcMain.handle(CH.agentListModels, (_e, ctx: AgentAuthContext = {}) =>
+    probeInfo(ctx)
+      .then((i) => i.models)
+      .catch(() => [] as AgentModelInfo[]),
+  );
+  ipcMain.handle(CH.agentListCommands, (_e, ctx: AgentAuthContext = {}) =>
+    probeInfo(ctx)
+      .then((i) => i.commands)
+      .catch(() => [] as AgentSlashCommand[]),
+  );
 
   return () => {
     for (const s of sessions.values()) {

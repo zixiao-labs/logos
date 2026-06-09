@@ -5,7 +5,9 @@ import {
   lspChangeDoc,
   lspCloseDoc,
   lspOpenDoc,
+  lspSaveDoc,
 } from "../lib/lsp-monaco";
+import { serverIdForLanguage } from "../lib/language";
 
 /** path -> last-saved content, for dirty tracking. */
 const baselines = new Map<string, string>();
@@ -91,8 +93,21 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
     const onSave = () => void saveCurrent(editor, setDirty);
     window.addEventListener("logos:save", onSave);
 
+    // C2: when a cold language server becomes ready, re-trigger the suggest
+    // widget on the focused editor so completions appear without retyping.
+    const onLspReady = (e: Event) => {
+      if (!editor.hasTextFocus()) return;
+      const model = editor.getModel();
+      if (!model) return;
+      const { serverId } = (e as CustomEvent<{ serverId: string }>).detail;
+      if (serverIdForLanguage(model.getLanguageId()) !== serverId) return;
+      editor.trigger("lsp", "editor.action.triggerSuggest", {});
+    };
+    window.addEventListener("logos:lsp-ready", onLspReady);
+
     return () => {
       window.removeEventListener("logos:save", onSave);
+      window.removeEventListener("logos:lsp-ready", onLspReady);
       cursorSub.dispose();
       editor.dispose();
       editorRef.current = null;
@@ -151,6 +166,8 @@ async function saveCurrent(
   await window.logos.fs.writeFile(p, content);
   baselines.set(p, content);
   setDirty(`file:${p}`, false);
+  // F1: tell the language server the document was saved (save-time linting).
+  lspSaveDoc(p, model.getLanguageId(), content);
 }
 
 export function disposeModel(path: string) {

@@ -114,6 +114,24 @@ export interface Settings {
   "terminal.shell": string;
   "agent.model": string;
   "agent.permissionMode": AgentPermissionMode;
+  /** API key (sk-…) for direct Anthropic API access. Stored masked in the UI. */
+  "agent.apiKey": string;
+  /** OAuth/auth token (ANTHROPIC_AUTH_TOKEN) for gateway/proxy auth. */
+  "agent.authToken": string;
+  /** Override the Anthropic base URL (gateways, proxies). */
+  "agent.baseUrl": string;
+  /** Reasoning effort; "" defers to the model default. */
+  "agent.effort": AgentEffortSetting;
+  /** Extended-thinking mode. */
+  "agent.thinking": AgentThinkingMode;
+  /** Token budget used when thinking === "enabled". */
+  "agent.thinkingBudget": number;
+  /** Tools auto-allowed without prompting. */
+  "agent.allowedTools": string[];
+  /** Tools removed from the model entirely. */
+  "agent.disallowedTools": string[];
+  /** Load user/project .claude settings (slash-commands, agents, etc.). */
+  "agent.loadProjectSettings": boolean;
   "lsp.autoDownload": boolean;
   [key: string]: unknown;
 }
@@ -127,6 +145,48 @@ export type AgentPermissionMode =
   | "acceptEdits"
   | "bypassPermissions"
   | "plan";
+
+/** Reasoning effort levels the SDK accepts (maps 1:1 to the SDK `EffortLevel`). */
+export type AgentEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+/** Effort setting value; "" means "defer to the model default". */
+export type AgentEffortSetting = "" | AgentEffortLevel;
+/** Extended-thinking mode exposed in settings/UI. */
+export type AgentThinkingMode = "adaptive" | "enabled" | "disabled";
+
+/** Mirrors the SDK `ThinkingConfig` discriminated union 1:1. */
+export type AgentThinkingConfig =
+  | { type: "adaptive" }
+  | { type: "enabled"; budgetTokens?: number }
+  | { type: "disabled" };
+
+/** Which on-disk setting layers to load (maps to the SDK `SettingSource`). */
+export type AgentSettingSource = "user" | "project" | "local";
+
+/** Mirrors the SDK `ModelInfo` shape returned by `query.supportedModels()`. */
+export interface AgentModelInfo {
+  value: string;
+  displayName: string;
+  description: string;
+  supportsEffort?: boolean;
+  supportedEffortLevels?: AgentEffortLevel[];
+  supportsAdaptiveThinking?: boolean;
+}
+
+/** Mirrors the SDK `SlashCommand` shape from `query.supportedCommands()`. */
+export interface AgentSlashCommand {
+  name: string;
+  description: string;
+  argumentHint: string;
+  aliases?: string[];
+}
+
+/** Credentials + cwd used to probe the SDK for models/commands (D1/D4). */
+export interface AgentAuthContext {
+  cwd?: string;
+  apiKey?: string;
+  authToken?: string;
+  baseUrl?: string;
+}
 
 /** A single option Claude offers for an AskUserQuestion clarifying question. */
 export interface AgentQuestionOption {
@@ -150,8 +210,22 @@ export interface AgentStartRequest {
   cwd: string;
   model?: string;
   permissionMode?: AgentPermissionMode;
-  /** Resume a previous SDK session id for multi-turn. */
+  /** Resume a previous SDK session id for multi-turn / restart recovery. */
   resume?: string;
+  /** Reasoning effort; omit to defer to the model default. */
+  effort?: AgentEffortLevel;
+  /** Extended-thinking configuration. */
+  thinking?: AgentThinkingConfig;
+  /** Tools auto-allowed without prompting. */
+  allowedTools?: string[];
+  /** Tools removed from the model entirely. */
+  disallowedTools?: string[];
+  /** Setting layers to load (enables .claude slash-commands when set). */
+  settingSources?: AgentSettingSource[];
+  /** Credentials supplied from settings; merged into the subprocess env. */
+  apiKey?: string;
+  authToken?: string;
+  baseUrl?: string;
 }
 
 export type AgentEvent =

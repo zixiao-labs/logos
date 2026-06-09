@@ -1,7 +1,10 @@
 import type {
   AgentAskResponse,
+  AgentAuthContext,
   AgentEvent,
+  AgentModelInfo,
   AgentPermissionResponse,
+  AgentSlashCommand,
   AgentStartRequest,
   AppVersions,
   DirListing,
@@ -87,6 +90,10 @@ export interface LogosAPI {
     interrupt(sessionId: string): Promise<void>;
     respondPermission(res: AgentPermissionResponse): Promise<void>;
     respondAsk(res: AgentAskResponse): Promise<void>;
+    /** List models the SDK reports (empty array if unavailable, e.g. no auth). */
+    listModels(ctx?: AgentAuthContext): Promise<AgentModelInfo[]>;
+    /** List slash-commands discovered from .claude (empty if unavailable). */
+    listCommands(ctx?: AgentAuthContext): Promise<AgentSlashCommand[]>;
     onEvent(cb: (e: AgentEvent) => void): Unsubscribe;
   };
   lsp: {

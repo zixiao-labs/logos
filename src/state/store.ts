@@ -1,11 +1,16 @@
 import { create } from "zustand";
 import { DEFAULT_SETTINGS } from "../shared/defaults";
 import type {
+  AgentAuthContext,
   AgentEvent,
+  AgentModelInfo,
   AgentQuestion,
+  AgentSlashCommand,
+  AgentThinkingConfig,
   GitStatus,
   LanguageCode,
   LayoutMode,
+  LspProgress,
   Settings,
   ThemeMode,
 } from "../shared/types";
@@ -62,6 +67,8 @@ export interface AgentSession {
   name: string;
   items: AgentItem[];
   status: "idle" | "running";
+  /** SDK session id captured from the result event; used to resume (F2). */
+  sdkSessionId?: string;
   pendingAsk?: { requestId: string; questions: AgentQuestion[] };
   pendingPermission?: { requestId: string; toolName: string; input: unknown };
 }
@@ -104,9 +111,15 @@ interface LogosState {
 
   git: GitStatus | null;
   diagnostics: Record<string, Diagnostic[]>;
+  /** Language-server status keyed by server id (C1: surfaced in the status bar). */
+  lsp: Record<string, LspProgress>;
 
   agentSessions: AgentSession[];
   activeAgentId: string | null;
+  /** Cached model list from the SDK (D1). Empty until loaded / if unavailable. */
+  agentModels: AgentModelInfo[];
+  /** Cached slash-commands from the SDK (D4). */
+  agentCommands: AgentSlashCommand[];
 
   paletteOpen: boolean;
 
@@ -146,6 +159,9 @@ interface LogosState {
 
   refreshGit(): Promise<void>;
   setDiagnostics(path: string, diags: Diagnostic[]): void;
+  setLspProgress(p: LspProgress): void;
+  loadAgentModels(): Promise<void>;
+  loadAgentCommands(): Promise<void>;
 
   newAgentSession(name?: string): string;
   removeAgentSession(id: string): void;
@@ -171,6 +187,91 @@ function makeWelcomeTab(): EditorTab {
   return { id: "welcome", kind: "welcome", name: "Welcome" };
 }
 
+/** Translate the `agent.thinking` setting into the SDK's discriminated union. */
+function thinkingConfig(
+  mode: Settings["agent.thinking"],
+  budget: number,
+): AgentThinkingConfig | undefined {
+  if (mode === "disabled") return { type: "disabled" };
+  if (mode === "enabled") return { type: "enabled", budgetTokens: budget };
+  return undefined; // "adaptive" => defer to the model/SDK default
+}
+
+/** Build the credential/cwd context used to probe SDK models/commands. */
+function agentAuthCtx(state: {
+  root: string | null;
+  settings: Settings;
+}): AgentAuthContext {
+  const s = state.settings;
+  return {
+    cwd: state.root ?? undefined,
+    apiKey: s["agent.apiKey"] || undefined,
+    authToken: s["agent.authToken"] || undefined,
+    baseUrl: s["agent.baseUrl"] || undefined,
+  };
+}
+
+// --- Agent session persistence (F2) ---------------------------------------
+// A focused localStorage persister: only agent conversations + the SDK session
+// id survive a restart, so `resume` can rejoin the CLI session. Transient state
+// (running status, pending permission/ask) is never restored — the main-process
+// side of those is gone after a restart.
+const AGENT_PERSIST_KEY = "logos.agent.v1";
+
+function loadPersistedAgent(): {
+  agentSessions: AgentSession[];
+  activeAgentId: string | null;
+} {
+  try {
+    const raw = localStorage.getItem(AGENT_PERSIST_KEY);
+    if (!raw) return { agentSessions: [], activeAgentId: null };
+    const parsed = JSON.parse(raw) as {
+      agentSessions?: AgentSession[];
+      activeAgentId?: string | null;
+    };
+    const agentSessions = (parsed.agentSessions ?? []).map(
+      (a): AgentSession => ({
+        id: a.id,
+        name: a.name,
+        items: a.items ?? [],
+        sdkSessionId: a.sdkSessionId,
+        status: "idle",
+      }),
+    );
+    const activeAgentId =
+      agentSessions.find((a) => a.id === parsed.activeAgentId)?.id ??
+      agentSessions[0]?.id ??
+      null;
+    return { agentSessions, activeAgentId };
+  } catch {
+    return { agentSessions: [], activeAgentId: null };
+  }
+}
+
+function persistAgent(
+  agentSessions: AgentSession[],
+  activeAgentId: string | null,
+): void {
+  try {
+    localStorage.setItem(
+      AGENT_PERSIST_KEY,
+      JSON.stringify({
+        agentSessions: agentSessions.map((a) => ({
+          id: a.id,
+          name: a.name,
+          items: a.items,
+          sdkSessionId: a.sdkSessionId,
+        })),
+        activeAgentId,
+      }),
+    );
+  } catch {
+    /* storage unavailable / quota exceeded — non-fatal */
+  }
+}
+
+const persistedAgent = loadPersistedAgent();
+
 export const useStore = create<LogosState>((set, get) => ({
   ready: false,
   settings: { ...DEFAULT_SETTINGS },
@@ -195,19 +296,26 @@ export const useStore = create<LogosState>((set, get) => ({
 
   git: null,
   diagnostics: {},
+  lsp: {},
 
-  agentSessions: [],
-  activeAgentId: null,
+  agentSessions: persistedAgent.agentSessions,
+  activeAgentId: persistedAgent.activeAgentId,
+  agentModels: [],
+  agentCommands: [],
 
   paletteOpen: false,
 
   async bootstrap() {
-    const [settings, root, recent] = await Promise.all([
+    const [settings, root, recent, servers] = await Promise.all([
       window.logos.settings.getAll(),
       window.logos.workspace.getRoot(),
       window.logos.workspace.recent(),
+      window.logos.lsp.list().catch(() => []),
     ]);
-    set({ settings, root, recent, ready: true });
+    const lsp: Record<string, LspProgress> = {};
+    for (const s of servers)
+      lsp[s.id] = { id: s.id, status: s.status, message: s.message };
+    set({ settings, root, recent, lsp, ready: true });
 
     window.logos.settings.onChanged((s) => set({ settings: s }));
     window.logos.workspace.onChanged((r) => {
@@ -215,6 +323,10 @@ export const useStore = create<LogosState>((set, get) => ({
       void get().refreshGit();
     });
     window.logos.agent.onEvent((e) => get().applyAgentEvent(e));
+    // C1: the single store-side LSP status subscriber (status bar + Extensions
+    // view both read this slice). lsp-monaco keeps its own subscriber for the
+    // Monaco-side self-heal.
+    window.logos.lsp.onProgress((p) => get().setLspProgress(p));
 
     // Always have at least one agent session ready (the Cursor layout shows it).
     if (get().agentSessions.length === 0) get().newAgentSession("Agent 1");
@@ -419,6 +531,22 @@ export const useStore = create<LogosState>((set, get) => ({
   setDiagnostics(path, diags) {
     set((s) => ({ diagnostics: { ...s.diagnostics, [path]: diags } }));
   },
+  setLspProgress(p) {
+    set((s) => ({ lsp: { ...s.lsp, [p.id]: p } }));
+  },
+  async loadAgentModels() {
+    if (get().agentModels.length) return; // cache: fetch once per run
+    const models = await window.logos.agent
+      .listModels(agentAuthCtx(get()))
+      .catch(() => []);
+    if (models.length) set({ agentModels: models });
+  },
+  async loadAgentCommands() {
+    const commands = await window.logos.agent
+      .listCommands(agentAuthCtx(get()))
+      .catch(() => []);
+    set({ agentCommands: commands });
+  },
 
   newAgentSession(name) {
     const id = crypto.randomUUID();
@@ -453,8 +581,11 @@ export const useStore = create<LogosState>((set, get) => ({
     let id = state.activeAgentId;
     if (!id) id = get().newAgentSession();
     const root = state.root ?? ".";
-    set((s) => ({
-      agentSessions: s.agentSessions.map((a) =>
+    const s = state.settings;
+    // sdkSessionId survives restarts (F2): resume the CLI session if present.
+    const session = state.agentSessions.find((a) => a.id === id);
+    set((st) => ({
+      agentSessions: st.agentSessions.map((a) =>
         a.id === id
           ? {
               ...a,
@@ -469,12 +600,26 @@ export const useStore = create<LogosState>((set, get) => ({
           : a,
       ),
     }));
+    const allowed = s["agent.allowedTools"];
+    const disallowed = s["agent.disallowedTools"];
     await window.logos.agent.start({
       sessionId: id!,
       prompt: text,
       cwd: root,
-      model: state.settings["agent.model"] || undefined,
-      permissionMode: state.settings["agent.permissionMode"],
+      // `|| undefined` everywhere => "empty means no override", mirroring model.
+      model: s["agent.model"] || undefined,
+      permissionMode: s["agent.permissionMode"],
+      resume: session?.sdkSessionId,
+      effort: s["agent.effort"] || undefined,
+      thinking: thinkingConfig(s["agent.thinking"], s["agent.thinkingBudget"]),
+      allowedTools: allowed.length ? allowed : undefined,
+      disallowedTools: disallowed.length ? disallowed : undefined,
+      settingSources: s["agent.loadProjectSettings"]
+        ? ["user", "project"]
+        : undefined,
+      apiKey: s["agent.apiKey"] || undefined,
+      authToken: s["agent.authToken"] || undefined,
+      baseUrl: s["agent.baseUrl"] || undefined,
     });
   },
   async interruptAgent() {
@@ -588,7 +733,13 @@ export const useStore = create<LogosState>((set, get) => ({
               costUsd: e.costUsd,
               durationMs: e.durationMs,
             });
-            return { ...a, items, status: "idle" };
+            // F2: remember the SDK session id so we can resume after restart.
+            return {
+              ...a,
+              items,
+              status: "idle",
+              sdkSessionId: e.sdkSessionId ?? a.sdkSessionId,
+            };
           case "error":
             items.push({
               id: crypto.randomUUID(),
@@ -625,3 +776,24 @@ export const useStore = create<LogosState>((set, get) => ({
     set({ paletteOpen: false });
   },
 }));
+
+// F2: write agent conversations to localStorage when they change. Debounced so
+// token-by-token streaming (which rebuilds agentSessions on every delta) does
+// not thrash storage; reference equality skips unrelated state updates.
+let lastSessions = useStore.getState().agentSessions;
+let lastActive = useStore.getState().activeAgentId;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+useStore.subscribe((state) => {
+  if (
+    state.agentSessions !== lastSessions ||
+    state.activeAgentId !== lastActive
+  ) {
+    lastSessions = state.agentSessions;
+    lastActive = state.activeAgentId;
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(
+      () => persistAgent(lastSessions, lastActive),
+      500,
+    );
+  }
+});

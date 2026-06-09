@@ -64,6 +64,8 @@ export const CH = {
   agentInterrupt: "agent:interrupt",
   agentRespondPermission: "agent:respondPermission",
   agentRespondAsk: "agent:respondAsk",
+  agentListModels: "agent:listModels",
+  agentListCommands: "agent:listCommands",
   agentEvent: "agent:event", // push
 
   // language servers

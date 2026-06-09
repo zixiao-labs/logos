@@ -94,6 +94,8 @@ const api: LogosAPI = {
       ipcRenderer.invoke(CH.agentRespondPermission, res),
     respondAsk: (res: AgentAskResponse) =>
       ipcRenderer.invoke(CH.agentRespondAsk, res),
+    listModels: (ctx) => ipcRenderer.invoke(CH.agentListModels, ctx),
+    listCommands: (ctx) => ipcRenderer.invoke(CH.agentListCommands, ctx),
     onEvent: (cb) => on<AgentEvent>(CH.agentEvent, cb),
   },
   lsp: {

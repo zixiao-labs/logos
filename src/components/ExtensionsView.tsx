@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import type { LanguageServerInfo, LanguageServerStatus } from "../shared/types";
@@ -10,31 +10,30 @@ const BADGE: Record<LanguageServerStatus, { cls: string; key: string }> = {
   starting: { cls: "running", key: "lsp.running" },
   running: { cls: "running", key: "lsp.running" },
   stopped: { cls: "installed", key: "lsp.installed" },
-  error: { cls: "error", key: "lsp.notInstalled" },
+  error: { cls: "error", key: "lsp.error" },
 };
 
 export function ExtensionsView() {
   const t = useT();
   const root = useStore((s) => s.root);
+  // C1: live status comes from the shared store slice (single source of truth);
+  // the static catalogue (labels, versions, descriptions) comes from list().
+  const lsp = useStore((s) => s.lsp);
   const [servers, setServers] = useState<LanguageServerInfo[]>([]);
-  const [messages, setMessages] = useState<Record<string, string>>({});
 
-  async function refresh() {
-    setServers(await window.logos.lsp.list());
-  }
+  const refresh = useCallback(async () => {
+    setServers(await window.logos.lsp.list().catch(() => []));
+  }, []);
 
+  // Re-list on mount and whenever a server's status changes (e.g. an install
+  // finished) so installed versions stay current.
+  const statusSig = Object.values(lsp)
+    .map((p) => `${p.id}:${p.status}`)
+    .sort()
+    .join(",");
   useEffect(() => {
     void refresh();
-    return window.logos.lsp.onProgress((p) => {
-      setServers((prev) =>
-        prev.map((s) => (s.id === p.id ? { ...s, status: p.status } : s)),
-      );
-      if (p.message)
-        setMessages((m) => ({ ...m, [p.id]: p.message as string }));
-      if (p.status === "installed" || p.status === "not-installed")
-        void refresh();
-    });
-  }, []);
+  }, [refresh, statusSig]);
 
   return (
     <div className="simple-view">
@@ -55,9 +54,11 @@ export function ExtensionsView() {
       </p>
 
       {servers.map((s) => {
-        const badge = BADGE[s.status];
-        const installed = s.status !== "not-installed" && s.status !== "installing";
-        const running = s.status === "running" || s.status === "starting";
+        const status = lsp[s.id]?.status ?? s.status;
+        const message = lsp[s.id]?.message;
+        const badge = BADGE[status];
+        const installed = status !== "not-installed" && status !== "installing";
+        const running = status === "running" || status === "starting";
         return (
           <div key={s.id} className="lsp-item">
             <div className="info">
@@ -73,12 +74,15 @@ export function ExtensionsView() {
               <div className="desc" style={{ fontFamily: "var(--mono-font)" }}>
                 {s.languages.join(", ")}
               </div>
-              {messages[s.id] && (
+              {message && (
                 <div
                   className="desc"
-                  style={{ color: "var(--muted)", marginTop: 2 }}
+                  style={{
+                    color: status === "error" ? "var(--danger)" : "var(--muted)",
+                    marginTop: 2,
+                  }}
                 >
-                  {messages[s.id]}
+                  {message}
                 </div>
               )}
             </div>
@@ -87,10 +91,10 @@ export function ExtensionsView() {
               {!installed ? (
                 <button
                   className="btn"
-                  disabled={s.status === "installing"}
-                  onClick={() => void window.logos.lsp.install(s.id)}
+                  disabled={status === "installing"}
+                  onClick={() => void window.logos.lsp.install(s.id).catch(() => {})}
                 >
-                  {s.status === "installing" ? "…" : t("lsp.install")}
+                  {status === "installing" ? "…" : t("lsp.install")}
                 </button>
               ) : running ? (
                 <button
@@ -106,7 +110,11 @@ export function ExtensionsView() {
                     disabled={!root}
                     title={root ? "" : t("explorer.noFolder")}
                     onClick={() =>
-                      root && void window.logos.lsp.start(s.id, root).then(refresh)
+                      root &&
+                      void window.logos.lsp
+                        .start(s.id, root)
+                        .then(refresh)
+                        .catch(() => {})
                     }
                   >
                     {t("lsp.start")}

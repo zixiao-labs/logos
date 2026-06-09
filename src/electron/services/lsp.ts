@@ -16,8 +16,20 @@ const rpc = require("vscode-jsonrpc/node") as typeof import("vscode-jsonrpc/node
 
 /** Built-in catalogue of common language servers, all installable from npm. */
 const REGISTRY: (LanguageServerDescriptor & {
-  bin: string;
+  /** npm package directory under node_modules/ that contains the server. */
+  pkg: string;
+  /** Path to the server's JS entry within its package (from its `bin` map). */
+  entry: string;
   args: string[];
+  /** Extra npm packages to install alongside this server's own package. */
+  extraPackages?: string[];
+  /**
+   * Relative path under node_modules/ to a `tsserver.js`, handed to the server
+   * as `initializationOptions.tsserver.fallbackPath`. typescript-language-server
+   * ships no tsserver of its own and errors on initialize when the opened
+   * workspace has no local `typescript`; a workspace-local copy still wins.
+   */
+  tsserverFallback?: string;
 })[] = [
   {
     id: "typescript",
@@ -25,8 +37,11 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["typescript", "typescriptreact", "javascript", "javascriptreact"],
     npmPackage: "typescript-language-server",
     description: "tsserver-backed language features for TS & JS.",
-    bin: "typescript-language-server",
+    pkg: "typescript-language-server",
+    entry: "lib/cli.mjs",
     args: ["--stdio"],
+    extraPackages: ["typescript"],
+    tsserverFallback: "typescript/lib/tsserver.js",
   },
   {
     id: "python",
@@ -34,7 +49,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["python"],
     npmPackage: "pyright",
     description: "Static type checker & language server for Python.",
-    bin: "pyright-langserver",
+    pkg: "pyright",
+    entry: "langserver.index.js",
     args: ["--stdio"],
   },
   {
@@ -43,16 +59,28 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["json", "jsonc"],
     npmPackage: "vscode-langservers-extracted",
     description: "JSON language features (schema validation, completion).",
-    bin: "vscode-json-language-server",
+    pkg: "vscode-langservers-extracted",
+    entry: "bin/vscode-json-language-server",
     args: ["--stdio"],
   },
   {
     id: "html",
-    label: "HTML / CSS",
-    languages: ["html", "css", "scss", "less"],
+    label: "HTML",
+    languages: ["html"],
     npmPackage: "vscode-langservers-extracted",
-    description: "HTML & CSS language features.",
-    bin: "vscode-html-language-server",
+    description: "HTML language features (completion, hover, formatting).",
+    pkg: "vscode-langservers-extracted",
+    entry: "bin/vscode-html-language-server",
+    args: ["--stdio"],
+  },
+  {
+    id: "css",
+    label: "CSS / SCSS / LESS",
+    languages: ["css", "scss", "less"],
+    npmPackage: "vscode-langservers-extracted",
+    description: "CSS, SCSS & LESS language features.",
+    pkg: "vscode-langservers-extracted",
+    entry: "bin/vscode-css-language-server",
     args: ["--stdio"],
   },
   {
@@ -61,7 +89,8 @@ const REGISTRY: (LanguageServerDescriptor & {
     languages: ["shellscript"],
     npmPackage: "bash-language-server",
     description: "Shell script language server.",
-    bin: "bash-language-server",
+    pkg: "bash-language-server",
+    entry: "out/cli.js",
     args: ["start"],
   },
 ];
@@ -92,20 +121,74 @@ export function registerLspService(ctx: ServiceContext): () => void {
   const latestCache = new Map<string, string>();
 
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const binExt = process.platform === "win32" ? ".cmd" : "";
+
+  // G1: a packaged app launched from the GUI inherits no login-shell PATH, so
+  // bare `npm`/`node` are usually absent. Prepend the common install locations
+  // (and any bundled bin dir) so spawns resolve. This is strictly additive.
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string })
+    .resourcesPath;
+  function augmentedEnv(): NodeJS.ProcessEnv {
+    const sep = process.platform === "win32" ? ";" : ":";
+    const extra = [
+      "/usr/local/bin",
+      "/opt/homebrew/bin",
+      "/usr/bin",
+      "/bin",
+      resourcesPath ? path.join(resourcesPath, "bin") : "",
+    ].filter(Boolean);
+    const current = process.env.PATH ?? "";
+    return {
+      ...process.env,
+      PATH: [...extra, current].filter(Boolean).join(sep),
+    };
+  }
+  function isMissingBinaryError(e: unknown): boolean {
+    return (e as { code?: string } | null)?.code === "ENOENT";
+  }
+
+  // G1: prefer servers bundled under resources/language-servers (shipped with a
+  // release, no npm needed); fall back to the npm-managed userData dir.
+  const bundledDir = resourcesPath
+    ? path.join(resourcesPath, "language-servers")
+    : null;
+  const searchDirs = [bundledDir, managedDir].filter(Boolean) as string[];
 
   function descriptor(id: string) {
     return REGISTRY.find((s) => s.id === id);
   }
 
   async function installedVersion(pkg: string): Promise<string | null> {
-    try {
-      const pj = path.join(managedDir, "node_modules", pkg, "package.json");
-      const raw = await fs.readFile(pj, "utf8");
-      return JSON.parse(raw).version ?? null;
-    } catch {
-      return null;
+    for (const dir of searchDirs) {
+      try {
+        const pj = path.join(dir, "node_modules", pkg, "package.json");
+        const raw = await fs.readFile(pj, "utf8");
+        return (JSON.parse(raw).version as string) ?? null;
+      } catch {
+        /* try the next search dir */
+      }
     }
+    return null;
+  }
+
+  /** First on-disk path to a file under node_modules/ across the search dirs. */
+  async function resolveModuleFile(relPath: string): Promise<string | null> {
+    for (const dir of searchDirs) {
+      const p = path.join(dir, "node_modules", relPath);
+      try {
+        await fs.access(p);
+        return p;
+      } catch {
+        /* try the next search dir */
+      }
+    }
+    return null;
+  }
+
+  /** First on-disk path to a server's JS entry across the search dirs. */
+  function resolveEntry(
+    s: LanguageServerDescriptor & { pkg: string; entry: string },
+  ): Promise<string | null> {
+    return resolveModuleFile(path.join(s.pkg, s.entry));
   }
 
   function latestVersion(pkg: string): Promise<string | null> {
@@ -114,6 +197,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
       let out = "";
       const child = spawn(npmCmd, ["view", pkg, "version"], {
         cwd: managedDir,
+        env: augmentedEnv(),
       });
       child.stdout?.on("data", (d) => (out += d.toString()));
       child.on("error", () => resolve(null));
@@ -177,35 +261,58 @@ export function registerLspService(ctx: ServiceContext): () => void {
     if (!s?.npmPackage) return Promise.resolve();
     return ensureManagedDir().then(
       () =>
-        new Promise<void>((resolve) => {
+        new Promise<void>((resolve, reject) => {
           progress(id, "installing", `Installing ${s.npmPackage}…`);
+          // Co-install any runtime deps (e.g. `typescript` for the TS server,
+          // which bundles no tsserver) in the same atomic npm invocation.
+          const pkgs = [s.npmPackage!, ...(s.extraPackages ?? [])];
           const child = spawn(
             npmCmd,
             [
               "install",
-              `${s.npmPackage}@latest`,
+              ...pkgs.map((p) => `${p}@latest`),
               "--prefix",
               managedDir,
               "--no-audit",
               "--no-fund",
               "--no-save",
             ],
-            { cwd: managedDir },
+            { cwd: managedDir, env: augmentedEnv() },
           );
           let err = "";
+          let errored = false;
           child.stderr?.on("data", (d) => (err += d.toString()));
+          // Spawn failure (npm/node not on PATH) — must surface, not swallow.
           child.on("error", (e) => {
-            progress(id, "error", e.message);
-            resolve();
+            errored = true;
+            const msg = isMissingBinaryError(e)
+              ? "Node.js / npm not found. Install Node.js and ensure it is on PATH."
+              : e.message;
+            progress(id, "error", msg);
+            reject(new Error(msg));
           });
           child.on("close", async (code) => {
+            // After a spawn failure Node also fires `close` (code = the negative
+            // errno, e.g. -2 for ENOENT). The `error` handler already reported a
+            // clear message — don't clobber it with a bogus "exited with code -2".
+            if (errored) return;
             if (code === 0) {
               const v = await installedVersion(s.npmPackage!);
               progress(id, "installed", `Installed ${s.npmPackage}@${v}`);
+              resolve();
             } else {
-              progress(id, "error", err.split("\n").slice(-3).join("\n"));
+              // Non-zero exit means the package is NOT on disk — reject so
+              // ensureServer never proceeds to start() against a missing bin.
+              // A null/negative code is a launch failure (signal / could not
+              // run), not a real exit status, so report it as such.
+              const detail =
+                err.split("\n").filter(Boolean).slice(-3).join("\n").trim() ||
+                (code == null || code < 0
+                  ? "Could not run npm. Install Node.js and ensure it is on PATH."
+                  : `npm exited with code ${code}`);
+              progress(id, "error", detail);
+              reject(new Error(detail));
             }
-            resolve();
           });
         }),
     );
@@ -229,12 +336,23 @@ export function registerLspService(ctx: ServiceContext): () => void {
     if (!s) throw new Error(`Unknown language server: ${id}`);
     if (running.has(id)) return;
 
-    const binPath = path.join(managedDir, "node_modules", ".bin", s.bin + binExt);
+    // A2: verify the entry is actually on disk before spawning, so a
+    // failed/half install surfaces a clear error instead of a swallowed spawn.
+    const entry = await resolveEntry(s);
+    if (!entry) {
+      const msg = `${s.label} is not installed`;
+      progress(id, "error", msg);
+      throw new Error(msg);
+    }
     progress(id, "starting", `Starting ${s.label}…`);
 
-    const proc = spawn(binPath, s.args, {
+    // G1: run the server with Electron's own Node (ELECTRON_RUN_AS_NODE) instead
+    // of its `#!/usr/bin/env node` bin shim. A GUI-launched packaged app has no
+    // node/npm on PATH, so spawning the shim would fail with ENOENT (the
+    // "exited with code -2" symptom). process.execPath is always present.
+    const proc = spawn(process.execPath, [entry, ...s.args], {
       cwd: root,
-      env: process.env,
+      env: { ...augmentedEnv(), ELECTRON_RUN_AS_NODE: "1" },
     }) as ChildProcessWithoutNullStreams;
 
     proc.on("error", (e) => {
@@ -264,11 +382,22 @@ export function registerLspService(ctx: ServiceContext): () => void {
 
     running.set(id, { proc, connection, root });
 
+    // typescript-language-server has no tsserver of its own. Hand it our staged
+    // `typescript` as a fallback so TS/JS features work even when the opened
+    // workspace has no local copy (a workspace-local typescript still wins).
+    let initializationOptions: Record<string, unknown> | undefined;
+    if (s.tsserverFallback) {
+      const tsserverPath = await resolveModuleFile(s.tsserverFallback);
+      if (tsserverPath)
+        initializationOptions = { tsserver: { fallbackPath: tsserverPath } };
+    }
+
     const rootUri = pathToFileURL(root).toString();
     await connection.sendRequest("initialize", {
       processId: process.pid,
       rootUri,
       rootPath: root,
+      initializationOptions,
       capabilities: {
         textDocument: {
           synchronization: { dynamicRegistration: false },

@@ -15,6 +15,18 @@ export default defineConfig({
         "typescript",
       ],
     }),
+    // Packaged builds load the renderer from disk via file:// (see main.ts
+    // `loadFile`). With the default base of "/", the emitted index.html points
+    // at the entry as `/assets/main.<hash>.js`, which under file:// resolves to
+    // the filesystem ROOT and 404s — a black screen with net::ERR_FILE_NOT_FOUND.
+    // Use a relative base for `build` only, so every asset resolves next to
+    // index.html; dev keeps "/" so the dev server + worker middleware are unaffected.
+    {
+      name: "logos:relative-base-for-packaged-renderer",
+      config(_config, env) {
+        if (env.command === "build") return { base: "./" };
+      },
+    },
   ],
   resolve: {
     alias: {
@@ -29,7 +41,8 @@ export default defineConfig({
       // through cssPlugin (each .css -> injected <style>). editor.main.js
       // re-exports the full API + language contributions, so `import * as monaco
       // from "monaco-editor"` keeps working unchanged.
-      "monaco-editor": "node_modules/monaco-editor/esm/vs/editor/editor.main.js",
+      "monaco-editor":
+        "node_modules/monaco-editor/esm/vs/editor/editor.main.js",
     },
   },
   electron: {
@@ -48,10 +61,11 @@ export default defineConfig({
       "@anthropic-ai/claude-agent-sdk",
       "vscode-jsonrpc",
       "vscode-jsonrpc/node",
+      "electron-updater",
     ],
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    sourcemap: false,
   },
 });

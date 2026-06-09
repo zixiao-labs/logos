@@ -27,7 +27,8 @@ function lspLanguageId(monacoLang: string): string {
 }
 
 const startedServers = new Set<string>();
-const startAttempts = new Set<string>();
+/** Server id -> in-flight start promise (dedupes concurrent ensures). */
+const inflight = new Map<string, Promise<string | null>>();
 const openDocs = new Set<string>();
 
 function uriOf(path: string): string {
@@ -38,24 +39,40 @@ async function ensureServer(monacoLang: string): Promise<string | null> {
   const serverId = serverIdForLanguage(monacoLang);
   if (!serverId) return null;
   if (startedServers.has(serverId)) return serverId;
-  if (startAttempts.has(serverId)) return null; // in-flight or failed
-  startAttempts.add(serverId);
 
+  // A1: check the workspace root BEFORE recording any attempt. The first-run
+  // flow (app opens on Welcome, root === null, user opens a loose file) must
+  // not permanently disable this language — once a folder is opened, the next
+  // edit re-attempts. A null root is a no-op, not a poisoned state.
   const root = useStore.getState().root;
   if (!root) return null;
-  try {
+
+  // Dedupe concurrent starts. The promise is removed in `finally`, so a failed
+  // start (rejected install/spawn) self-heals: the next keystroke re-attempts.
+  const existing = inflight.get(serverId);
+  if (existing) return existing;
+
+  const attempt = (async (): Promise<string | null> => {
     const servers = await window.logos.lsp.list();
     const info = servers.find((s) => s.id === serverId);
     if (!info) return null;
     if (info.status === "not-installed") {
       if (!useStore.getState().settings["lsp.autoDownload"]) return null;
+      // A2: install() now rejects on failure, so we never fall through to
+      // start() against a missing binary.
       await window.logos.lsp.install(serverId);
     }
     await window.logos.lsp.start(serverId, root);
     startedServers.add(serverId);
     return serverId;
+  })();
+  inflight.set(serverId, attempt);
+  try {
+    return await attempt;
   } catch {
     return null;
+  } finally {
+    inflight.delete(serverId);
   }
 }
 
@@ -63,6 +80,7 @@ export function lspOpenDoc(path: string, monacoLang: string, content: string) {
   void (async () => {
     const serverId = await ensureServer(monacoLang);
     if (!serverId) return;
+    if (openDocs.has(path)) return; // already opened (e.g. by reopenModelsFor)
     openDocs.add(path);
     await window.logos.lsp.request(serverId, "textDocument/didOpen", {
       textDocument: {
@@ -82,7 +100,17 @@ export function lspChangeDoc(
   version: number,
 ) {
   const serverId = serverIdForLanguage(monacoLang);
-  if (!serverId || !startedServers.has(serverId) || !openDocs.has(path)) return;
+  if (!serverId) return;
+  // A1 self-heal: if the server is down (never started, or crashed and was
+  // dropped by the onProgress handler), (re)start it. reopenModelsFor on
+  // 'running' re-sends didOpen with the current text, after which edits flow.
+  if (!startedServers.has(serverId)) {
+    void ensureServer(monacoLang).then((id) => {
+      if (id) reopenModelsFor(id);
+    });
+    return;
+  }
+  if (!openDocs.has(path)) return;
   void window.logos.lsp.request(serverId, "textDocument/didChange", {
     textDocument: { uri: uriOf(path), version },
     contentChanges: [{ text: content }],
@@ -95,6 +123,53 @@ export function lspCloseDoc(path: string) {
   for (const serverId of startedServers) {
     void window.logos.lsp.request(serverId, "textDocument/didClose", {
       textDocument: { uri: uriOf(path) },
+    });
+  }
+}
+
+/** Notify the server that a document was saved (enables save-time linting). */
+export function lspSaveDoc(path: string, monacoLang: string, content: string) {
+  const serverId = serverIdForLanguage(monacoLang);
+  if (!serverId || !startedServers.has(serverId) || !openDocs.has(path)) return;
+  void window.logos.lsp.request(serverId, "textDocument/didSave", {
+    textDocument: { uri: uriOf(path) },
+    text: content,
+  });
+}
+
+/**
+ * Re-open every server-eligible model against a (re)started server. Used when
+ * the workspace root changes (null -> set): documents opened before a folder
+ * was chosen never reached `didOpen`, so we open them now.
+ */
+function reopenModelsFor(serverId: string) {
+  for (const model of monaco.editor.getModels()) {
+    const lang = model.getLanguageId();
+    if (serverIdForLanguage(lang) !== serverId) continue;
+    const path = model.uri.fsPath;
+    if (openDocs.has(path)) continue;
+    openDocs.add(path);
+    void window.logos.lsp.request(serverId, "textDocument/didOpen", {
+      textDocument: {
+        uri: model.uri.toString(),
+        languageId: lspLanguageId(lang),
+        version: 1,
+        text: model.getValue(),
+      },
+    });
+  }
+}
+
+/** Kick off servers for all currently-open server-eligible models. */
+function ensureServersForOpenModels() {
+  const seen = new Set<string>();
+  for (const model of monaco.editor.getModels()) {
+    const lang = model.getLanguageId();
+    const serverId = serverIdForLanguage(lang);
+    if (!serverId || seen.has(serverId)) continue;
+    seen.add(serverId);
+    void ensureServer(lang).then((id) => {
+      if (id) reopenModelsFor(id);
     });
   }
 }
@@ -151,15 +226,126 @@ function markupValue(contents: unknown): string {
   return "";
 }
 
+interface LspTextEdit {
+  range?: LspRange;
+  insert?: LspRange;
+  replace?: LspRange;
+  newText: string;
+}
+
+/** Map LSP additionalTextEdits to Monaco's edit shape. */
+function toMonacoEdits(
+  edits: LspTextEdit[] | undefined,
+): monaco.editor.ISingleEditOperation[] | undefined {
+  if (!Array.isArray(edits) || edits.length === 0) return undefined;
+  return edits
+    .filter((e) => e.range)
+    .map((e) => ({ range: toMonacoRange(e.range!), text: e.newText }));
+}
+
+/** Monaco CompletionTriggerKind (0/1/2) -> LSP CompletionTriggerKind (1/2/3). */
+function lspTriggerKind(kind: monaco.languages.CompletionTriggerKind): number {
+  return kind + 1;
+}
+
+/**
+ * Links a returned Monaco completion item back to its raw LSP item + server so
+ * `completionItem/resolve` can lazily fetch documentation. WeakMap keeps it
+ * tied to the item's lifetime without leaking.
+ */
+const resolveLinks = new WeakMap<
+  monaco.languages.CompletionItem,
+  { serverId: string; raw: Record<string, unknown> }
+>();
+
 let providersRegistered = false;
 
 export function setupLspMonaco() {
   if (providersRegistered) return;
   providersRegistered = true;
 
+  // Monaco bundles its own TS/JS language service (the `typescript` worker). It
+  // type-checks WITHOUT the workspace's node_modules or tsconfig, so it emits
+  // false "Cannot find module 'react'" (2792) errors and would duplicate the
+  // completions/hovers/definitions the providers below already forward to the
+  // real language server. This editor is LSP-first, so silence the built-in
+  // worker's diagnostics + the features the bridge owns. setModeConfiguration
+  // REPLACES (does not merge), so spread the current config to keep the
+  // syntactic fallbacks (outline, occurrence highlight, rename, signature help)
+  // on; colorization is a separate subsystem and is unaffected either way.
+  //
+  // NB: read the worker defaults from the top-level `monaco.typescript`/`.json`/
+  // `.css` namespaces. In monaco 0.55 the older `monaco.languages.*` accessors
+  // are deprecated stubs (typed `{ deprecated: true }`); the real defaults live
+  // at the top level.
+  const tsLangs = monaco.typescript;
+  if (tsLangs) {
+    for (const d of [tsLangs.typescriptDefaults, tsLangs.javascriptDefaults]) {
+      d.setModeConfiguration({
+        ...d.modeConfiguration,
+        diagnostics: false,
+        completionItems: false,
+        hovers: false,
+        definitions: false,
+      });
+      d.setDiagnosticsOptions({
+        ...d.getDiagnosticsOptions(),
+        noSemanticValidation: true,
+        noSyntaxValidation: true,
+        noSuggestionDiagnostics: true,
+      });
+    }
+  }
+
+  // Same LSP-first reasoning for the bundled JSON worker: it validates against
+  // its built-in schemas and reports comments (e.g. in tsconfig.json) as errors
+  // — false positives for an editor that defers to the json language server —
+  // and its completions/hovers duplicate the ones the bridge below forwards.
+  // `validate: false` silences the diagnostics; mode config drops the duplicate
+  // providers while keeping outline (documentSymbols), tokens, and colors.
+  const jsonLang = monaco.json;
+  if (jsonLang) {
+    jsonLang.jsonDefaults.setDiagnosticsOptions({
+      ...jsonLang.jsonDefaults.diagnosticsOptions,
+      validate: false,
+    });
+    jsonLang.jsonDefaults.setModeConfiguration({
+      ...jsonLang.jsonDefaults.modeConfiguration,
+      diagnostics: false,
+      completionItems: false,
+      hovers: false,
+    });
+  }
+
+  // ...and the CSS/SCSS/LESS workers: their linter flags vendor prefixes, unknown
+  // properties, and at-rules like Tailwind's `@apply`/`@tailwind` as errors on
+  // otherwise-valid stylesheets. Defer to the css language server: kill
+  // validation (`setOptions`) and the duplicate providers, keep color decorators
+  // and folding ranges (`colors`/`foldingRanges` left untouched).
+  const cssLang = monaco.css;
+  if (cssLang) {
+    for (const d of [
+      cssLang.cssDefaults,
+      cssLang.scssDefaults,
+      cssLang.lessDefaults,
+    ]) {
+      d.setOptions({ ...d.options, validate: false });
+      d.setModeConfiguration({
+        ...d.modeConfiguration,
+        diagnostics: false,
+        completionItems: false,
+        hovers: false,
+        definitions: false,
+        references: false,
+        documentHighlights: false,
+        rename: false,
+      });
+    }
+  }
+
   monaco.languages.registerCompletionItemProvider(MONACO_LANGS, {
     triggerCharacters: [".", '"', "'", "/", "@", "<", ":", " "],
-    async provideCompletionItems(model, position) {
+    async provideCompletionItems(model, position, context) {
       const lang = model.getLanguageId();
       const serverId = serverIdForLanguage(lang);
       if (!serverId || !startedServers.has(serverId)) return { suggestions: [] };
@@ -167,33 +353,77 @@ export function setupLspMonaco() {
         .request(serverId, "textDocument/completion", {
           textDocument: { uri: model.uri.toString() },
           position: lspPos(position),
+          // C2: forward the trigger context so servers distinguish `.`-style
+          // member completion from a plain invocation.
+          context: {
+            triggerKind: lspTriggerKind(context.triggerKind),
+            triggerCharacter: context.triggerCharacter,
+          },
         })
         .catch(() => null)) as
-        | { items?: unknown[] }
+        | { items?: unknown[]; isIncomplete?: boolean }
         | unknown[]
         | null;
       const items = Array.isArray(res) ? res : (res?.items ?? []);
+      // C2: preserve isIncomplete so Monaco re-queries while the user types
+      // instead of filtering a stale first page.
+      const incomplete = !Array.isArray(res) && Boolean(res?.isIncomplete);
       const word = model.getWordUntilPosition(position);
-      const range: monaco.IRange = {
+      const defaultRange: monaco.IRange = {
         startLineNumber: position.lineNumber,
         endLineNumber: position.lineNumber,
         startColumn: word.startColumn,
         endColumn: word.endColumn,
       };
-      const suggestions = (items as Array<Record<string, unknown>>).map(
-        (it): monaco.languages.CompletionItem => ({
+      const suggestions = (items as Array<Record<string, unknown>>).map((it) => {
+        const textEdit = it.textEdit as LspTextEdit | undefined;
+        const editRange = textEdit
+          ? (textEdit.range ?? textEdit.replace ?? textEdit.insert)
+          : undefined;
+        const isSnippet = (it.insertTextFormat as number | undefined) === 2;
+        const item: monaco.languages.CompletionItem = {
           label: String(it.label ?? ""),
           kind: COMPLETION_KIND[(it.kind as number) ?? 1] ?? 0,
-          insertText: String(it.insertText ?? it.label ?? ""),
+          // F1: honor the server's textEdit/snippet instead of dumping the
+          // label verbatim.
+          insertText: String(textEdit?.newText ?? it.insertText ?? it.label ?? ""),
           detail: it.detail as string | undefined,
           documentation: it.documentation
             ? { value: markupValue(it.documentation) }
             : undefined,
-          range,
+          range: editRange ? toMonacoRange(editRange) : defaultRange,
           sortText: it.sortText as string | undefined,
-        }),
+          filterText: it.filterText as string | undefined,
+          commitCharacters: it.commitCharacters as string[] | undefined,
+          preselect: it.preselect as boolean | undefined,
+          additionalTextEdits: toMonacoEdits(
+            it.additionalTextEdits as LspTextEdit[] | undefined,
+          ),
+          insertTextRules: isSnippet
+            ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+            : undefined,
+        };
+        // Link for lazy completionItem/resolve, only when docs were omitted.
+        if (!item.documentation) resolveLinks.set(item, { serverId, raw: it });
+        return item;
+      });
+      return { suggestions, incomplete };
+    },
+    async resolveCompletionItem(item) {
+      const link = resolveLinks.get(item);
+      if (!link) return item;
+      const resolved = (await window.logos.lsp
+        .request(link.serverId, "completionItem/resolve", link.raw)
+        .catch(() => null)) as Record<string, unknown> | null;
+      if (!resolved) return item;
+      if (resolved.detail) item.detail = String(resolved.detail);
+      if (resolved.documentation)
+        item.documentation = { value: markupValue(resolved.documentation) };
+      const extra = toMonacoEdits(
+        resolved.additionalTextEdits as LspTextEdit[] | undefined,
       );
-      return { suggestions };
+      if (extra) item.additionalTextEdits = extra;
+      return item;
     },
   });
 
@@ -284,6 +514,34 @@ export function setupLspMonaco() {
       source: d.source,
     }));
     useStore.getState().setDiagnostics(uri.fsPath, diags);
+  });
+
+  // A1 self-heal + C2 readiness surfacing. (The store `lsp` slice is written by
+  // a separate subscriber in `bootstrap()`; this one owns Monaco-side state.)
+  window.logos.lsp.onProgress((p) => {
+    if (p.status === "stopped" || p.status === "error") {
+      // Drop the crashed/failed server and forget the docs opened against it so
+      // the next edit re-attempts and reopenModelsFor re-sends didOpen.
+      startedServers.delete(p.id);
+      for (const model of monaco.editor.getModels()) {
+        if (serverIdForLanguage(model.getLanguageId()) === p.id)
+          openDocs.delete(model.uri.fsPath);
+      }
+    } else if (p.status === "running") {
+      startedServers.add(p.id);
+      reopenModelsFor(p.id);
+      // C2: a cold server just came up — re-trigger suggest on the focused
+      // editor so members appear without deleting/retyping.
+      window.dispatchEvent(
+        new CustomEvent("logos:lsp-ready", { detail: { serverId: p.id } }),
+      );
+    }
+  });
+
+  // A1: when a folder is opened (root null -> set), re-attempt servers for any
+  // documents that were opened on the Welcome screen before a root existed.
+  useStore.subscribe((state, prev) => {
+    if (state.root !== prev.root && state.root) ensureServersForOpenModels();
   });
 }
 

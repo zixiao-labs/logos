@@ -7,6 +7,19 @@
   box-sizing: border-box;
 }
 
+/* Monaco embed guard (E1). The global `* { box-sizing: border-box }` above and
+   the `body` line-height below cascade into Monaco's internally-rendered DOM
+   (suggest widget, hover, parameter hints, find), where single-row item heights
+   are hard-clamped to itemHeight — the border-box + inherited line-height
+   vertically clip the row. Reset both within the editor only. */
+.monaco-editor,
+.monaco-editor *,
+.monaco-editor *::before,
+.monaco-editor *::after {
+  box-sizing: content-box;
+  line-height: normal;
+}
+
 :root {
   --titlebar-h: 36px;
   --statusbar-h: 24px;
@@ -721,6 +734,82 @@ textarea.field {
   gap: 6px;
   color: var(--muted);
   font-size: 11px;
+}
+
+/* D1–D3: compact model / effort / thinking / permission controls. */
+.agent-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1;
+}
+.agent-mini {
+  height: 22px;
+  max-width: 116px;
+  padding: 0 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-secondary);
+  color: var(--muted);
+  font-size: 11px;
+}
+.agent-mini:hover {
+  color: var(--foreground);
+}
+
+/* @-mention + /-command popover menus above the textarea. */
+.agent-menu {
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.search-result.slash {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.search-result.slash .cmd {
+  font-family: var(--mono-font);
+  color: var(--foreground);
+}
+.search-result.slash .hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+.search-result.slash .desc {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
+
+.agent-error-action {
+  margin-top: 8px;
+}
+
+/* Status-bar agent run indicator (F3). */
+.statusbar .si.lsp-danger {
+  color: #ffd7d7;
+}
+.statusbar .si.lsp-danger:hover {
+  background: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+@keyframes logos-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin {
+  animation: logos-spin 1.1s linear infinite;
+  transform-origin: center;
 }
 .send-btn {
   display: inline-flex;
