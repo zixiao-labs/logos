@@ -407,25 +407,31 @@ export function registerAgentService(ctx: ServiceContext): () => void {
 
   // D1/D4: probe the SDK for the model + slash-command lists. Control requests
   // require streaming mode, so we spin a short-lived streaming query, read the
-  // lists from the init handshake, then tear it down. Cached after the first
-  // success (subprocess cost paid once); failures (e.g. no auth) are not cached
-  // so a later call after credentials are set can retry.
-  let infoCache: {
-    models: AgentModelInfo[];
-    commands: AgentSlashCommand[];
-  } | null = null;
-  let infoInflight: Promise<{
-    models: AgentModelInfo[];
-    commands: AgentSlashCommand[];
-  }> | null = null;
+  // lists from the init handshake, then tear it down. The result depends on the
+  // supplied credentials/cwd, so cache it per credential fingerprint — a single
+  // global cache would hand back the first account's models after creds change.
+  // Failures (e.g. no auth) are not cached so a later call can retry.
+  type AgentInfo = { models: AgentModelInfo[]; commands: AgentSlashCommand[] };
+  const infoCache = new Map<string, AgentInfo>();
+  const infoInflight = new Map<string, Promise<AgentInfo>>();
 
-  async function probeInfo(ctx: AgentAuthContext): Promise<{
-    models: AgentModelInfo[];
-    commands: AgentSlashCommand[];
-  }> {
-    if (infoCache) return infoCache;
-    if (infoInflight) return infoInflight;
-    infoInflight = (async () => {
+  // Fingerprint the fields that change what the probe returns: endpoint +
+  // credentials, plus cwd (project-scoped slash commands depend on it).
+  const probeKey = (ctx: AgentAuthContext): string =>
+    JSON.stringify([
+      ctx.baseUrl ?? "",
+      ctx.apiKey ?? "",
+      ctx.authToken ?? "",
+      ctx.cwd ?? "",
+    ]);
+
+  async function probeInfo(ctx: AgentAuthContext): Promise<AgentInfo> {
+    const key = probeKey(ctx);
+    const cached = infoCache.get(key);
+    if (cached) return cached;
+    const inflight = infoInflight.get(key);
+    if (inflight) return inflight;
+    const promise = (async () => {
       const sdk = await importEsm("@anthropic-ai/claude-agent-sdk");
       const input = new InputQueue();
       const env = authEnv(ctx);
@@ -483,7 +489,8 @@ export function registerAgentService(ctx: ServiceContext): () => void {
             }),
           ),
         };
-        if (result.models.length || result.commands.length) infoCache = result;
+        if (result.models.length || result.commands.length)
+          infoCache.set(key, result);
         return result;
       } finally {
         input.close();
@@ -494,10 +501,11 @@ export function registerAgentService(ctx: ServiceContext): () => void {
         }
       }
     })();
+    infoInflight.set(key, promise);
     try {
-      return await infoInflight;
+      return await promise;
     } finally {
-      infoInflight = null;
+      infoInflight.delete(key);
     }
   }
 
