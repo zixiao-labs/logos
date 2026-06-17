@@ -15,6 +15,7 @@ import type {
   GitStatus,
   LanguageServerInfo,
   LspProgress,
+  MenuAction,
   Settings,
   TerminalCreateOptions,
   TerminalCreated,
@@ -60,14 +61,23 @@ export interface LogosAPI {
     unstage(root: string, paths: string[]): Promise<void>;
     discard(root: string, paths: string[]): Promise<void>;
     commit(root: string, message: string): Promise<void>;
+    /** Amend HEAD; an empty message reuses the previous commit message. */
+    commitAmend(root: string, message: string): Promise<void>;
+    /** The current HEAD commit, or null for an empty / non-repo. */
+    head(root: string): Promise<GitLogEntry | null>;
+    /** Soft-reset HEAD~1: undo the last commit, keeping changes staged. */
+    undoLastCommit(root: string): Promise<void>;
     branches(root: string): Promise<GitBranch[]>;
     checkout(root: string, branch: string): Promise<void>;
     createBranch(root: string, name: string): Promise<void>;
     diff(root: string, path: string, staged: boolean): Promise<string>;
     log(root: string, limit?: number): Promise<GitLogEntry[]>;
     init(root: string): Promise<void>;
+    fetch(root: string): Promise<string>;
     pull(root: string): Promise<string>;
     push(root: string): Promise<string>;
+    /** Pull (rebase) then push. */
+    sync(root: string): Promise<string>;
   };
   terminal: {
     create(opts: TerminalCreateOptions): Promise<TerminalCreated>;
@@ -114,6 +124,8 @@ export interface LogosAPI {
     platform(): Promise<NodeJS.Platform>;
     windowControl(action: WindowControl): void;
     onWindowState(cb: (s: { maximized: boolean }) => void): Unsubscribe;
+    /** Native-menu actions dispatched from the main process. */
+    onMenuAction(cb: (action: MenuAction) => void): Unsubscribe;
   };
 }
 

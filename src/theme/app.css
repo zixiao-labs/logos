@@ -540,6 +540,15 @@ textarea.field {
   position: absolute;
   inset: 0;
   padding: 6px 8px;
+  /* Opaque background so the few sub-pixel rows that don't divide evenly into the
+     panel height blend with the terminal instead of letting the app show through. */
+  background: #121215;
+  overflow: hidden;
+}
+.terminal-host {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 
 /* ---- status bar ---------------------------------------------------------- */

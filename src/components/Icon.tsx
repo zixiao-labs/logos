@@ -42,6 +42,8 @@ export type IconName =
   | "win-close"
   | "branch"
   | "discard"
+  | "download"
+  | "upload"
   | "translate"
   | "chevron-updown";
 
@@ -94,6 +96,8 @@ const PATHS: Record<IconName, string> = {
   "win-close": "M18 6L6 18M6 6l12 12",
   branch: "M6 3v12M18 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a9 9 0 0 0 9-9",
   discard: "M3 12a9 9 0 1 0 9-9 9 9 0 0 0-7 3.3M3 4v3.3h3.3",
+  download: "M12 3v12M7 10l5 5 5-5M5 21h14",
+  upload: "M12 21V9M7 14l5-5 5 5M5 3h14",
   translate: "M5 8h8M9 4v4m1.5 0s-1 6-6.5 9M7 12c1.5 3 4 4 4 4M14 20l4-9 4 9M15.5 17h5",
 };
 

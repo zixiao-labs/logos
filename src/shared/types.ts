@@ -340,3 +340,32 @@ export interface AppVersions {
 }
 
 export type WindowControl = "minimize" | "maximize" | "unmaximize" | "close";
+
+/**
+ * Actions dispatched from the native application menu (built in the main process)
+ * to the renderer over CH.menuAction. The renderer routes each to a store action
+ * or a window CustomEvent. Role-based menu items (undo/copy/zoom/quit/…) are
+ * handled natively by Electron and never travel over this channel.
+ */
+export type MenuAction =
+  | "file.new"
+  | "file.openFolder"
+  | "file.openFile"
+  | "file.save"
+  | "file.closeEditor"
+  | "view.commandPalette"
+  | "view.toggleSidebar"
+  | "view.togglePanel"
+  | "view.explorer"
+  | "view.search"
+  | "view.git"
+  | "view.agent"
+  | "git.commit"
+  | "git.pull"
+  | "git.push"
+  | "git.sync"
+  | "git.fetch"
+  | "git.refresh"
+  | "terminal.new"
+  | "settings.open"
+  | "help.about";

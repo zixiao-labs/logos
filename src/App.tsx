@@ -1,5 +1,8 @@
 import { useEffect } from "react";
+import { Toast } from "@heroui/react";
 import { useStore } from "./state/store";
+import { notifyInfo } from "./lib/toast";
+import type { MenuAction } from "./shared/types";
 import { setupLspMonaco } from "./lib/lsp-monaco";
 import { TitleBar } from "./components/TitleBar";
 import { StatusBar } from "./components/StatusBar";
@@ -67,6 +70,93 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Route native-menu actions (dispatched from the main process) to the store.
+  // Role items (undo/copy/zoom/quit) never arrive here — Electron handles them.
+  useEffect(() => {
+    const off = window.logos.app.onMenuAction((action: MenuAction) => {
+      const s = useStore.getState();
+      switch (action) {
+        case "file.new":
+          void window.logos.dialog.saveFile(s.root ?? undefined).then(async (p) => {
+            if (!p) return;
+            await window.logos.fs.createFile(p, "");
+            s.openFile(p);
+          });
+          break;
+        case "file.openFolder":
+          void s.openFolder();
+          break;
+        case "file.openFile":
+          void window.logos.dialog.openFile().then((p) => {
+            if (p) s.openFile(p);
+          });
+          break;
+        case "file.save":
+          window.dispatchEvent(new CustomEvent("logos:save"));
+          break;
+        case "file.closeEditor":
+          if (s.activeTabId) s.closeTab(s.activeTabId);
+          break;
+        case "view.commandPalette":
+          s.paletteOpen ? s.closePalette() : s.openPalette();
+          break;
+        case "view.toggleSidebar":
+          s.toggleSidebar();
+          break;
+        case "view.togglePanel":
+          s.togglePanel();
+          break;
+        case "view.explorer":
+          s.setSidebarView("explorer");
+          break;
+        case "view.search":
+          s.setSidebarView("search");
+          break;
+        case "view.git":
+          s.setSidebarView("git");
+          break;
+        case "view.agent":
+          s.setSidebarView("agent");
+          break;
+        case "git.commit":
+          // Surface the SCM view, then ask the panel to commit its current message.
+          s.setSidebarView("git");
+          window.dispatchEvent(new CustomEvent("logos:menu:git-commit"));
+          break;
+        case "git.fetch":
+          void s.gitFetch();
+          break;
+        case "git.pull":
+          void s.gitPull();
+          break;
+        case "git.push":
+          void s.gitPush();
+          break;
+        case "git.sync":
+          void s.gitSync();
+          break;
+        case "git.refresh":
+          void s.refreshGit();
+          break;
+        case "terminal.new":
+          void s.newTerminal();
+          break;
+        case "settings.open":
+          s.openSpecial("settings");
+          break;
+        case "help.about":
+          void window.logos.app.versions().then((v) =>
+            notifyInfo(
+              `Logos ${v.logos}`,
+              `Electron ${v.electron} · Node ${v.node} · Chrome ${v.chrome}`,
+            ),
+          );
+          break;
+      }
+    });
+    return off;
+  }, []);
+
   if (!ready) {
     return (
       <div
@@ -85,6 +175,7 @@ export function App() {
       {layout === "cursor" ? <CursorLayout /> : <VSCodeLayout />}
       <StatusBar />
       <CommandPalette />
+      <Toast.Provider placement="bottom end" />
     </div>
   );
 }

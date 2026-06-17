@@ -8,6 +8,7 @@ import type {
   AgentSlashCommand,
   AgentThinkingConfig,
   GitStatus,
+  GitLogEntry,
   LanguageCode,
   LayoutMode,
   LspProgress,
@@ -15,6 +16,7 @@ import type {
   ThemeMode,
 } from "../shared/types";
 import { basename, languageFromPath } from "../lib/language";
+import { notifyResult } from "../lib/toast";
 
 // ---------------------------------------------------------------------------
 // Models
@@ -110,6 +112,8 @@ interface LogosState {
   activeTerminalId: string | null;
 
   git: GitStatus | null;
+  /** The current HEAD commit, shown at the top of the Source Control panel. */
+  gitHead: GitLogEntry | null;
   diagnostics: Record<string, Diagnostic[]>;
   /** Language-server status keyed by server id (C1: surfaced in the status bar). */
   lsp: Record<string, LspProgress>;
@@ -158,6 +162,11 @@ interface LogosState {
   setActiveTerminal(id: string): void;
 
   refreshGit(): Promise<void>;
+  /** Git remote actions shared by the SCM panel and the native menu. */
+  gitFetch(): Promise<void>;
+  gitPull(): Promise<void>;
+  gitPush(): Promise<void>;
+  gitSync(): Promise<void>;
   setDiagnostics(path: string, diags: Diagnostic[]): void;
   setLspProgress(p: LspProgress): void;
   loadAgentModels(): Promise<void>;
@@ -295,6 +304,7 @@ export const useStore = create<LogosState>((set, get) => ({
   activeTerminalId: null,
 
   git: null,
+  gitHead: null,
   diagnostics: {},
   lsp: {},
 
@@ -518,15 +528,42 @@ export const useStore = create<LogosState>((set, get) => ({
   async refreshGit() {
     const root = get().root;
     if (!root) {
-      set({ git: null });
+      set({ git: null, gitHead: null });
       return;
     }
     try {
-      const git = await window.logos.git.status(root);
-      set({ git });
+      const [git, gitHead] = await Promise.all([
+        window.logos.git.status(root),
+        window.logos.git.head(root).catch(() => null),
+      ]);
+      set({ git, gitHead });
     } catch {
-      set({ git: null });
+      set({ git: null, gitHead: null });
     }
+  },
+  async gitFetch() {
+    const root = get().root;
+    if (!root) return;
+    notifyResult(await window.logos.git.fetch(root), "Fetched");
+    await get().refreshGit();
+  },
+  async gitPull() {
+    const root = get().root;
+    if (!root) return;
+    notifyResult(await window.logos.git.pull(root), "Pulled");
+    await get().refreshGit();
+  },
+  async gitPush() {
+    const root = get().root;
+    if (!root) return;
+    notifyResult(await window.logos.git.push(root), "Pushed");
+    await get().refreshGit();
+  },
+  async gitSync() {
+    const root = get().root;
+    if (!root) return;
+    notifyResult(await window.logos.git.sync(root), "Synced");
+    await get().refreshGit();
   },
   setDiagnostics(path, diags) {
     set((s) => ({ diagnostics: { ...s.diagnostics, [path]: diags } }));
