@@ -191,8 +191,15 @@ export function registerGitService(ctx: ServiceContext): () => void {
       // upstream to origin) the way GitLens' "Publish Branch" does, then report.
       try {
         const branch = (await g.branchLocal()).current;
-        await g.push(["--set-upstream", "origin", branch]);
-        return `Published ${branch}`;
+        // Prefer "origin", but fall back to whatever remote the repo actually
+        // has — a fresh branch with no upstream may live under a differently
+        // named remote, and hardcoding "origin" would fail those repos.
+        const remotes = await g.getRemotes();
+        const remote =
+          remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name;
+        if (!remote) return "Push failed: no remote configured";
+        await g.push(["--set-upstream", remote, branch]);
+        return `Published ${branch} to ${remote}`;
       } catch {
         return `Push failed: ${(err as Error).message}`;
       }

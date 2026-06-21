@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { sep } from "node:path";
 import { CH } from "../../shared/channels";
@@ -416,12 +417,16 @@ export function registerAgentService(ctx: ServiceContext): () => void {
   const infoInflight = new Map<string, Promise<AgentInfo>>();
 
   // Fingerprint the fields that change what the probe returns: endpoint +
-  // credentials, plus cwd (project-scoped slash commands depend on it).
+  // credentials, plus cwd (project-scoped slash commands depend on it). Secrets
+  // are hashed, not stored verbatim, so the key can't leak credentials into a
+  // heap snapshot or crash dump while still distinguishing auth contexts.
+  const digest = (v?: string): string =>
+    v ? createHash("sha256").update(v).digest("hex") : "";
   const probeKey = (ctx: AgentAuthContext): string =>
     JSON.stringify([
       ctx.baseUrl ?? "",
-      ctx.apiKey ?? "",
-      ctx.authToken ?? "",
+      digest(ctx.apiKey),
+      digest(ctx.authToken),
       ctx.cwd ?? "",
     ]);
 

@@ -118,7 +118,7 @@ modules in Logos.
 
 ## Architecture (sketch)
 
-```
+```text
         ┌─────────────────────────── Rust crate (collab-core) ────────────────────────────┐
         │  rope / range-tree document  ·  RLE op-log  ·  Lamport clock  ·  encode/decode    │
         └───────────────────────────────────────────────────────────────────────────────────┘

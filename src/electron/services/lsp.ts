@@ -347,6 +347,10 @@ export function registerLspService(ctx: ServiceContext): () => void {
     }
     progress(id, "starting", `Starting ${s.label}…`);
 
+    // Set when initialize fails below: killing the process there fires the exit
+    // handler, which would otherwise clobber the "error" state with "stopped".
+    let initFailed = false;
+
     // G1: run the server with Electron's own Node (ELECTRON_RUN_AS_NODE) instead
     // of its `#!/usr/bin/env node` bin shim. A GUI-launched packaged app has no
     // node/npm on PATH, so spawning the shim would fail with ENOENT (the
@@ -362,7 +366,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
     });
     proc.on("exit", () => {
       running.delete(id);
-      progress(id, "stopped");
+      if (!initFailed) progress(id, "stopped");
     });
 
     const connection = rpc.createMessageConnection(
@@ -424,6 +428,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
       // initialize rejected (or a later step threw): tear down the half-started
       // instance and drop it from `running`, otherwise the guard at the top of
       // start() would block every later attempt to launch this server.
+      initFailed = true;
       running.delete(id);
       try {
         connection.dispose();

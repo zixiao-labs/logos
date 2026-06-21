@@ -92,15 +92,23 @@ export function TerminalView({ id, active }: { id: string; active: boolean }) {
     const term = termRef.current;
     if (!term) return;
     term.options.fontSize = fontSize;
-    requestAnimationFrame(() => requestAnimationFrame(refit));
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(refit);
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize]);
 
   useEffect(() => {
     if (!active) return;
-    requestAnimationFrame(() => {
+    const raf = requestAnimationFrame(() => {
       if (refit()) termRef.current?.focus();
     });
+    return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, id]);
 

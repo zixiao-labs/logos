@@ -33,7 +33,13 @@ export function GitPanel() {
     message.trim().length > 0 && (staged.length > 0 || unstaged.length > 0);
 
   async function commit(push = false) {
-    if (!canCommit || !root) return;
+    if (!root) return;
+    // Paths that bypass the disabled buttons (header icon, ⌘Enter, native menu)
+    // can reach here with nothing to commit — give feedback instead of no-op'ing.
+    if (!canCommit) {
+      notify(t("git.nothingToCommit"));
+      return;
+    }
     try {
       if (staged.length === 0 && unstaged.length > 0) {
         await window.logos.git.stage(
