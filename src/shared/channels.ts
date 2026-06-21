@@ -35,14 +35,19 @@ export const CH = {
   gitUnstage: "git:unstage",
   gitDiscard: "git:discard",
   gitCommit: "git:commit",
+  gitCommitAmend: "git:commitAmend",
+  gitHead: "git:head",
+  gitUndoLastCommit: "git:undoLastCommit",
   gitBranches: "git:branches",
   gitCheckout: "git:checkout",
   gitCreateBranch: "git:createBranch",
   gitDiff: "git:diff",
   gitLog: "git:log",
   gitInit: "git:init",
+  gitFetch: "git:fetch",
   gitPull: "git:pull",
   gitPush: "git:push",
+  gitSync: "git:sync",
 
   // terminal
   terminalCreate: "terminal:create",
@@ -83,6 +88,7 @@ export const CH = {
   appPlatform: "app:platform",
   windowControl: "window:control",
   windowStateChanged: "window:stateChanged", // push
+  menuAction: "app:menuAction", // push (native menu -> renderer)
 } as const;
 
 export type ChannelName = (typeof CH)[keyof typeof CH];

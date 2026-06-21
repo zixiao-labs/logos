@@ -91,8 +91,9 @@
 }
 
 .xterm .xterm-viewport {
-    /* On OS X this is required in order for the scroll bar to appear fully opaque */
-    background-color: #000;
+    /* Match the terminal theme background (set on .terminal-view) instead of pure
+       black so the scrollbar gutter doesn't show a black seam at large sizes. */
+    background-color: #121215;
     overflow-y: scroll;
     cursor: default;
     position: absolute;

@@ -7,6 +7,7 @@ import { registerAgentService } from "./services/agent";
 import { registerFsService } from "./services/fs";
 import { registerGitService } from "./services/git";
 import { registerLspService } from "./services/lsp";
+import { registerMenu } from "./services/menu";
 import { registerSettingsService } from "./services/settings";
 import { registerTerminalService } from "./services/terminal";
 import { registerWorkspaceService } from "./services/workspace";
@@ -103,6 +104,7 @@ app.whenReady().then(() => {
     registerWorkspaceService(ctx),
     registerAgentService(ctx),
     registerLspService(ctx),
+    registerMenu(ctx),
   );
   void createWindow();
 

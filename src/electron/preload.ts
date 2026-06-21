@@ -8,6 +8,7 @@ import type {
   AgentStartRequest,
   FsWatchEvent,
   LspProgress,
+  MenuAction,
   Settings,
   TerminalCreateOptions,
   WindowControl,
@@ -52,6 +53,10 @@ const api: LogosAPI = {
     unstage: (root, paths) => ipcRenderer.invoke(CH.gitUnstage, root, paths),
     discard: (root, paths) => ipcRenderer.invoke(CH.gitDiscard, root, paths),
     commit: (root, message) => ipcRenderer.invoke(CH.gitCommit, root, message),
+    commitAmend: (root, message) =>
+      ipcRenderer.invoke(CH.gitCommitAmend, root, message),
+    head: (root) => ipcRenderer.invoke(CH.gitHead, root),
+    undoLastCommit: (root) => ipcRenderer.invoke(CH.gitUndoLastCommit, root),
     branches: (root) => ipcRenderer.invoke(CH.gitBranches, root),
     checkout: (root, branch) => ipcRenderer.invoke(CH.gitCheckout, root, branch),
     createBranch: (root, name) =>
@@ -59,8 +64,10 @@ const api: LogosAPI = {
     diff: (root, p, staged) => ipcRenderer.invoke(CH.gitDiff, root, p, staged),
     log: (root, limit) => ipcRenderer.invoke(CH.gitLog, root, limit),
     init: (root) => ipcRenderer.invoke(CH.gitInit, root),
+    fetch: (root) => ipcRenderer.invoke(CH.gitFetch, root),
     pull: (root) => ipcRenderer.invoke(CH.gitPull, root),
     push: (root) => ipcRenderer.invoke(CH.gitPush, root),
+    sync: (root) => ipcRenderer.invoke(CH.gitSync, root),
   },
   terminal: {
     create: (opts: TerminalCreateOptions) =>
@@ -119,6 +126,7 @@ const api: LogosAPI = {
     windowControl: (action: WindowControl) =>
       ipcRenderer.send(CH.windowControl, action),
     onWindowState: (cb) => on<{ maximized: boolean }>(CH.windowStateChanged, cb),
+    onMenuAction: (cb) => on<MenuAction>(CH.menuAction, cb),
   },
 };
 

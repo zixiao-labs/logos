@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import { basename, dirname } from "../lib/language";
+import { notify, notifyError, notifySuccess } from "../lib/toast";
 import type { GitFileChange } from "../shared/types";
 import { Icon } from "./Icon";
 
@@ -9,7 +10,12 @@ export function GitPanel() {
   const t = useT();
   const root = useStore((s) => s.root);
   const git = useStore((s) => s.git);
+  const gitHead = useStore((s) => s.gitHead);
   const refreshGit = useStore((s) => s.refreshGit);
+  const gitFetch = useStore((s) => s.gitFetch);
+  const gitPull = useStore((s) => s.gitPull);
+  const gitPush = useStore((s) => s.gitPush);
+  const gitSync = useStore((s) => s.gitSync);
   const openFile = useStore((s) => s.openFile);
   const [message, setMessage] = useState("");
 
@@ -17,6 +23,72 @@ export function GitPanel() {
     await fn();
     await refreshGit();
   }
+
+  const staged = git?.changes.filter((c) => c.staged) ?? [];
+  const unstaged = git?.changes.filter((c) => !c.staged) ?? [];
+
+  // F4: commit must not silently no-op. Disable when there's nothing to commit,
+  // and stage-all-then-commit when changes exist but nothing is staged yet.
+  const canCommit =
+    message.trim().length > 0 && (staged.length > 0 || unstaged.length > 0);
+
+  async function commit(push = false) {
+    if (!root) return;
+    // Paths that bypass the disabled buttons (header icon, ⌘Enter, native menu)
+    // can reach here with nothing to commit — give feedback instead of no-op'ing.
+    if (!canCommit) {
+      notify(t("git.nothingToCommit"));
+      return;
+    }
+    try {
+      if (staged.length === 0 && unstaged.length > 0) {
+        await window.logos.git.stage(
+          root,
+          unstaged.map((c) => c.path),
+        );
+      }
+      await window.logos.git.commit(root, message);
+      setMessage("");
+      notifySuccess(t("git.committed"));
+      await refreshGit();
+      if (push) await gitPush(); // store action toasts the push result
+    } catch (e) {
+      notifyError(t("git.commitFailed"), (e as Error).message);
+    }
+  }
+
+  async function amend() {
+    if (!root || !gitHead) return;
+    try {
+      await window.logos.git.commitAmend(root, message.trim());
+      setMessage("");
+      notifySuccess(t("git.amended"));
+      await refreshGit();
+    } catch (e) {
+      notifyError(t("git.commitFailed"), (e as Error).message);
+    }
+  }
+
+  async function undoLast() {
+    if (!root || !gitHead) return;
+    try {
+      await window.logos.git.undoLastCommit(root);
+      notify(t("git.undone"));
+      await refreshGit();
+    } catch (e) {
+      notifyError(t("git.commitFailed"), (e as Error).message);
+    }
+  }
+
+  // Native menu "Git → Commit" dispatches this event; commit the current message.
+  // A ref keeps the listener stable while still committing with the latest state.
+  const commitRef = useRef<() => void>(() => {});
+  commitRef.current = () => void commit();
+  useEffect(() => {
+    const h = () => commitRef.current();
+    window.addEventListener("logos:menu:git-commit", h);
+    return () => window.removeEventListener("logos:menu:git-commit", h);
+  }, []);
 
   if (!root) {
     return (
@@ -42,26 +114,6 @@ export function GitPanel() {
         </div>
       </div>
     );
-  }
-
-  const staged = git?.changes.filter((c) => c.staged) ?? [];
-  const unstaged = git?.changes.filter((c) => !c.staged) ?? [];
-
-  // F4: commit must not silently no-op. Disable when there's nothing to commit,
-  // and stage-all-then-commit when changes exist but nothing is staged yet.
-  const canCommit = message.trim().length > 0 && (staged.length > 0 || unstaged.length > 0);
-  async function commit() {
-    if (!canCommit || !root) return;
-    await run(async () => {
-      if (staged.length === 0 && unstaged.length > 0) {
-        await window.logos.git.stage(
-          root,
-          unstaged.map((c) => c.path),
-        );
-      }
-      await window.logos.git.commit(root, message);
-      setMessage("");
-    });
   }
 
   const FileRow = ({
@@ -121,14 +173,55 @@ export function GitPanel() {
           >
             <Icon name="check" />
           </button>
-          <button className="icon-btn" title={t("git.pull")} onClick={() => void run(() => window.logos.git.pull(root))}>
+          <button className="icon-btn" title={t("git.fetch")} onClick={() => void gitFetch()}>
+            <Icon name="globe" />
+          </button>
+          <button className="icon-btn" title={t("git.pull")} onClick={() => void gitPull()}>
+            <Icon name="download" />
+          </button>
+          <button className="icon-btn" title={t("git.push")} onClick={() => void gitPush()}>
+            <Icon name="upload" />
+          </button>
+          <button className="icon-btn" title={t("git.sync")} onClick={() => void gitSync()}>
             <Icon name="refresh" />
           </button>
           <button className="icon-btn" title={t("explorer.refresh")} onClick={() => void refreshGit()}>
-            <Icon name="refresh" />
+            <Icon name="more" />
           </button>
         </div>
       </div>
+
+      {gitHead && (
+        <div
+          className="tree-row"
+          style={{ alignItems: "center", gap: 6, opacity: 0.9 }}
+          title={`${gitHead.shortHash} · ${gitHead.author} · ${gitHead.date}`}
+        >
+          <span className="tree-icon">
+            <Icon name="branch" size={13} />
+          </span>
+          <span style={{ color: "var(--muted)", fontSize: 11, fontFamily: "var(--mono-font)" }}>
+            {gitHead.shortHash}
+          </span>
+          <span
+            className="tree-label"
+            style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {gitHead.message}
+          </span>
+          <span style={{ flex: 1 }} />
+          <button
+            className="icon-btn"
+            title={t("git.undoCommit")}
+            onClick={(e) => {
+              e.stopPropagation();
+              void undoLast();
+            }}
+          >
+            <Icon name="discard" size={14} />
+          </button>
+        </div>
+      )}
 
       <div style={{ padding: "8px 12px" }}>
         <textarea
@@ -153,6 +246,26 @@ export function GitPanel() {
           <Icon name="check" /> {t("git.commit")}
           {staged.length > 0 ? ` (${staged.length})` : ""}
         </button>
+        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+          <button
+            className="btn"
+            style={{ flex: 1 }}
+            disabled={!canCommit}
+            title={canCommit ? t("git.commitAndPush") : t("git.nothingToCommit")}
+            onClick={() => void commit(true)}
+          >
+            <Icon name="upload" size={14} /> {t("git.commitAndPush")}
+          </button>
+          <button
+            className="btn"
+            style={{ flex: 1 }}
+            disabled={!gitHead}
+            title={t("git.amend")}
+            onClick={() => void amend()}
+          >
+            <Icon name="edit" size={14} /> {t("git.amend")}
+          </button>
+        </div>
       </div>
 
       <div className="scroll-y">
@@ -163,7 +276,22 @@ export function GitPanel() {
           <>
             <div className="panel-header" style={{ height: 28 }}>
               <span>{t("git.stagedChanges")}</span>
-              <span style={{ color: "var(--muted)" }}>{staged.length}</span>
+              <div className="actions">
+                <button
+                  className="icon-btn"
+                  title={t("git.unstageAll")}
+                  onClick={() =>
+                    void run(() =>
+                      window.logos.git.unstage(
+                        root,
+                        staged.map((c) => c.path),
+                      ),
+                    )
+                  }
+                >
+                  <Icon name="close" />
+                </button>
+              </div>
             </div>
             {staged.map((c) => (
               <FileRow

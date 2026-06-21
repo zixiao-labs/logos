@@ -81,6 +81,53 @@ export function registerGitService(ctx: ServiceContext): () => void {
       .then(() => undefined),
   );
 
+  // Amend the last commit. With a message it rewrites the subject; without one it
+  // reuses the existing message (`--no-edit`) — mirrors GitLens' amend flow.
+  ipcMain.handle(
+    CH.gitCommitAmend,
+    (_e, root: string, message: string) =>
+      git(root)
+        .raw(
+          message && message.trim()
+            ? ["commit", "--amend", "-m", message]
+            : ["commit", "--amend", "--no-edit"],
+        )
+        .then(() => undefined),
+  );
+
+  // The current HEAD commit (null for an empty repo or non-repo), shown at the
+  // top of the panel so the last commit is always visible.
+  ipcMain.handle(
+    CH.gitHead,
+    async (_e, root: string): Promise<GitLogEntry | null> => {
+      const g = git(root);
+      const isRepo = await g.checkIsRepo().catch(() => false);
+      if (!isRepo) return null;
+      try {
+        const log = await g.log({ maxCount: 1 });
+        const c = log.latest;
+        if (!c) return null;
+        return {
+          hash: c.hash,
+          shortHash: c.hash.slice(0, 7),
+          message: c.message,
+          author: c.author_name,
+          date: c.date,
+        };
+      } catch {
+        return null; // no commits yet
+      }
+    },
+  );
+
+  // Undo the last commit but keep the changes staged (GitLens "Undo Commit" =
+  // soft reset; see src/git/actions/repository.ts using `reset --soft`).
+  ipcMain.handle(CH.gitUndoLastCommit, (_e, root: string) =>
+    git(root)
+      .reset(["--soft", "HEAD~1"])
+      .then(() => undefined),
+  );
+
   ipcMain.handle(CH.gitBranches, async (_e, root: string): Promise<GitBranch[]> => {
     const b = await git(root).branchLocal();
     return b.all.map((name) => ({ name, current: name === b.current }));
@@ -120,6 +167,13 @@ export function registerGitService(ctx: ServiceContext): () => void {
     git(root).init().then(() => undefined),
   );
 
+  ipcMain.handle(CH.gitFetch, (_e, root: string) =>
+    git(root)
+      .fetch()
+      .then(() => "Fetched")
+      .catch((err: Error) => `Fetch failed: ${err.message}`),
+  );
+
   ipcMain.handle(CH.gitPull, (_e, root: string) =>
     git(root)
       .pull()
@@ -127,12 +181,46 @@ export function registerGitService(ctx: ServiceContext): () => void {
       .catch((err: Error) => `Pull failed: ${err.message}`),
   );
 
-  ipcMain.handle(CH.gitPush, (_e, root: string) =>
-    git(root)
-      .push()
-      .then(() => "Pushed")
-      .catch((err: Error) => `Push failed: ${err.message}`),
-  );
+  ipcMain.handle(CH.gitPush, async (_e, root: string) => {
+    const g = git(root);
+    try {
+      await g.push();
+      return "Pushed";
+    } catch (err) {
+      // Most common failure is a branch with no upstream. Publish it (set the
+      // upstream to origin) the way GitLens' "Publish Branch" does, then report.
+      try {
+        const branch = (await g.branchLocal()).current;
+        // Prefer "origin", but fall back to whatever remote the repo actually
+        // has — a fresh branch with no upstream may live under a differently
+        // named remote, and hardcoding "origin" would fail those repos.
+        const remotes = await g.getRemotes();
+        const remote =
+          remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name;
+        if (!remote) return "Push failed: no remote configured";
+        await g.push(["--set-upstream", remote, branch]);
+        return `Published ${branch} to ${remote}`;
+      } catch {
+        return `Push failed: ${(err as Error).message}`;
+      }
+    }
+  });
+
+  // Sync = pull (rebase) then push, like the VS Code / GitLens sync action.
+  ipcMain.handle(CH.gitSync, async (_e, root: string) => {
+    const g = git(root);
+    try {
+      await g.pull(undefined, undefined, { "--rebase": "true" });
+    } catch (err) {
+      return `Sync failed (pull): ${(err as Error).message}`;
+    }
+    try {
+      await g.push();
+      return "Synced";
+    } catch (err) {
+      return `Sync failed (push): ${(err as Error).message}`;
+    }
+  });
 
   return () => cache.clear();
 }

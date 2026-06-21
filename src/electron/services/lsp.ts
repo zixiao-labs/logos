@@ -146,12 +146,13 @@ export function registerLspService(ctx: ServiceContext): () => void {
     return (e as { code?: string } | null)?.code === "ENOENT";
   }
 
-  // G1: prefer servers bundled under resources/language-servers (shipped with a
-  // release, no npm needed); fall back to the npm-managed userData dir.
+  // G1: search the npm-managed userData dir first so a user install/upgrade
+  // (install() writes there) wins over the version bundled with a release; fall
+  // back to servers bundled under resources/language-servers (no npm needed).
   const bundledDir = resourcesPath
     ? path.join(resourcesPath, "language-servers")
     : null;
-  const searchDirs = [bundledDir, managedDir].filter(Boolean) as string[];
+  const searchDirs = [managedDir, bundledDir].filter(Boolean) as string[];
 
   function descriptor(id: string) {
     return REGISTRY.find((s) => s.id === id);
@@ -346,6 +347,10 @@ export function registerLspService(ctx: ServiceContext): () => void {
     }
     progress(id, "starting", `Starting ${s.label}…`);
 
+    // Set when initialize fails below: killing the process there fires the exit
+    // handler, which would otherwise clobber the "error" state with "stopped".
+    let initFailed = false;
+
     // G1: run the server with Electron's own Node (ELECTRON_RUN_AS_NODE) instead
     // of its `#!/usr/bin/env node` bin shim. A GUI-launched packaged app has no
     // node/npm on PATH, so spawning the shim would fail with ENOENT (the
@@ -361,7 +366,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
     });
     proc.on("exit", () => {
       running.delete(id);
-      progress(id, "stopped");
+      if (!initFailed) progress(id, "stopped");
     });
 
     const connection = rpc.createMessageConnection(
@@ -382,42 +387,59 @@ export function registerLspService(ctx: ServiceContext): () => void {
 
     running.set(id, { proc, connection, root });
 
-    // typescript-language-server has no tsserver of its own. Hand it our staged
-    // `typescript` as a fallback so TS/JS features work even when the opened
-    // workspace has no local copy (a workspace-local typescript still wins).
-    let initializationOptions: Record<string, unknown> | undefined;
-    if (s.tsserverFallback) {
-      const tsserverPath = await resolveModuleFile(s.tsserverFallback);
-      if (tsserverPath)
-        initializationOptions = { tsserver: { fallbackPath: tsserverPath } };
-    }
+    try {
+      // typescript-language-server has no tsserver of its own. Hand it our staged
+      // `typescript` as a fallback so TS/JS features work even when the opened
+      // workspace has no local copy (a workspace-local typescript still wins).
+      let initializationOptions: Record<string, unknown> | undefined;
+      if (s.tsserverFallback) {
+        const tsserverPath = await resolveModuleFile(s.tsserverFallback);
+        if (tsserverPath)
+          initializationOptions = { tsserver: { fallbackPath: tsserverPath } };
+      }
 
-    const rootUri = pathToFileURL(root).toString();
-    await connection.sendRequest("initialize", {
-      processId: process.pid,
-      rootUri,
-      rootPath: root,
-      initializationOptions,
-      capabilities: {
-        textDocument: {
-          synchronization: { dynamicRegistration: false },
-          completion: {
-            completionItem: {
-              snippetSupport: true,
-              documentationFormat: ["markdown", "plaintext"],
+      const rootUri = pathToFileURL(root).toString();
+      await connection.sendRequest("initialize", {
+        processId: process.pid,
+        rootUri,
+        rootPath: root,
+        initializationOptions,
+        capabilities: {
+          textDocument: {
+            synchronization: { dynamicRegistration: false },
+            completion: {
+              completionItem: {
+                snippetSupport: true,
+                documentationFormat: ["markdown", "plaintext"],
+              },
             },
+            hover: { contentFormat: ["markdown", "plaintext"] },
+            definition: { dynamicRegistration: false },
+            publishDiagnostics: { relatedInformation: true },
+            documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           },
-          hover: { contentFormat: ["markdown", "plaintext"] },
-          definition: { dynamicRegistration: false },
-          publishDiagnostics: { relatedInformation: true },
-          documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+          workspace: { configuration: true, workspaceFolders: true },
         },
-        workspace: { configuration: true, workspaceFolders: true },
-      },
-      workspaceFolders: [{ uri: rootUri, name: path.basename(root) }],
-    });
-    connection.sendNotification("initialized", {});
-    progress(id, "running", `${s.label} ready`);
+        workspaceFolders: [{ uri: rootUri, name: path.basename(root) }],
+      });
+      connection.sendNotification("initialized", {});
+      progress(id, "running", `${s.label} ready`);
+    } catch (e) {
+      // initialize rejected (or a later step threw): tear down the half-started
+      // instance and drop it from `running`, otherwise the guard at the top of
+      // start() would block every later attempt to launch this server.
+      initFailed = true;
+      running.delete(id);
+      try {
+        connection.dispose();
+      } catch {
+        /* already gone */
+      }
+      proc.kill();
+      const msg = e instanceof Error ? e.message : String(e);
+      progress(id, "error", msg);
+      throw e instanceof Error ? e : new Error(msg);
+    }
   }
 
   async function stop(id: string): Promise<void> {
