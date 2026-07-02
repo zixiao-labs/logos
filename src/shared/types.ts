@@ -327,6 +327,17 @@ export interface LspProgress {
   progress?: number;
 }
 
+export type LspLogLevel = "info" | "warning" | "error" | "debug";
+
+export interface LspLog {
+  /** Unix epoch milliseconds. */
+  time: number;
+  /** Server id when the log belongs to a specific server. */
+  serverId?: string;
+  level: LspLogLevel;
+  message: string;
+}
+
 // ---------------------------------------------------------------------------
 // Misc
 // ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useStore, type PanelTab } from "../state/store";
 import { useT } from "../i18n";
 import { basename } from "../lib/language";
@@ -24,6 +25,15 @@ export function Panel() {
   const setActiveTerminal = useStore((s) => s.setActiveTerminal);
   const diagnostics = useStore((s) => s.diagnostics);
   const openFile = useStore((s) => s.openFile);
+  const lspLogs = useStore((s) => s.lspLogs);
+  const clearLspLogs = useStore((s) => s.clearLspLogs);
+  const outputRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (panelTab !== "output") return;
+    const el = outputRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [panelTab, lspLogs.length]);
 
   return (
     <div className="bottom-panel" style={{ height: "100%" }}>
@@ -45,6 +55,11 @@ export function Panel() {
             onClick={() => void newTerminal()}
           >
             <Icon name="add" />
+          </button>
+        )}
+        {panelTab === "output" && lspLogs.length > 0 && (
+          <button className="btn ghost" style={{ width: "auto" }} onClick={clearLspLogs}>
+            {t("panel.clear")}
           </button>
         )}
         <button className="icon-btn" title={t("editor.close")} onClick={togglePanel}>
@@ -159,7 +174,50 @@ export function Panel() {
           </div>
         )}
 
-        {(panelTab === "output" || panelTab === "debug" || panelTab === "ports") && (
+        {panelTab === "output" && (
+          <div
+            ref={outputRef}
+            className="scroll-y"
+            style={{
+              padding: 12,
+              color: "var(--muted)",
+              fontFamily: "var(--mono-font)",
+              fontSize: 12,
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {lspLogs.length === 0 ? (
+              t("panel.noOutput")
+            ) : (
+              <>
+                <div style={{ color: "var(--foreground)", marginBottom: 8 }}>
+                  {t("lsp.title")}
+                </div>
+                {lspLogs.map((entry, i) => {
+                  const time = new Date(entry.time).toLocaleTimeString();
+                  const source = entry.serverId ? `[${entry.serverId}] ` : "";
+                  return (
+                    <div
+                      key={`${entry.time}-${i}`}
+                      style={{
+                        color:
+                          entry.level === "error"
+                            ? "var(--danger)"
+                            : entry.level === "warning"
+                              ? "var(--warning)"
+                              : "var(--muted)",
+                      }}
+                    >
+                      [{time}] {source}{entry.message}
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </div>
+        )}
+
+        {(panelTab === "debug" || panelTab === "ports") && (
           <div
             className="scroll-y"
             style={{
@@ -169,7 +227,6 @@ export function Panel() {
               fontSize: 12,
             }}
           >
-            {panelTab === "output" && "No output channels yet."}
             {panelTab === "debug" && "Debugging arrives in Stage 3.5 (DAP)."}
             {panelTab === "ports" && "No forwarded ports."}
           </div>

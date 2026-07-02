@@ -90,6 +90,10 @@ export function serverIdForLanguage(lang: string): string | null {
       return "typescript";
     case "python":
       return "python";
+    case "go":
+      return "go";
+    case "rust":
+      return "rust-analyzer";
     case "json":
       return "json";
     case "html":

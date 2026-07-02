@@ -48,9 +48,9 @@ export function ExtensionsView() {
         </button>
       </div>
       <p style={{ color: "var(--muted)", fontSize: 12, marginTop: 0 }}>
-        Stage 2 · Sprint 1 — install language servers from npm into a managed
-        directory; Logos starts them on demand and bridges LSP features into the
-        editor.
+        Stage 2 · Sprint 1 — install language servers into a managed directory;
+        Logos starts them on demand, auto-downloads them when matching files are
+        opened, and bridges LSP features into the editor.
       </p>
 
       {servers.map((s) => {

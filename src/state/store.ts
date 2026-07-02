@@ -11,6 +11,7 @@ import type {
   GitLogEntry,
   LanguageCode,
   LayoutMode,
+  LspLog,
   LspProgress,
   Settings,
   ThemeMode,
@@ -117,6 +118,8 @@ interface LogosState {
   diagnostics: Record<string, Diagnostic[]>;
   /** Language-server status keyed by server id (C1: surfaced in the status bar). */
   lsp: Record<string, LspProgress>;
+  /** Language-server stderr/installer/client logs shown in the Output panel. */
+  lspLogs: LspLog[];
 
   agentSessions: AgentSession[];
   activeAgentId: string | null;
@@ -169,6 +172,8 @@ interface LogosState {
   gitSync(): Promise<void>;
   setDiagnostics(path: string, diags: Diagnostic[]): void;
   setLspProgress(p: LspProgress): void;
+  appendLspLog(entry: LspLog): void;
+  clearLspLogs(): void;
   loadAgentModels(): Promise<void>;
   loadAgentCommands(): Promise<void>;
 
@@ -307,6 +312,7 @@ export const useStore = create<LogosState>((set, get) => ({
   gitHead: null,
   diagnostics: {},
   lsp: {},
+  lspLogs: [],
 
   agentSessions: persistedAgent.agentSessions,
   activeAgentId: persistedAgent.activeAgentId,
@@ -337,6 +343,7 @@ export const useStore = create<LogosState>((set, get) => ({
     // view both read this slice). lsp-monaco keeps its own subscriber for the
     // Monaco-side self-heal.
     window.logos.lsp.onProgress((p) => get().setLspProgress(p));
+    window.logos.lsp.onLog((entry) => get().appendLspLog(entry));
 
     // Always have at least one agent session ready (the Cursor layout shows it).
     if (get().agentSessions.length === 0) get().newAgentSession("Agent 1");
@@ -570,6 +577,12 @@ export const useStore = create<LogosState>((set, get) => ({
   },
   setLspProgress(p) {
     set((s) => ({ lsp: { ...s.lsp, [p.id]: p } }));
+  },
+  appendLspLog(entry) {
+    set((s) => ({ lspLogs: [...s.lspLogs, entry].slice(-1000) }));
+  },
+  clearLspLogs() {
+    set({ lspLogs: [] });
   },
   async loadAgentModels() {
     if (get().agentModels.length) return; // cache: fetch once per run

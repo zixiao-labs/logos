@@ -14,6 +14,7 @@ import type {
   GitLogEntry,
   GitStatus,
   LanguageServerInfo,
+  LspLog,
   LspProgress,
   MenuAction,
   Settings,
@@ -115,6 +116,7 @@ export interface LogosAPI {
     /** Generic JSON-RPC passthrough to a running server. */
     request(serverId: string, method: string, params: unknown): Promise<unknown>;
     onProgress(cb: (p: LspProgress) => void): Unsubscribe;
+    onLog(cb: (entry: LspLog) => void): Unsubscribe;
     onNotify(
       cb: (n: { serverId: string; method: string; params: unknown }) => void,
     ): Unsubscribe;

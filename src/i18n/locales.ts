@@ -38,7 +38,9 @@ const en: Dict = {
   "panel.terminal": "Terminal",
   "panel.ports": "Ports",
   "panel.noProblems": "No problems have been detected.",
+  "panel.noOutput": "No output yet.",
   "panel.newTerminal": "New Terminal",
+  "panel.clear": "Clear",
 
   "git.title": "Source Control",
   "git.notRepo": "The open folder is not a Git repository.",
@@ -199,7 +201,9 @@ const zh: Dict = {
   "panel.terminal": "终端",
   "panel.ports": "端口",
   "panel.noProblems": "未检测到任何问题。",
+  "panel.noOutput": "暂无输出。",
   "panel.newTerminal": "新建终端",
+  "panel.clear": "清空",
 
   "git.title": "源代码管理",
   "git.notRepo": "打开的文件夹不是 Git 仓库。",
