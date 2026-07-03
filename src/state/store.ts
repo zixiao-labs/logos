@@ -43,6 +43,9 @@ export interface EditorTab {
 
 export type SidebarView = "explorer" | "search" | "git" | "extensions" | "agent";
 export type PanelTab = "problems" | "output" | "debug" | "terminal" | "ports";
+export type StoredLspLog = LspLog & { id: number };
+
+let nextLspLogId = 1;
 
 export interface TerminalInstance {
   id: string;
@@ -119,7 +122,7 @@ interface LogosState {
   /** Language-server status keyed by server id (C1: surfaced in the status bar). */
   lsp: Record<string, LspProgress>;
   /** Language-server stderr/installer/client logs shown in the Output panel. */
-  lspLogs: LspLog[];
+  lspLogs: StoredLspLog[];
 
   agentSessions: AgentSession[];
   activeAgentId: string | null;
@@ -579,7 +582,8 @@ export const useStore = create<LogosState>((set, get) => ({
     set((s) => ({ lsp: { ...s.lsp, [p.id]: p } }));
   },
   appendLspLog(entry) {
-    set((s) => ({ lspLogs: [...s.lspLogs, entry].slice(-1000) }));
+    const log: StoredLspLog = { ...entry, id: nextLspLogId++ };
+    set((s) => ({ lspLogs: [...s.lspLogs, log].slice(-1000) }));
   },
   clearLspLogs() {
     set({ lspLogs: [] });

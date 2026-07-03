@@ -3,8 +3,8 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,6 +24,15 @@ import type { ServiceContext } from "./context";
 const rpc = require("vscode-jsonrpc/node") as typeof import("vscode-jsonrpc/node");
 
 const gunzip = promisify(gunzipCb);
+const DOWNLOAD_TIMEOUT_MS = 30_000;
+const MAX_REDIRECTS = 5;
+const GITHUB_RELEASE_MAX_BYTES = 2 * 1024 * 1024;
+const RUST_ANALYZER_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+
+type DownloadOptions = {
+  maxBytes?: number;
+  timeoutMs?: number;
+};
 
 type BaseRegistryEntry = LanguageServerDescriptor & { args: string[] };
 
@@ -539,41 +548,99 @@ export function registerLspService(ctx: ServiceContext): () => void {
     return null;
   }
 
+  function httpsUrl(url: string): URL {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") {
+      throw new Error(`Refusing insecure rust-analyzer download URL: ${parsed.protocol}`);
+    }
+    return parsed;
+  }
+
   function downloadBuffer(
     url: string,
     id: string,
+    options: DownloadOptions = {},
     redirectCount = 0,
   ): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      if (redirectCount > 5) {
+      let parsed: URL;
+      try {
+        parsed = httpsUrl(url);
+      } catch (e) {
+        reject(e instanceof Error ? e : new Error(String(e)));
+        return;
+      }
+      if (redirectCount > MAX_REDIRECTS) {
         reject(new Error("Too many redirects while downloading rust-analyzer."));
         return;
       }
-      const client = url.startsWith("http:") ? http : https;
-      const req = client.get(
-        url,
-        { headers: { "User-Agent": "Logos" } },
+
+      const maxBytes = options.maxBytes ?? RUST_ANALYZER_MAX_DOWNLOAD_BYTES;
+      const timeoutMs = options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+      let settled = false;
+      let req: ReturnType<typeof https.get> | null = null;
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        req?.destroy(error);
+        reject(error);
+      };
+      const finish = (data: Buffer) => {
+        if (settled) return;
+        settled = true;
+        resolve(data);
+      };
+
+      req = https.get(
+        parsed,
+        {
+          headers: {
+            Accept: "application/vnd.github+json, application/octet-stream",
+            "User-Agent": "Logos",
+          },
+        },
         (res) => {
           const status = res.statusCode ?? 0;
           if (status >= 300 && status < 400 && res.headers.location) {
-            const next = new URL(res.headers.location, url).toString();
+            let next: URL;
+            try {
+              next = httpsUrl(new URL(res.headers.location, parsed).toString());
+            } catch (e) {
+              res.resume();
+              fail(e instanceof Error ? e : new Error(String(e)));
+              return;
+            }
             res.resume();
-            resolve(downloadBuffer(next, id, redirectCount + 1));
+            downloadBuffer(next.toString(), id, options, redirectCount + 1)
+              .then(finish, fail);
             return;
           }
           if (status !== 200) {
             res.resume();
-            reject(new Error(`Download failed with HTTP ${status}`));
+            fail(new Error(`Download failed with HTTP ${status}`));
+            return;
+          }
+
+          const contentLength = Number(res.headers["content-length"] ?? 0);
+          if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+            res.resume();
+            fail(new Error(`Download exceeds maximum size of ${maxBytes} bytes.`));
             return;
           }
 
           const chunks: Buffer[] = [];
-          const total = Number(res.headers["content-length"] ?? 0);
+          const total = contentLength > 0 ? contentLength : 0;
           let received = 0;
           let lastLoggedPct = 0;
           res.on("data", (chunk: Buffer) => {
-            chunks.push(chunk);
             received += chunk.length;
+            if (received > maxBytes) {
+              const error = new Error(`Download exceeds maximum size of ${maxBytes} bytes.`);
+              res.destroy(error);
+              fail(error);
+              return;
+            }
+            chunks.push(chunk);
             if (total > 0) {
               const pct = Math.floor((received / total) * 100);
               if (pct === 100 || pct >= lastLoggedPct + 25) {
@@ -582,12 +649,59 @@ export function registerLspService(ctx: ServiceContext): () => void {
               }
             }
           });
-          res.on("end", () => resolve(Buffer.concat(chunks)));
-          res.on("error", reject);
+          res.on("end", () => finish(Buffer.concat(chunks)));
+          res.on("error", (e) => fail(e instanceof Error ? e : new Error(String(e))));
         },
       );
-      req.on("error", reject);
+      req.setTimeout(timeoutMs, () => {
+        fail(new Error(`Download timed out after ${timeoutMs} ms.`));
+      });
+      req.on("error", (e) => fail(e instanceof Error ? e : new Error(String(e))));
     });
+  }
+
+  function normalizeSha256Digest(digest: unknown): string | null {
+    if (typeof digest !== "string") return null;
+    const hash = digest.startsWith("sha256:") ? digest.slice("sha256:".length) : digest;
+    return /^[a-f0-9]{64}$/i.test(hash) ? hash.toLowerCase() : null;
+  }
+
+  function sha256Hex(data: Buffer): string {
+    return createHash("sha256").update(data).digest("hex");
+  }
+
+  async function rustAnalyzerAssetMetadata(
+    asset: string,
+    id: string,
+  ): Promise<{ downloadUrl: string; sha256: string }> {
+    const raw = await downloadBuffer(
+      "https://api.github.com/repos/rust-lang/rust-analyzer/releases/latest",
+      id,
+      { maxBytes: GITHUB_RELEASE_MAX_BYTES },
+    );
+    const release = JSON.parse(raw.toString("utf8")) as {
+      assets?: Array<{
+        name?: unknown;
+        digest?: unknown;
+        browser_download_url?: unknown;
+      }>;
+    };
+    const match = release.assets?.find((item) => item.name === asset);
+    const sha256 = normalizeSha256Digest(match?.digest);
+    const downloadUrl =
+      typeof match?.browser_download_url === "string" ? match.browser_download_url : null;
+    if (!sha256 || !downloadUrl) {
+      throw new Error(`Could not verify rust-analyzer download metadata for ${asset}.`);
+    }
+    httpsUrl(downloadUrl);
+    return { downloadUrl, sha256 };
+  }
+
+  function verifyDownloadIntegrity(data: Buffer, asset: string, expectedSha256: string) {
+    const actual = sha256Hex(data);
+    if (actual !== expectedSha256) {
+      throw new Error(`Checksum mismatch for ${asset}.`);
+    }
   }
 
   function psQuote(value: string): string {
@@ -603,7 +717,6 @@ export function registerLspService(ctx: ServiceContext): () => void {
       throw new Error(msg);
     }
 
-    const url = `https://github.com/rust-lang/rust-analyzer/releases/latest/download/${asset}`;
     const tmpDir = path.join(managedDir, "tmp");
     await fs.mkdir(tmpDir, { recursive: true });
     const target = path.join(managedBinDir, s.executable);
@@ -614,7 +727,11 @@ export function registerLspService(ctx: ServiceContext): () => void {
 
     progress(s.id, "installing", `Downloading ${asset}…`);
     try {
-      const data = await downloadBuffer(url, s.id);
+      const { downloadUrl, sha256 } = await rustAnalyzerAssetMetadata(asset, s.id);
+      const data = await downloadBuffer(downloadUrl, s.id, {
+        maxBytes: RUST_ANALYZER_MAX_DOWNLOAD_BYTES,
+      });
+      verifyDownloadIntegrity(data, asset, sha256);
       if (asset.endsWith(".gz")) {
         const binary = await gunzip(data);
         await fs.writeFile(partial, binary);

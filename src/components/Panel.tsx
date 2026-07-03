@@ -1,8 +1,8 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useStore, type PanelTab } from "../state/store";
+import { useStore, type PanelTab, type StoredLspLog } from "../state/store";
 import { useT } from "../i18n";
 import { basename } from "../lib/language";
-import type { LspLog, LspLogLevel } from "../shared/types";
+import type { LspLogLevel } from "../shared/types";
 import { Icon } from "./Icon";
 import { TerminalView } from "./TerminalView";
 
@@ -16,37 +16,92 @@ const TABS: { id: PanelTab; key: string }[] = [
 
 const OUTPUT_ROW_HEIGHT = 18;
 const OUTPUT_OVERSCAN_ROWS = 12;
+const OUTPUT_AUTO_SCROLL_THRESHOLD = OUTPUT_ROW_HEIGHT * 2;
 
 type OutputLogRow = {
   id: string;
   kind: "title" | "log";
   level: LspLogLevel;
   text: string;
+  logId?: number;
 };
 
-function buildOutputRows(logs: LspLog[], title: string): OutputLogRow[] {
+type OutputRowsCache = {
+  title: string;
+  logs: StoredLspLog[];
+  rows: OutputLogRow[];
+};
+
+function buildOutputTitleRow(title: string): OutputLogRow {
+  return { id: "title", kind: "title", level: "info", text: title };
+}
+
+function buildOutputLogRows(entry: StoredLspLog): OutputLogRow[] {
+  const time = new Date(entry.time).toLocaleTimeString();
+  const source = entry.serverId ? `[${entry.serverId}] ` : "";
+  const prefix = `[${time}] ${source}`;
+  const continuationPrefix = " ".repeat(prefix.length);
+
+  return entry.message.split(/\r?\n/).map((line, lineIndex) => ({
+    id: `log-${entry.id}-${lineIndex}`,
+    kind: "log",
+    level: entry.level,
+    text: `${lineIndex === 0 ? prefix : continuationPrefix}${line}`,
+    logId: entry.id,
+  }));
+}
+
+function buildOutputRows(logs: StoredLspLog[], title: string): OutputLogRow[] {
   if (logs.length === 0) return [];
+  return [buildOutputTitleRow(title), ...logs.flatMap(buildOutputLogRows)];
+}
 
-  const rows: OutputLogRow[] = [
-    { id: "title", kind: "title", level: "info", text: title },
-  ];
+function deriveOutputRows(
+  logs: StoredLspLog[],
+  title: string,
+  cache: OutputRowsCache,
+): OutputLogRow[] {
+  const rebuild = () => buildOutputRows(logs, title);
 
-  logs.forEach((entry, logIndex) => {
-    const time = new Date(entry.time).toLocaleTimeString();
-    const source = entry.serverId ? `[${entry.serverId}] ` : "";
-    const prefix = `[${time}] ${source}`;
-    const continuationPrefix = " ".repeat(prefix.length);
+  if (logs.length === 0 || cache.title !== title || logs.length < cache.logs.length) {
+    const rows = rebuild();
+    cache.title = title;
+    cache.logs = logs;
+    cache.rows = rows;
+    return rows;
+  }
 
-    entry.message.split(/\r?\n/).forEach((line, lineIndex) => {
-      rows.push({
-        id: `${entry.time}-${logIndex}-${lineIndex}`,
-        kind: "log",
-        level: entry.level,
-        text: `${lineIndex === 0 ? prefix : continuationPrefix}${line}`,
-      });
-    });
-  });
+  const lastCachedId = cache.logs.at(-1)?.id;
+  const firstNewIndex = lastCachedId == null
+    ? 0
+    : logs.findIndex((entry) => entry.id > lastCachedId);
 
+  if (firstNewIndex === -1) {
+    const unchanged =
+      logs.length === cache.logs.length &&
+      logs.every((entry, index) => entry.id === cache.logs[index]?.id);
+    if (unchanged) {
+      cache.logs = logs;
+      return cache.rows;
+    }
+
+    const rows = rebuild();
+    cache.title = title;
+    cache.logs = logs;
+    cache.rows = rows;
+    return rows;
+  }
+
+  const retainedLogIds = new Set(logs.slice(0, firstNewIndex).map((entry) => entry.id));
+  const retainedRows = cache.rows.filter(
+    (row) => row.kind === "log" && row.logId != null && retainedLogIds.has(row.logId),
+  );
+  const newRows = logs.slice(firstNewIndex).flatMap(buildOutputLogRows);
+  const rows = [buildOutputTitleRow(title), ...retainedRows, ...newRows];
+
+  cache.title = title;
+  cache.logs = logs;
+  cache.rows = rows;
   return rows;
 }
 
@@ -72,9 +127,16 @@ export function Panel() {
   const lspLogs = useStore((s) => s.lspLogs);
   const clearLspLogs = useStore((s) => s.clearLspLogs);
   const outputRef = useRef<HTMLDivElement>(null);
+  const outputRowsCacheRef = useRef<OutputRowsCache>({
+    title: "",
+    logs: [],
+    rows: [],
+  });
+  const outputViewportRef = useRef({ scrollTop: 0, height: 0, scrollHeight: 0 });
+  const lastOutputRowsLengthRef = useRef(0);
   const lspTitle = t("lsp.title");
   const outputRows = useMemo(
-    () => buildOutputRows(lspLogs, lspTitle),
+    () => deriveOutputRows(lspLogs, lspTitle, outputRowsCacheRef.current),
     [lspLogs, lspTitle],
   );
   const [outputViewport, setOutputViewport] = useState({
@@ -86,11 +148,17 @@ export function Panel() {
     const el = outputRef.current;
     if (!el) return;
 
+    const next = {
+      scrollTop: el.scrollTop,
+      height: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+    };
+    outputViewportRef.current = next;
     setOutputViewport((prev) => {
-      const next = { scrollTop: el.scrollTop, height: el.clientHeight };
-      return prev.scrollTop === next.scrollTop && prev.height === next.height
+      const visibleNext = { scrollTop: next.scrollTop, height: next.height };
+      return prev.scrollTop === visibleNext.scrollTop && prev.height === visibleNext.height
         ? prev
-        : next;
+        : visibleNext;
     });
   }, []);
 
@@ -107,11 +175,22 @@ export function Panel() {
   }, [panelTab, syncOutputViewport]);
 
   useLayoutEffect(() => {
-    if (panelTab !== "output") return;
+    if (panelTab !== "output") {
+      lastOutputRowsLengthRef.current = outputRows.length;
+      return;
+    }
     const el = outputRef.current;
     if (!el) return;
 
-    el.scrollTop = el.scrollHeight;
+    const previous = outputViewportRef.current;
+    const wasNearBottom =
+      previous.scrollHeight === 0 ||
+      previous.scrollTop + previous.height >=
+        previous.scrollHeight - OUTPUT_AUTO_SCROLL_THRESHOLD;
+    if (outputRows.length > lastOutputRowsLengthRef.current && wasNearBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+    lastOutputRowsLengthRef.current = outputRows.length;
     syncOutputViewport();
   }, [panelTab, outputRows.length, syncOutputViewport]);
 
