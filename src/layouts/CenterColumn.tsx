@@ -13,8 +13,10 @@ export function CenterColumn() {
       style={{
         flex: 1,
         minWidth: 0,
+        minHeight: 0,
         display: "flex",
         flexDirection: "column",
+        overflow: "hidden",
       }}
     >
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
@@ -30,7 +32,7 @@ export function CenterColumn() {
               )
             }
           />
-          <div style={{ height: panelHeight, minHeight: 0 }}>
+          <div style={{ height: panelHeight, minHeight: 0, overflow: "hidden" }}>
             <Panel />
           </div>
         </>

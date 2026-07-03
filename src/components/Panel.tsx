@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore, type PanelTab } from "../state/store";
 import { useT } from "../i18n";
 import { basename } from "../lib/language";
+import type { LspLog, LspLogLevel } from "../shared/types";
 import { Icon } from "./Icon";
 import { TerminalView } from "./TerminalView";
 
@@ -12,6 +13,49 @@ const TABS: { id: PanelTab; key: string }[] = [
   { id: "terminal", key: "panel.terminal" },
   { id: "ports", key: "panel.ports" },
 ];
+
+const OUTPUT_ROW_HEIGHT = 18;
+const OUTPUT_OVERSCAN_ROWS = 12;
+
+type OutputLogRow = {
+  id: string;
+  kind: "title" | "log";
+  level: LspLogLevel;
+  text: string;
+};
+
+function buildOutputRows(logs: LspLog[], title: string): OutputLogRow[] {
+  if (logs.length === 0) return [];
+
+  const rows: OutputLogRow[] = [
+    { id: "title", kind: "title", level: "info", text: title },
+  ];
+
+  logs.forEach((entry, logIndex) => {
+    const time = new Date(entry.time).toLocaleTimeString();
+    const source = entry.serverId ? `[${entry.serverId}] ` : "";
+    const prefix = `[${time}] ${source}`;
+    const continuationPrefix = " ".repeat(prefix.length);
+
+    entry.message.split(/\r?\n/).forEach((line, lineIndex) => {
+      rows.push({
+        id: `${entry.time}-${logIndex}-${lineIndex}`,
+        kind: "log",
+        level: entry.level,
+        text: `${lineIndex === 0 ? prefix : continuationPrefix}${line}`,
+      });
+    });
+  });
+
+  return rows;
+}
+
+function outputRowColor(row: OutputLogRow): string {
+  if (row.kind === "title") return "var(--foreground)";
+  if (row.level === "error") return "var(--danger)";
+  if (row.level === "warning") return "var(--warning)";
+  return "var(--muted)";
+}
 
 export function Panel() {
   const t = useT();
@@ -28,12 +72,62 @@ export function Panel() {
   const lspLogs = useStore((s) => s.lspLogs);
   const clearLspLogs = useStore((s) => s.clearLspLogs);
   const outputRef = useRef<HTMLDivElement>(null);
+  const lspTitle = t("lsp.title");
+  const outputRows = useMemo(
+    () => buildOutputRows(lspLogs, lspTitle),
+    [lspLogs, lspTitle],
+  );
+  const [outputViewport, setOutputViewport] = useState({
+    scrollTop: 0,
+    height: 0,
+  });
 
-  useEffect(() => {
+  const syncOutputViewport = useCallback(() => {
+    const el = outputRef.current;
+    if (!el) return;
+
+    setOutputViewport((prev) => {
+      const next = { scrollTop: el.scrollTop, height: el.clientHeight };
+      return prev.scrollTop === next.scrollTop && prev.height === next.height
+        ? prev
+        : next;
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (panelTab !== "output") return;
+    syncOutputViewport();
+
+    const el = outputRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(syncOutputViewport);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [panelTab, syncOutputViewport]);
+
+  useLayoutEffect(() => {
     if (panelTab !== "output") return;
     const el = outputRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [panelTab, lspLogs.length]);
+    if (!el) return;
+
+    el.scrollTop = el.scrollHeight;
+    syncOutputViewport();
+  }, [panelTab, outputRows.length, syncOutputViewport]);
+
+  const outputStartIndex = Math.max(
+    0,
+    Math.floor(outputViewport.scrollTop / OUTPUT_ROW_HEIGHT) -
+      OUTPUT_OVERSCAN_ROWS,
+  );
+  const outputEndIndex = Math.min(
+    outputRows.length,
+    Math.ceil(
+      (outputViewport.scrollTop + outputViewport.height) / OUTPUT_ROW_HEIGHT,
+    ) + OUTPUT_OVERSCAN_ROWS,
+  );
+  const visibleOutputRows = outputRows.slice(outputStartIndex, outputEndIndex);
+  const outputTotalHeight = outputRows.length * OUTPUT_ROW_HEIGHT;
 
   return (
     <div className="bottom-panel" style={{ height: "100%" }}>
@@ -175,44 +269,33 @@ export function Panel() {
         )}
 
         {panelTab === "output" && (
-          <div
-            ref={outputRef}
-            className="scroll-y"
-            style={{
-              padding: 12,
-              color: "var(--muted)",
-              fontFamily: "var(--mono-font)",
-              fontSize: 12,
-              whiteSpace: "pre-wrap",
-            }}
-          >
+          <div ref={outputRef} className="output-log" onScroll={syncOutputViewport}>
             {lspLogs.length === 0 ? (
-              t("panel.noOutput")
+              <div className="output-empty">{t("panel.noOutput")}</div>
             ) : (
-              <>
-                <div style={{ color: "var(--foreground)", marginBottom: 8 }}>
-                  {t("lsp.title")}
-                </div>
-                {lspLogs.map((entry, i) => {
-                  const time = new Date(entry.time).toLocaleTimeString();
-                  const source = entry.serverId ? `[${entry.serverId}] ` : "";
-                  return (
+              <div
+                className="output-log-spacer"
+                style={{ height: outputTotalHeight }}
+              >
+                <div
+                  className="output-log-window"
+                  style={{
+                    transform: `translateY(${outputStartIndex * OUTPUT_ROW_HEIGHT}px)`,
+                  }}
+                >
+                  {visibleOutputRows.map((row) => (
                     <div
-                      key={`${entry.time}-${i}`}
-                      style={{
-                        color:
-                          entry.level === "error"
-                            ? "var(--danger)"
-                            : entry.level === "warning"
-                              ? "var(--warning)"
-                              : "var(--muted)",
-                      }}
+                      key={row.id}
+                      className={`output-log-row ${
+                        row.kind === "title" ? "output-log-title" : ""
+                      }`}
+                      style={{ color: outputRowColor(row) }}
                     >
-                      [{time}] {source}{entry.message}
+                      {row.text}
                     </div>
-                  );
-                })}
-              </>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         )}
