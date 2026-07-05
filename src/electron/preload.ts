@@ -7,6 +7,7 @@ import type {
   AgentPermissionResponse,
   AgentStartRequest,
   FsWatchEvent,
+  LspLog,
   LspProgress,
   MenuAction,
   Settings,
@@ -114,6 +115,7 @@ const api: LogosAPI = {
     request: (serverId, method, params) =>
       ipcRenderer.invoke(CH.lspRequest, serverId, method, params),
     onProgress: (cb) => on<LspProgress>(CH.lspProgress, cb),
+    onLog: (cb) => on<LspLog>(CH.lspLog, cb),
     onNotify: (cb) =>
       on<{ serverId: string; method: string; params: unknown }>(
         CH.lspNotify,

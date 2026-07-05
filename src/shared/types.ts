@@ -327,6 +327,19 @@ export interface LspProgress {
   progress?: number;
 }
 
+export type LspLogLevel = "info" | "warning" | "error" | "debug";
+
+export interface LspLog {
+  /** Stable renderer-store id; assigned when the log enters the store. */
+  id?: number;
+  /** Unix epoch milliseconds. */
+  time: number;
+  /** Server id when the log belongs to a specific server. */
+  serverId?: string;
+  level: LspLogLevel;
+  message: string;
+}
+
 // ---------------------------------------------------------------------------
 // Misc
 // ---------------------------------------------------------------------------

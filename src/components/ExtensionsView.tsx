@@ -16,6 +16,7 @@ const BADGE: Record<LanguageServerStatus, { cls: string; key: string }> = {
 export function ExtensionsView() {
   const t = useT();
   const root = useStore((s) => s.root);
+  const autoDownloadLsp = useStore((s) => s.settings["lsp.autoDownload"]);
   // C1: live status comes from the shared store slice (single source of truth);
   // the static catalogue (labels, versions, descriptions) comes from list().
   const lsp = useStore((s) => s.lsp);
@@ -48,9 +49,10 @@ export function ExtensionsView() {
         </button>
       </div>
       <p style={{ color: "var(--muted)", fontSize: 12, marginTop: 0 }}>
-        Stage 2 · Sprint 1 — install language servers from npm into a managed
-        directory; Logos starts them on demand and bridges LSP features into the
-        editor.
+        Managed language servers start on demand and connect LSP features to the
+        editor; {autoDownloadLsp
+          ? "with Auto-download on, missing servers download only when matching files are opened."
+          : "Auto-download is off, so install missing servers here before use."}
       </p>
 
       {servers.map((s) => {

@@ -1,6 +1,8 @@
-import { useStore, type PanelTab } from "../state/store";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useStore, type PanelTab, type StoredLspLog } from "../state/store";
 import { useT } from "../i18n";
 import { basename } from "../lib/language";
+import type { LspLogLevel } from "../shared/types";
 import { Icon } from "./Icon";
 import { TerminalView } from "./TerminalView";
 
@@ -11,6 +13,104 @@ const TABS: { id: PanelTab; key: string }[] = [
   { id: "terminal", key: "panel.terminal" },
   { id: "ports", key: "panel.ports" },
 ];
+
+const OUTPUT_ROW_HEIGHT = 18;
+const OUTPUT_OVERSCAN_ROWS = 12;
+const OUTPUT_AUTO_SCROLL_THRESHOLD = OUTPUT_ROW_HEIGHT * 2;
+
+type OutputLogRow = {
+  id: string;
+  kind: "title" | "log";
+  level: LspLogLevel;
+  text: string;
+  logId?: number;
+};
+
+type OutputRowsCache = {
+  title: string;
+  logs: StoredLspLog[];
+  rows: OutputLogRow[];
+};
+
+function buildOutputTitleRow(title: string): OutputLogRow {
+  return { id: "title", kind: "title", level: "info", text: title };
+}
+
+function buildOutputLogRows(entry: StoredLspLog): OutputLogRow[] {
+  const time = new Date(entry.time).toLocaleTimeString();
+  const source = entry.serverId ? `[${entry.serverId}] ` : "";
+  const prefix = `[${time}] ${source}`;
+  const continuationPrefix = " ".repeat(prefix.length);
+
+  return entry.message.split(/\r?\n/).map((line, lineIndex) => ({
+    id: `log-${entry.id}-${lineIndex}`,
+    kind: "log",
+    level: entry.level,
+    text: `${lineIndex === 0 ? prefix : continuationPrefix}${line}`,
+    logId: entry.id,
+  }));
+}
+
+function buildOutputRows(logs: StoredLspLog[], title: string): OutputLogRow[] {
+  if (logs.length === 0) return [];
+  return [buildOutputTitleRow(title), ...logs.flatMap(buildOutputLogRows)];
+}
+
+function deriveOutputRows(
+  logs: StoredLspLog[],
+  title: string,
+  cache: OutputRowsCache,
+): OutputLogRow[] {
+  const rebuild = () => buildOutputRows(logs, title);
+
+  if (logs.length === 0 || cache.title !== title || logs.length < cache.logs.length) {
+    const rows = rebuild();
+    cache.title = title;
+    cache.logs = logs;
+    cache.rows = rows;
+    return rows;
+  }
+
+  const lastCachedId = cache.logs.at(-1)?.id;
+  const firstNewIndex = lastCachedId == null
+    ? 0
+    : logs.findIndex((entry) => entry.id > lastCachedId);
+
+  if (firstNewIndex === -1) {
+    const unchanged =
+      logs.length === cache.logs.length &&
+      logs.every((entry, index) => entry.id === cache.logs[index]?.id);
+    if (unchanged) {
+      cache.logs = logs;
+      return cache.rows;
+    }
+
+    const rows = rebuild();
+    cache.title = title;
+    cache.logs = logs;
+    cache.rows = rows;
+    return rows;
+  }
+
+  const retainedLogIds = new Set(logs.slice(0, firstNewIndex).map((entry) => entry.id));
+  const retainedRows = cache.rows.filter(
+    (row) => row.kind === "log" && row.logId != null && retainedLogIds.has(row.logId),
+  );
+  const newRows = logs.slice(firstNewIndex).flatMap(buildOutputLogRows);
+  const rows = [buildOutputTitleRow(title), ...retainedRows, ...newRows];
+
+  cache.title = title;
+  cache.logs = logs;
+  cache.rows = rows;
+  return rows;
+}
+
+function outputRowColor(row: OutputLogRow): string {
+  if (row.kind === "title") return "var(--foreground)";
+  if (row.level === "error") return "var(--danger)";
+  if (row.level === "warning") return "var(--warning)";
+  return "var(--muted)";
+}
 
 export function Panel() {
   const t = useT();
@@ -24,6 +124,89 @@ export function Panel() {
   const setActiveTerminal = useStore((s) => s.setActiveTerminal);
   const diagnostics = useStore((s) => s.diagnostics);
   const openFile = useStore((s) => s.openFile);
+  const lspLogs = useStore((s) => s.lspLogs);
+  const clearLspLogs = useStore((s) => s.clearLspLogs);
+  const outputRef = useRef<HTMLDivElement>(null);
+  const outputRowsCacheRef = useRef<OutputRowsCache>({
+    title: "",
+    logs: [],
+    rows: [],
+  });
+  const outputViewportRef = useRef({ scrollTop: 0, height: 0, scrollHeight: 0 });
+  const lastOutputRowsLengthRef = useRef(0);
+  const lspTitle = t("lsp.title");
+  const outputRows = useMemo(
+    () => deriveOutputRows(lspLogs, lspTitle, outputRowsCacheRef.current),
+    [lspLogs, lspTitle],
+  );
+  const [outputViewport, setOutputViewport] = useState({
+    scrollTop: 0,
+    height: 0,
+  });
+
+  const syncOutputViewport = useCallback(() => {
+    const el = outputRef.current;
+    if (!el) return;
+
+    const next = {
+      scrollTop: el.scrollTop,
+      height: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+    };
+    outputViewportRef.current = next;
+    setOutputViewport((prev) => {
+      const visibleNext = { scrollTop: next.scrollTop, height: next.height };
+      return prev.scrollTop === visibleNext.scrollTop && prev.height === visibleNext.height
+        ? prev
+        : visibleNext;
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (panelTab !== "output") return;
+    syncOutputViewport();
+
+    const el = outputRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(syncOutputViewport);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [panelTab, syncOutputViewport]);
+
+  useLayoutEffect(() => {
+    if (panelTab !== "output") {
+      lastOutputRowsLengthRef.current = outputRows.length;
+      return;
+    }
+    const el = outputRef.current;
+    if (!el) return;
+
+    const previous = outputViewportRef.current;
+    const wasNearBottom =
+      previous.scrollHeight === 0 ||
+      previous.scrollTop + previous.height >=
+        previous.scrollHeight - OUTPUT_AUTO_SCROLL_THRESHOLD;
+    if (outputRows.length > lastOutputRowsLengthRef.current && wasNearBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+    lastOutputRowsLengthRef.current = outputRows.length;
+    syncOutputViewport();
+  }, [panelTab, outputRows.length, syncOutputViewport]);
+
+  const outputStartIndex = Math.max(
+    0,
+    Math.floor(outputViewport.scrollTop / OUTPUT_ROW_HEIGHT) -
+      OUTPUT_OVERSCAN_ROWS,
+  );
+  const outputEndIndex = Math.min(
+    outputRows.length,
+    Math.ceil(
+      (outputViewport.scrollTop + outputViewport.height) / OUTPUT_ROW_HEIGHT,
+    ) + OUTPUT_OVERSCAN_ROWS,
+  );
+  const visibleOutputRows = outputRows.slice(outputStartIndex, outputEndIndex);
+  const outputTotalHeight = outputRows.length * OUTPUT_ROW_HEIGHT;
 
   return (
     <div className="bottom-panel" style={{ height: "100%" }}>
@@ -45,6 +228,11 @@ export function Panel() {
             onClick={() => void newTerminal()}
           >
             <Icon name="add" />
+          </button>
+        )}
+        {panelTab === "output" && lspLogs.length > 0 && (
+          <button className="btn ghost" style={{ width: "auto" }} onClick={clearLspLogs}>
+            {t("panel.clear")}
           </button>
         )}
         <button className="icon-btn" title={t("editor.close")} onClick={togglePanel}>
@@ -159,7 +347,39 @@ export function Panel() {
           </div>
         )}
 
-        {(panelTab === "output" || panelTab === "debug" || panelTab === "ports") && (
+        {panelTab === "output" && (
+          <div ref={outputRef} className="output-log" onScroll={syncOutputViewport}>
+            {lspLogs.length === 0 ? (
+              <div className="output-empty">{t("panel.noOutput")}</div>
+            ) : (
+              <div
+                className="output-log-spacer"
+                style={{ height: outputTotalHeight }}
+              >
+                <div
+                  className="output-log-window"
+                  style={{
+                    transform: `translateY(${outputStartIndex * OUTPUT_ROW_HEIGHT}px)`,
+                  }}
+                >
+                  {visibleOutputRows.map((row) => (
+                    <div
+                      key={row.id}
+                      className={`output-log-row ${
+                        row.kind === "title" ? "output-log-title" : ""
+                      }`}
+                      style={{ color: outputRowColor(row) }}
+                    >
+                      {row.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {(panelTab === "debug" || panelTab === "ports") && (
           <div
             className="scroll-y"
             style={{
@@ -169,7 +389,6 @@ export function Panel() {
               fontSize: 12,
             }}
           >
-            {panelTab === "output" && "No output channels yet."}
             {panelTab === "debug" && "Debugging arrives in Stage 3.5 (DAP)."}
             {panelTab === "ports" && "No forwarded ports."}
           </div>

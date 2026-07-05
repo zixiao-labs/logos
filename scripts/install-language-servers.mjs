@@ -2,20 +2,22 @@
 //
 // electron-builder copies `build/language-servers/` to the app's
 // `resources/language-servers/` (see the `extraResources` entry in
-// package.json). At runtime `electron/services/lsp.ts` looks for servers under
-// `process.resourcesPath/language-servers/node_modules/.bin/*` BEFORE falling
-// back to the npm-managed userData dir — so a packaged app works offline with
-// no Node/npm on PATH (the documented G1 release blocker).
+// package.json). At runtime `electron/services/lsp.ts` searches the userData
+// managed tree first, then falls back to this bundled `resources/language-servers`
+// tree. It resolves each server's real JS entry file directly, so packaged apps
+// work offline with no Node/npm on PATH.
 //
-// This MUST run on each platform's build runner: npm writes OS-specific `.bin`
-// shims (`.cmd` wrappers on Windows, symlinks elsewhere), so the staged tree
-// has to be produced on the same OS that packages it.
+// This MUST run on each platform's build runner because some npm packages ship
+// platform-specific files and optional dependencies.
 //
-// Four npm packages cover all six server ids in the lsp.ts registry:
+// Four npm packages cover the npm-backed server ids in the lsp.ts registry:
 //   typescript-language-server  -> typescript, javascript
 //   pyright                     -> python
 //   vscode-langservers-extracted-> json, html, css
 //   bash-language-server        -> bash
+//
+// Native binary servers (gopls, rust-analyzer) are installed on demand into the
+// same managed tree at runtime.
 //
 // typescript-language-server ships no tsserver of its own, so the `typescript`
 // package is staged beside it (and handed to the server as
@@ -38,8 +40,9 @@ const PACKAGES = [
   "bash-language-server",
 ];
 
-// The `.bin` entries lsp.ts resolves (REGISTRY[].bin). All must exist after the
-// install or the bundle is broken — fail the build rather than ship it.
+// The npm `.bin` entries corresponding to the Node-based registry entries. All
+// must exist after the install or the bundle is broken — fail the build rather
+// than ship it.
 const EXPECTED_BINS = [
   "typescript-language-server",
   "pyright-langserver",

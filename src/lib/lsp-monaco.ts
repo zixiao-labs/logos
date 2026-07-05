@@ -17,6 +17,8 @@ const MONACO_LANGS = [
   "scss",
   "less",
   "python",
+  "go",
+  "rust",
   "shell",
 ];
 

@@ -82,6 +82,7 @@ export const CH = {
   lspRequest: "lsp:request",
   lspProgress: "lsp:progress", // push
   lspNotify: "lsp:notify", // push (server -> client notifications, e.g. diagnostics)
+  lspLog: "lsp:log", // push (server stderr / installer output)
 
   // app / window
   appVersions: "app:versions",

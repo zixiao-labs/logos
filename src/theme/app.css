@@ -456,9 +456,11 @@ textarea.field {
 .bottom-panel {
   display: flex;
   flex-direction: column;
+  height: 100%;
   background: var(--surface);
   border-top: 1px solid var(--separator);
   min-height: 0;
+  overflow: hidden;
 }
 .bottom-tabs {
   display: flex;
@@ -497,6 +499,49 @@ textarea.field {
   min-height: 0;
   position: relative;
   overflow: hidden;
+}
+.bottom-content > .scroll-y,
+.bottom-content > .output-log {
+  height: 100%;
+}
+.output-log {
+  position: relative;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: var(--scrollbar-width);
+  scrollbar-color: var(--scrollbar-color);
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--muted);
+  user-select: text;
+  cursor: text;
+}
+.output-log-spacer {
+  position: relative;
+  min-width: 100%;
+}
+.output-log-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 100%;
+  will-change: transform;
+}
+.output-log-row {
+  height: 18px;
+  min-width: 100%;
+  width: max-content;
+  padding: 0 12px;
+  white-space: pre;
+}
+.output-log-title {
+  font-weight: 600;
+}
+.output-empty {
+  padding: 12px;
+  color: var(--muted);
 }
 
 /* ---- terminal ------------------------------------------------------------ */
