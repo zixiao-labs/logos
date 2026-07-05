@@ -39,18 +39,47 @@ jobs:
       - name: Build (renderer + main + preload)
         run: npm run build:app
 
+      # Only export optional signing/notarization credentials when they are
+      # actually configured. Passing empty CSC_LINK/WIN_CSC_LINK makes
+      # electron-builder resolve the empty value to the workspace directory and
+      # fail with "not a file" on CI.
+      - name: Configure optional signing environment
+        shell: bash
+        env:
+          CSC_LINK_SECRET: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD_SECRET: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD_SECRET: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_CSC_LINK_SECRET: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD_SECRET: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          write_env() {
+            name="$1"
+            value="$2"
+            if [ -n "$value" ]; then
+              {
+                echo "$name<<__LOGOS_ENV__"
+                printf '%s\n' "$value"
+                echo "__LOGOS_ENV__"
+              } >> "$GITHUB_ENV"
+            fi
+          }
+
+          write_env CSC_LINK "$CSC_LINK_SECRET"
+          write_env CSC_KEY_PASSWORD "$CSC_KEY_PASSWORD_SECRET"
+          write_env APPLE_ID "$APPLE_ID_SECRET"
+          write_env APPLE_APP_SPECIFIC_PASSWORD "$APPLE_APP_SPECIFIC_PASSWORD_SECRET"
+          write_env APPLE_TEAM_ID "$APPLE_TEAM_ID_SECRET"
+          write_env WIN_CSC_LINK "$WIN_CSC_LINK_SECRET"
+          write_env WIN_CSC_KEY_PASSWORD "$WIN_CSC_KEY_PASSWORD_SECRET"
+
+          if { [ "$RUNNER_OS" = "macOS" ] && [ -z "$CSC_LINK_SECRET" ]; } || \
+             { [ "$RUNNER_OS" = "Windows" ] && [ -z "$CSC_LINK_SECRET" ] && [ -z "$WIN_CSC_LINK_SECRET" ]; }; then
+            write_env CSC_IDENTITY_AUTO_DISCOVERY "false"
+          fi
+
       - name: Build & publish installers
         run: npx --no-install electron-builder --publish always
         env:
           GH_TOKEN: ${{ secrets.SYNC_PAT }}
-          # Optional code-signing / notarization credentials. When the secrets
-          # are absent these resolve to empty strings and electron-builder
-          # produces an UNSIGNED build (still succeeds). Add the secrets later to
-          # enable signing — and macOS auto-update — with no workflow change.
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}

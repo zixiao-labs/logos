@@ -52,8 +52,39 @@ const EXPECTED_BINS = [
   "bash-language-server",
 ];
 
-const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
 const binExt = process.platform === "win32" ? ".cmd" : "";
+
+const npmInstallArgs = [
+  "install",
+  ...PACKAGES.map((p) => `${p}@latest`),
+  "--prefix",
+  SERVERS_DIR, // keep the install tree rooted here — no hoisting above it
+  "--no-save",
+  "--no-audit",
+  "--no-fund",
+  "--workspaces=false",
+  "--install-strategy=nested",
+];
+
+function npmInvocation() {
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath && /\.(?:c?js|mjs)$/i.test(npmExecPath)) {
+    return {
+      command: process.execPath,
+      args: [npmExecPath, ...npmInstallArgs],
+      shell: false,
+    };
+  }
+
+  // Windows CI can fail with EINVAL when Node tries to CreateProcess `npm.cmd`
+  // directly. The npm CLI path above is preferred; this shell fallback keeps
+  // direct `node scripts/install-language-servers.mjs` invocations working too.
+  if (process.platform === "win32") {
+    return { command: "npm", args: npmInstallArgs, shell: true };
+  }
+
+  return { command: npmExecPath || "npm", args: npmInstallArgs, shell: false };
+}
 
 function log(msg) {
   console.log(`[install-language-servers] ${msg}`);
@@ -70,21 +101,12 @@ writeFileSync(
 );
 
 log(`installing ${PACKAGES.length} packages into ${SERVERS_DIR}`);
-const res = spawnSync(
-  npmCmd,
-  [
-    "install",
-    ...PACKAGES.map((p) => `${p}@latest`),
-    "--prefix",
-    SERVERS_DIR, // keep the install tree rooted here — no hoisting above it
-    "--no-save",
-    "--no-audit",
-    "--no-fund",
-    "--workspaces=false",
-    "--install-strategy=nested",
-  ],
-  { cwd: SERVERS_DIR, stdio: "inherit", shell: false },
-);
+const npm = npmInvocation();
+const res = spawnSync(npm.command, npm.args, {
+  cwd: SERVERS_DIR,
+  stdio: "inherit",
+  shell: npm.shell,
+});
 
 if (res.error) {
   console.error(`[install-language-servers] npm spawn failed:`, res.error);
