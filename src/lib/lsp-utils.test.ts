@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { TextEdit } from "vscode-languageserver-protocol";
-import { applyLspTextEdits } from "./lsp-utils";
+import { applyLspTextEdits, isSafeWordPattern } from "./lsp-utils";
+
+describe("isSafeWordPattern", () => {
+  it("accepts ordinary lexical patterns", () => {
+    expect(isSafeWordPattern("(?:[A-Za-z_$][\\w$]*|[0-9]+)")).toBe(true);
+  });
+
+  it("rejects oversized and complex patterns", () => {
+    expect(isSafeWordPattern("a".repeat(257))).toBe(false);
+    expect(isSafeWordPattern("(a+)+$")).toBe(false);
+    expect(isSafeWordPattern("(a|aa)+$")).toBe(false);
+    expect(isSafeWordPattern("(a)\\1")).toBe(false);
+  });
+});
 
 describe("applyLspTextEdits", () => {
   it("applies multiple edits against the original document", () => {

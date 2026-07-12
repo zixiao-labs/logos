@@ -25,7 +25,7 @@ import type {
 } from "vscode-languageserver-protocol";
 import { useStore, type Diagnostic } from "../state/store";
 import { serverIdForLanguage } from "./language";
-import { applyLspTextEdits } from "./lsp-utils";
+import { applyLspTextEdits, isSafeWordPattern } from "./lsp-utils";
 
 /**
  * Bridges the in-renderer Monaco editor to the language servers managed by the
@@ -151,7 +151,7 @@ export function lspOpenDoc(path: string, monacoLang: string, content: string) {
       textDocument: {
         uri: uriOf(path),
         languageId: lspLanguageId(monacoLang, path),
-        version: 1,
+        version: model.getVersionId(),
         text: model.getValue(),
       },
     });
@@ -1292,7 +1292,10 @@ export function setupLspMonaco() {
       );
       if (!response) return null;
       let wordPattern: RegExp | undefined;
-      if (response.result.wordPattern) {
+      if (
+        response.result.wordPattern &&
+        isSafeWordPattern(response.result.wordPattern)
+      ) {
         try {
           wordPattern = new RegExp(response.result.wordPattern);
         } catch {
