@@ -10,6 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gunzip as gunzipCb } from "node:zlib";
+import { extract as extractTar } from "tar";
 import { CH } from "../../shared/channels";
 import type {
   LanguageServerDescriptor,
@@ -28,6 +29,8 @@ const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 const GITHUB_RELEASE_MAX_BYTES = 2 * 1024 * 1024;
 const RUST_ANALYZER_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+const TYPESCRIPT_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
+const TYPESCRIPT_VERSION = "7.0.2";
 
 type DownloadOptions = {
   maxBytes?: number;
@@ -43,10 +46,6 @@ type NpmLanguageServer = BaseRegistryEntry & {
   /** Path to the server's JS entry within its package (from its `bin` map). */
   pkg: string;
   entry: string;
-  /** Extra npm packages to install alongside this server's own package. */
-  extraPackages?: string[];
-  /** See TypeScript entry below: fallback `typescript/lib/tsserver.js`. */
-  tsserverFallback?: string;
 };
 
 type GoInstallLanguageServer = BaseRegistryEntry & {
@@ -62,7 +61,16 @@ type RustAnalyzerLanguageServer = BaseRegistryEntry & {
   versionArgs: string[];
 };
 
-type BinaryLanguageServer = GoInstallLanguageServer | RustAnalyzerLanguageServer;
+type TypeScriptLanguageServer = BaseRegistryEntry & {
+  installKind: "typescript-release";
+  executable: string;
+  versionArgs: string[];
+};
+
+type BinaryLanguageServer =
+  | GoInstallLanguageServer
+  | RustAnalyzerLanguageServer
+  | TypeScriptLanguageServer;
 type RegistryEntry = NpmLanguageServer | BinaryLanguageServer;
 
 function executableName(base: string): string {
@@ -73,16 +81,13 @@ function executableName(base: string): string {
 const REGISTRY: RegistryEntry[] = [
   {
     id: "typescript",
-    label: "TypeScript / JavaScript",
+    label: "TypeScript 7 / JavaScript",
     languages: ["typescript", "typescriptreact", "javascript", "javascriptreact"],
-    npmPackage: "typescript-language-server",
-    description: "tsserver-backed language features for TS & JS.",
-    installKind: "npm",
-    pkg: "typescript-language-server",
-    entry: "lib/cli.mjs",
-    args: ["--stdio"],
-    extraPackages: ["typescript"],
-    tsserverFallback: "typescript/lib/tsserver.js",
+    description: "Native TypeScript 7 language server downloaded from GitHub releases.",
+    installKind: "typescript-release",
+    executable: executableName("tsc"),
+    args: ["--lsp", "--stdio"],
+    versionArgs: ["--version"],
   },
   {
     id: "python",
@@ -307,9 +312,15 @@ export function registerLspService(ctx: ServiceContext): () => void {
     return resolveModuleFile(path.join(s.pkg, s.entry));
   }
 
+  function binaryRelativePath(s: BinaryLanguageServer): string {
+    return s.installKind === "typescript-release"
+      ? path.join("typescript", "lib", s.executable)
+      : path.join("bin", s.executable);
+  }
+
   async function resolveBinary(s: BinaryLanguageServer): Promise<string | null> {
     for (const dir of searchDirs) {
-      const p = path.join(dir, "bin", s.executable);
+      const p = path.join(dir, binaryRelativePath(s));
       try {
         await fs.access(p);
         return p;
@@ -357,39 +368,42 @@ export function registerLspService(ctx: ServiceContext): () => void {
     if (!first) return null;
     if (id === "rust-analyzer") return first.replace(/^rust-analyzer\s+/, "");
     if (id === "go") return first.match(/\bv\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? first;
+    if (id === "typescript") return first.replace(/^Version\s+/i, "");
     return first;
   }
 
-  function binaryInstalledVersion(s: BinaryLanguageServer): Promise<string | null> {
+  function binaryVersion(
+    s: BinaryLanguageServer,
+    binary: string,
+  ): Promise<string | null> {
     return new Promise((resolve) => {
-      void resolveBinary(s).then((binary) => {
-        if (!binary) {
-          resolve(null);
-          return;
-        }
-        let out = "";
-        let err = "";
-        let done = false;
-        const child = spawn(binary, s.versionArgs, { env: augmentedEnv() });
-        const finish = (value: string | null) => {
-          if (done) return;
-          done = true;
-          clearTimeout(timer);
-          resolve(value);
-        };
-        const timer = setTimeout(() => {
-          child.kill();
-          finish(null);
-        }, 5000);
-        child.stdout?.on("data", (d) => (out += d.toString()));
-        child.stderr?.on("data", (d) => (err += d.toString()));
-        child.on("error", () => finish(null));
-        child.on("close", (code) => {
-          if (code !== 0) finish(null);
-          else finish(normalizeVersionOutput(s.id, out || err));
-        });
+      let out = "";
+      let err = "";
+      let done = false;
+      const child = spawn(binary, s.versionArgs, { env: augmentedEnv() });
+      const finish = (value: string | null) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        child.kill();
+        finish(null);
+      }, 5000);
+      child.stdout?.on("data", (d) => (out += d.toString()));
+      child.stderr?.on("data", (d) => (err += d.toString()));
+      child.on("error", () => finish(null));
+      child.on("close", (code) => {
+        if (code !== 0) finish(null);
+        else finish(normalizeVersionOutput(s.id, out || err));
       });
     });
+  }
+
+  async function binaryInstalledVersion(s: BinaryLanguageServer): Promise<string | null> {
+    const binary = await resolveBinary(s);
+    return binary ? binaryVersion(s, binary) : null;
   }
 
   function installedVersion(s: RegistryEntry): Promise<string | null> {
@@ -483,15 +497,12 @@ export function registerLspService(ctx: ServiceContext): () => void {
   async function installNpm(s: NpmLanguageServer): Promise<void> {
     await ensureManagedDir();
     progress(s.id, "installing", `Installing ${s.npmPackage}…`);
-    // Co-install any runtime deps (e.g. `typescript` for the TS server, which
-    // bundles no tsserver) in the same atomic npm invocation.
-    const pkgs = [s.npmPackage, ...(s.extraPackages ?? [])];
     await runProcess(
       s.id,
       npmCmd,
       [
         "install",
-        ...pkgs.map((p) => `${p}@latest`),
+        `${s.npmPackage}@latest`,
         "--prefix",
         managedDir,
         "--no-audit",
@@ -548,10 +559,25 @@ export function registerLspService(ctx: ServiceContext): () => void {
     return null;
   }
 
+  function typescriptAssetName(): string | null {
+    const platform =
+      process.platform === "darwin" ||
+      process.platform === "linux" ||
+      process.platform === "win32"
+        ? process.platform
+        : null;
+    const arch =
+      process.arch === "arm" || process.arch === "arm64" || process.arch === "x64"
+        ? process.arch
+        : null;
+    if (!platform || !arch || (platform !== "linux" && arch === "arm")) return null;
+    return `typescript-${platform}-${arch}.tgz`;
+  }
+
   function httpsUrl(url: string): URL {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:") {
-      throw new Error(`Refusing insecure rust-analyzer download URL: ${parsed.protocol}`);
+      throw new Error(`Refusing insecure download URL: ${parsed.protocol}`);
     }
     return parsed;
   }
@@ -571,7 +597,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
         return;
       }
       if (redirectCount > MAX_REDIRECTS) {
-        reject(new Error("Too many redirects while downloading rust-analyzer."));
+        reject(new Error("Too many redirects while downloading language server."));
         return;
       }
 
@@ -645,7 +671,8 @@ export function registerLspService(ctx: ServiceContext): () => void {
               const pct = Math.floor((received / total) * 100);
               if (pct === 100 || pct >= lastLoggedPct + 25) {
                 lastLoggedPct = pct;
-                progress(id, "installing", `Downloading rust-analyzer ${pct}%`, pct / 100);
+                const label = descriptor(id)?.label ?? id;
+                progress(id, "installing", `Downloading ${label} ${pct}%`, pct / 100);
               }
             }
           });
@@ -670,12 +697,15 @@ export function registerLspService(ctx: ServiceContext): () => void {
     return createHash("sha256").update(data).digest("hex");
   }
 
-  async function rustAnalyzerAssetMetadata(
+  async function githubAssetMetadata(
+    repository: string,
     asset: string,
     id: string,
+    tag?: string,
   ): Promise<{ downloadUrl: string; sha256: string }> {
+    const releasePath = tag ? `tags/${encodeURIComponent(tag)}` : "latest";
     const raw = await downloadBuffer(
-      "https://api.github.com/repos/rust-lang/rust-analyzer/releases/latest",
+      `https://api.github.com/repos/${repository}/releases/${releasePath}`,
       id,
       { maxBytes: GITHUB_RELEASE_MAX_BYTES },
     );
@@ -691,7 +721,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
     const downloadUrl =
       typeof match?.browser_download_url === "string" ? match.browser_download_url : null;
     if (!sha256 || !downloadUrl) {
-      throw new Error(`Could not verify rust-analyzer download metadata for ${asset}.`);
+      throw new Error(`Could not verify download metadata for ${asset}.`);
     }
     httpsUrl(downloadUrl);
     return { downloadUrl, sha256 };
@@ -727,7 +757,11 @@ export function registerLspService(ctx: ServiceContext): () => void {
 
     progress(s.id, "installing", `Downloading ${asset}…`);
     try {
-      const { downloadUrl, sha256 } = await rustAnalyzerAssetMetadata(asset, s.id);
+      const { downloadUrl, sha256 } = await githubAssetMetadata(
+        "rust-lang/rust-analyzer",
+        asset,
+        s.id,
+      );
       const data = await downloadBuffer(downloadUrl, s.id, {
         maxBytes: RUST_ANALYZER_MAX_DOWNLOAD_BYTES,
       });
@@ -771,12 +805,87 @@ export function registerLspService(ctx: ServiceContext): () => void {
     }
   }
 
+  async function replaceDirectory(staging: string, target: string, backup: string) {
+    let hasBackup = false;
+    try {
+      await fs.rename(target, backup);
+      hasBackup = true;
+    } catch (e) {
+      if (!isMissingBinaryError(e)) throw e;
+    }
+
+    try {
+      await fs.rename(staging, target);
+    } catch (e) {
+      if (hasBackup) await fs.rename(backup, target).catch(() => undefined);
+      throw e;
+    }
+    if (hasBackup) await fs.rm(backup, { recursive: true, force: true });
+  }
+
+  async function installTypeScript(s: TypeScriptLanguageServer): Promise<void> {
+    await ensureManagedDir();
+    const asset = typescriptAssetName();
+    if (!asset) {
+      const msg = `TypeScript download is not available for ${process.platform}/${process.arch}.`;
+      progress(s.id, "error", msg);
+      throw new Error(msg);
+    }
+
+    const tmpDir = path.join(managedDir, "tmp");
+    await fs.mkdir(tmpDir, { recursive: true });
+    const target = path.join(managedDir, "typescript");
+    const stamp = `${process.pid}-${Date.now()}`;
+    const archivePath = path.join(tmpDir, `${asset}-${stamp}`);
+    const staging = path.join(tmpDir, `typescript-${stamp}`);
+    const backup = path.join(tmpDir, `typescript-backup-${stamp}`);
+
+    progress(s.id, "installing", `Downloading ${asset}…`);
+    try {
+      const { downloadUrl, sha256 } = await githubAssetMetadata(
+        "microsoft/typescript-go",
+        asset,
+        s.id,
+        `typescript/v${TYPESCRIPT_VERSION}`,
+      );
+      const data = await downloadBuffer(downloadUrl, s.id, {
+        maxBytes: TYPESCRIPT_MAX_DOWNLOAD_BYTES,
+      });
+      verifyDownloadIntegrity(data, asset, sha256);
+      await fs.writeFile(archivePath, data);
+      await fs.mkdir(staging, { recursive: true });
+      await extractTar({
+        file: archivePath,
+        cwd: staging,
+        strip: 1,
+        strict: true,
+      });
+
+      const executable = path.join(staging, "lib", s.executable);
+      await fs.access(executable);
+      await fs.chmod(executable, 0o755).catch(() => undefined);
+      const v = await binaryVersion(s, executable);
+      if (!v) throw new Error("Installed TypeScript executable could not be started.");
+      await replaceDirectory(staging, target, backup);
+      progress(s.id, "installed", `Installed ${s.label} ${v}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      progress(s.id, "error", msg);
+      throw e instanceof Error ? e : new Error(msg);
+    } finally {
+      await fs.rm(archivePath, { force: true }).catch(() => undefined);
+      await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      await fs.rm(backup, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   async function install(id: string): Promise<void> {
     const s = descriptor(id);
     if (!s) throw new Error(`Unknown language server: ${id}`);
     if (s.installKind === "npm") return installNpm(s);
     if (s.installKind === "go-install") return installGo(s);
-    return installRustAnalyzer(s);
+    if (s.installKind === "rust-analyzer-release") return installRustAnalyzer(s);
+    return installTypeScript(s);
   }
 
   async function uninstall(id: string): Promise<void> {
@@ -790,6 +899,8 @@ export function registerLspService(ctx: ServiceContext): () => void {
           force: true,
         })
         .catch(() => undefined);
+    } else if (s.installKind === "typescript-release") {
+      await fs.rm(path.join(managedDir, "typescript"), { recursive: true, force: true });
     } else {
       await fs.rm(path.join(managedBinDir, s.executable), { force: true }).catch(() => undefined);
     }
@@ -882,21 +993,10 @@ export function registerLspService(ctx: ServiceContext): () => void {
     running.set(id, { proc, connection, root });
 
     try {
-      // typescript-language-server has no tsserver of its own. Hand it our staged
-      // `typescript` as a fallback so TS/JS features work even when the opened
-      // workspace has no local copy (a workspace-local typescript still wins).
-      let initializationOptions: Record<string, unknown> | undefined;
-      if (isNpmServer(s) && s.tsserverFallback) {
-        const tsserverPath = await resolveModuleFile(s.tsserverFallback);
-        if (tsserverPath)
-          initializationOptions = { tsserver: { fallbackPath: tsserverPath } };
-      }
-
       await connection.sendRequest("initialize", {
         processId: process.pid,
         rootUri,
         rootPath: root,
-        initializationOptions,
         capabilities: {
           textDocument: {
             synchronization: { dynamicRegistration: false, didSave: true },
