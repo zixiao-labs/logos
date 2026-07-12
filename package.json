@@ -15,6 +15,7 @@
     "release": "npm run build:app && npm run prepackage:servers && electron-builder --publish always",
     "electron:build": "npm run dist",
     "postinstall": "electron-rebuild",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "author": "Zixiao Laboratories",
@@ -115,6 +116,7 @@
     "tailwind-variants": "^3.2.2",
     "tar": "^7.5.19",
     "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageserver-protocol": "^3.18.2",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

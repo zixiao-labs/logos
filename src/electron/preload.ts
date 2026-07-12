@@ -121,6 +121,30 @@ const api: LogosAPI = {
         CH.lspNotify,
         cb,
       ),
+    onRequest: (cb) => {
+      const listener = async (
+        _e: IpcRendererEvent,
+        request: {
+          requestId: number;
+          serverId: string;
+          method: string;
+          params: unknown;
+        },
+      ) => {
+        try {
+          const result = await cb(request);
+          await ipcRenderer.invoke(CH.lspClientResponse, request.requestId, {
+            result,
+          });
+        } catch (error) {
+          await ipcRenderer.invoke(CH.lspClientResponse, request.requestId, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+      ipcRenderer.on(CH.lspClientRequest, listener);
+      return () => ipcRenderer.removeListener(CH.lspClientRequest, listener);
+    },
   },
   app: {
     versions: () => ipcRenderer.invoke(CH.appVersions),

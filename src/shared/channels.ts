@@ -80,6 +80,8 @@ export const CH = {
   lspStart: "lsp:start",
   lspStop: "lsp:stop",
   lspRequest: "lsp:request",
+  lspClientRequest: "lsp:clientRequest", // push (server request -> renderer)
+  lspClientResponse: "lsp:clientResponse",
   lspProgress: "lsp:progress", // push
   lspNotify: "lsp:notify", // push (server -> client notifications, e.g. diagnostics)
   lspLog: "lsp:log", // push (server stderr / installer output)
