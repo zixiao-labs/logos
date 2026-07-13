@@ -5,9 +5,10 @@ import { CH } from "../../shared/channels";
 import type { TerminalCreateOptions, TerminalCreated } from "../../shared/types";
 import type { ServiceContext } from "./context";
 
-// node-pty is a native module kept external from the bundle.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pty: typeof import("node-pty") = require("node-pty");
+function loadPty(): typeof import("node-pty") {
+  // node-pty is a native module kept external from the bundle.
+  return require("node-pty") as typeof import("node-pty");
+}
 
 function defaultShell(): string {
   if (process.platform === "win32")
@@ -15,7 +16,10 @@ function defaultShell(): string {
   return process.env.SHELL || "/bin/zsh";
 }
 
-export function registerTerminalService(ctx: ServiceContext): () => void {
+export function registerTerminalService(
+  ctx: ServiceContext,
+  pty = loadPty(),
+): () => void {
   const { ipcMain } = ctx;
   const terminals = new Map<string, IPty>();
   let counter = 0;

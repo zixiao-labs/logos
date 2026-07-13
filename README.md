@@ -17,6 +17,21 @@ The previous version is archived at [logos-classic](https://github.com/zixiao-la
 
 Current status: Actively developing
 
+## Development
+
+```sh
+npm ci
+npm run dev
+```
+
+Run the Lightning test suite, coverage gate, typecheck, and production build:
+
+```sh
+npm test
+npm run test:coverage
+npm run typecheck
+npm run build:app
+```
 
 
 **Think fast, build faster**

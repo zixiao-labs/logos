@@ -1,4 +1,10 @@
-import { dialog } from "electron";
+import type {
+  BrowserWindow,
+  OpenDialogOptions,
+  OpenDialogReturnValue,
+  SaveDialogOptions,
+  SaveDialogReturnValue,
+} from "electron";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { CH } from "../../shared/channels";
@@ -9,7 +15,21 @@ interface WorkspaceState {
   recent: string[];
 }
 
-export function registerWorkspaceService(ctx: ServiceContext): () => void {
+interface WorkspaceDialog {
+  showOpenDialog(
+    window: BrowserWindow,
+    options: OpenDialogOptions,
+  ): Promise<OpenDialogReturnValue>;
+  showSaveDialog(
+    window: BrowserWindow,
+    options: SaveDialogOptions,
+  ): Promise<SaveDialogReturnValue>;
+}
+
+export function registerWorkspaceService(
+  ctx: ServiceContext,
+  dialogService: WorkspaceDialog,
+): () => void {
   const { ipcMain } = ctx;
   const file = path.join(ctx.userDataDir, "workspace.json");
   let state: WorkspaceState = { root: null, recent: [] };
@@ -50,7 +70,7 @@ export function registerWorkspaceService(ctx: ServiceContext): () => void {
 
   ipcMain.handle(CH.dialogOpenFolder, async () => {
     const win = ctx.getWindow();
-    const res = await dialog.showOpenDialog(win!, {
+    const res = await dialogService.showOpenDialog(win!, {
       properties: ["openDirectory"],
     });
     if (res.canceled || !res.filePaths[0]) return null;
@@ -60,7 +80,7 @@ export function registerWorkspaceService(ctx: ServiceContext): () => void {
 
   ipcMain.handle(CH.dialogOpenFile, async () => {
     const win = ctx.getWindow();
-    const res = await dialog.showOpenDialog(win!, {
+    const res = await dialogService.showOpenDialog(win!, {
       properties: ["openFile"],
     });
     return res.canceled ? null : (res.filePaths[0] ?? null);
@@ -68,7 +88,7 @@ export function registerWorkspaceService(ctx: ServiceContext): () => void {
 
   ipcMain.handle(CH.dialogSaveFile, async (_e, defaultPath?: string) => {
     const win = ctx.getWindow();
-    const res = await dialog.showSaveDialog(win!, { defaultPath });
+    const res = await dialogService.showSaveDialog(win!, { defaultPath });
     return res.canceled ? null : (res.filePath ?? null);
   });
 

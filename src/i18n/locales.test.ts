@@ -1,0 +1,19 @@
+import { describe, expect, it } from "@lightning-js/lightning";
+import type { LanguageCode } from "../shared/types";
+import { translate } from "./locales";
+
+describe("translate", () => {
+  it("returns localized English and Chinese strings", () => {
+    expect(translate("en", "common.cancel")).toBe("Cancel");
+    expect(translate("zh", "common.cancel")).toBe("取消");
+  });
+
+  it("falls back to English and then to the key", () => {
+    expect(translate("fr" as LanguageCode, "app.welcome")).toBe(
+      "Welcome to Logos",
+    );
+    expect(translate("zh", "missing.translation")).toBe(
+      "missing.translation",
+    );
+  });
+});

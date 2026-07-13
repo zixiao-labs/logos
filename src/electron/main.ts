@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import path from "node:path";
 import { CH } from "../shared/channels";
 import type { WindowControl } from "../shared/types";
@@ -101,7 +101,7 @@ app.whenReady().then(() => {
     registerGitService(ctx),
     registerTerminalService(ctx),
     registerSettingsService(ctx),
-    registerWorkspaceService(ctx),
+    registerWorkspaceService(ctx, dialog),
     registerAgentService(ctx),
     registerLspService(ctx),
     registerMenu(ctx),
