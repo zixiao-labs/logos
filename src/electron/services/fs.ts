@@ -11,7 +11,7 @@ async function readDir(dirPath: string): Promise<DirListing> {
   const dirents = await fs.readdir(dirPath, { withFileTypes: true });
   const entries: FileEntry[] = [];
   for (const d of dirents) {
-    if (d.name === ".DS_Store") continue;
+    if (IGNORED.has(d.name)) continue;
     const full = path.join(dirPath, d.name);
     const isDir = d.isDirectory();
     entries.push({

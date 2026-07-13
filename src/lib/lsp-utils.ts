@@ -77,13 +77,18 @@ function offsetAt(
   text: string,
   position: { line: number; character: number },
 ): number {
+  const targetLine = Math.max(0, Math.trunc(position.line));
+  const targetCharacter = Math.max(0, Math.trunc(position.character));
   let offset = 0;
-  for (let line = 0; line < position.line; line++) {
+  for (let line = 0; line < targetLine; line++) {
     const next = text.indexOf("\n", offset);
     if (next < 0) return text.length;
     offset = next + 1;
   }
-  return Math.min(offset + position.character, text.length);
+  const next = text.indexOf("\n", offset);
+  const lineEnd =
+    next < 0 ? text.length : text[next - 1] === "\r" ? next - 1 : next;
+  return Math.min(offset + targetCharacter, lineEnd);
 }
 
 /** Apply non-overlapping LSP edits using UTF-16 offsets, as required by LSP. */

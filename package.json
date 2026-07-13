@@ -15,7 +15,9 @@
     "release": "npm run build:app && npm run prepackage:servers && electron-builder --publish always",
     "electron:build": "npm run dist",
     "postinstall": "electron-rebuild",
-    "test": "vitest run",
+    "test": "lightning run",
+    "test:watch": "lightning watch",
+    "test:coverage": "lightning run --coverage",
     "typecheck": "tsc --noEmit"
   },
   "author": "Zixiao Laboratories",
@@ -121,6 +123,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
+    "@lightning-js/lightning": "^2.0.0",
     "@nasti-toolchain/nasti": "^2.0.0",
     "@tailwindcss/node": "^4.3.1",
     "@tailwindcss/oxide": "^4.3.1",
@@ -130,8 +133,7 @@
     "electron": "^41.0.0",
     "electron-builder": "^26.8.1",
     "tailwindcss": "^4.3.1",
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.8"
+    "typescript": "^7.0.2"
   },
   "packageManager": "npm@11.16.0"
 }

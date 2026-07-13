@@ -5,3 +5,5 @@ dist
 .nasti
 release
 build
+coverage
+test-results

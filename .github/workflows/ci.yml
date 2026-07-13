@@ -1,15 +1,13 @@
 name: CI
 
-# Fast validation on every branch push and PR: typecheck + full Electron build.
-# Native modules are not needed to compile/bundle, so we skip the install
-# scripts (electron-rebuild) here to keep this job quick — the release workflow
-# does the full install.
-
 on:
   push:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -18,16 +16,28 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies (skip native rebuild)
         run: npm ci --ignore-scripts
+
+      - name: Unit and integration tests with coverage
+        run: npm run test:coverage -- --reporter=github-actions
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/lcov.info
+          if-no-files-found: ignore
 
       - name: Typecheck
         run: npm run typecheck
