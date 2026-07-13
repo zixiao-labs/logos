@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import type { LanguageServerInfo, LanguageServerStatus } from "../shared/types";
+import { activateLspServer } from "../lib/lsp-monaco";
 
 const BADGE: Record<LanguageServerStatus, { cls: string; key: string }> = {
   "not-installed": { cls: "none", key: "lsp.notInstalled" },
@@ -113,8 +114,7 @@ export function ExtensionsView() {
                     title={root ? "" : t("explorer.noFolder")}
                     onClick={() =>
                       root &&
-                      void window.logos.lsp
-                        .start(s.id, root)
+                       void activateLspServer(s.id, root)
                         .then(refresh)
                         .catch(() => {})
                     }

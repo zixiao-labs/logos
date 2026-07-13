@@ -5,6 +5,10 @@ import { basename, dirname } from "../lib/language";
 import type { FileEntry } from "../shared/types";
 import { Icon } from "./Icon";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import {
+  prepareUserResourceOperation,
+  reopenUserResourceOperation,
+} from "../lib/lsp-monaco";
 
 interface EditState {
   parent: string;
@@ -126,7 +130,14 @@ export function Explorer() {
         await loadChildren(edit.parent);
       } else if (edit.mode === "rename" && edit.target) {
         const dest = `${dirname(edit.target)}/${name}`;
-        await window.logos.fs.rename(edit.target, dest);
+        const reopened = await prepareUserResourceOperation(edit.target);
+        try {
+          await window.logos.fs.rename(edit.target, dest);
+          reopenUserResourceOperation(dest, reopened);
+        } catch (error) {
+          reopenUserResourceOperation(edit.target, reopened);
+          throw error;
+        }
         await loadChildren(dirname(edit.target));
       }
     } catch {
@@ -171,7 +182,13 @@ export function Explorer() {
           icon: "trash",
           danger: true,
           onClick: async () => {
-            await window.logos.fs.delete(entry.path);
+            const reopened = await prepareUserResourceOperation(entry.path);
+            try {
+              await window.logos.fs.delete(entry.path);
+            } catch (error) {
+              reopenUserResourceOperation(entry.path, reopened);
+              throw error;
+            }
             await loadChildren(dirname(entry.path));
           },
         },

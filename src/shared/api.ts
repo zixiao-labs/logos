@@ -14,6 +14,7 @@ import type {
   GitLogEntry,
   GitStatus,
   LanguageServerInfo,
+  LspClientRequest,
   LspLog,
   LspProgress,
   MenuAction,
@@ -115,23 +116,34 @@ export interface LogosAPI {
     start(serverId: string, root: string): Promise<ServerCapabilities>;
     stop(serverId: string): Promise<void>;
     /** Generic JSON-RPC passthrough to a running server. */
-    request(serverId: string, method: string, params: unknown): Promise<unknown>;
+    request(
+      serverId: string,
+      method: string,
+      params: unknown,
+      requestId?: number,
+    ): Promise<unknown>;
+    cancelRequest(serverId: string, requestId: number): void;
+    resourceOperation(operation: {
+      kind: "create" | "rename" | "delete";
+      path?: string;
+      from?: string;
+      to?: string;
+      overwrite?: boolean;
+    }): Promise<void>;
+    directoryIsEmpty(path: string): Promise<boolean>;
     onProgress(cb: (p: LspProgress) => void): Unsubscribe;
     onLog(cb: (entry: LspLog) => void): Unsubscribe;
     onNotify(
       cb: (n: { serverId: string; method: string; params: unknown }) => void,
     ): Unsubscribe;
     onRequest(
-      cb: (request: {
-        serverId: string;
-        method: string;
-        params: unknown;
-      }) => Promise<unknown>,
+      cb: (request: LspClientRequest) => Promise<unknown>,
     ): Unsubscribe;
   };
   app: {
     versions(): Promise<AppVersions>;
     platform(): Promise<NodeJS.Platform>;
+    openExternal(url: string): Promise<void>;
     windowControl(action: WindowControl): void;
     onWindowState(cb: (s: { maximized: boolean }) => void): Unsubscribe;
     /** Native-menu actions dispatched from the main process. */

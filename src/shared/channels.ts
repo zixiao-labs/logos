@@ -80,7 +80,12 @@ export const CH = {
   lspStart: "lsp:start",
   lspStop: "lsp:stop",
   lspRequest: "lsp:request",
+  lspCancelRequest: "lsp:cancelRequest",
+  lspFileOperation: "lsp:fileOperation",
+  lspResourceOperation: "lsp:resourceOperation",
+  lspDirectoryIsEmpty: "lsp:directoryIsEmpty",
   lspClientRequest: "lsp:clientRequest", // push (server request -> renderer)
+  lspClientRequestCancel: "lsp:clientRequestCancel", // push
   lspClientResponse: "lsp:clientResponse",
   lspProgress: "lsp:progress", // push
   lspNotify: "lsp:notify", // push (server -> client notifications, e.g. diagnostics)
@@ -89,6 +94,7 @@ export const CH = {
   // app / window
   appVersions: "app:versions",
   appPlatform: "app:platform",
+  appOpenExternal: "app:openExternal",
   windowControl: "window:control",
   windowStateChanged: "window:stateChanged", // push
   menuAction: "app:menuAction", // push (native menu -> renderer)

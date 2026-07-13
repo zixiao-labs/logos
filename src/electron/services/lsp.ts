@@ -3,7 +3,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import https from "node:https";
 import path from "node:path";
@@ -15,6 +15,8 @@ import type {
   InitializeResult,
   ServerCapabilities,
 } from "vscode-languageserver-protocol";
+import type { CancellationToken, Disposable } from "vscode-jsonrpc";
+import { matchesLspGlob } from "../../lib/lsp-client";
 import { CH } from "../../shared/channels";
 import type {
   LanguageServerDescriptor,
@@ -35,6 +37,7 @@ const GITHUB_RELEASE_MAX_BYTES = 2 * 1024 * 1024;
 const RUST_ANALYZER_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const TYPESCRIPT_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 const TYPESCRIPT_VERSION = "7.0.2";
+const LSP_REQUEST_CANCELLED = -32800;
 
 type DownloadOptions = {
   maxBytes?: number;
@@ -179,9 +182,14 @@ const NOTIFICATIONS = new Set([
   "textDocument/didChange",
   "textDocument/didClose",
   "textDocument/didSave",
+  "textDocument/willSave",
   "workspace/didChangeConfiguration",
   "workspace/didChangeWatchedFiles",
   "workspace/didChangeWorkspaceFolders",
+  "workspace/didCreateFiles",
+  "workspace/didRenameFiles",
+  "workspace/didDeleteFiles",
+  "window/workDoneProgress/cancel",
   "$/cancelRequest",
   "$/setTrace",
 ]);
@@ -192,6 +200,7 @@ interface RunningServer {
   root: string;
   capabilities: ServerCapabilities;
   ready: Promise<ServerCapabilities>;
+  registrations: Map<string, { method: string; registerOptions?: unknown }>;
 }
 
 interface ServerCommand {
@@ -220,7 +229,12 @@ export function registerLspService(ctx: ServiceContext): () => void {
       reject: (reason: Error) => void;
       timer: ReturnType<typeof setTimeout>;
       serverId: string;
+      cancellation?: Disposable;
     }
+  >();
+  const outboundRequests = new Map<
+    string,
+    InstanceType<typeof rpc.CancellationTokenSource>
   >();
   let nextClientRequestId = 1;
   const latestCache = new Map<string, string>();
@@ -937,7 +951,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
     }
     const p = params as { type?: number; message?: unknown };
     const level: LspLogLevel =
-      p.type === 1 ? "error" : p.type === 2 ? "warning" : p.type === 4 ? "debug" : "info";
+      p.type === 1 ? "error" : p.type === 2 ? "warning" : p.type === 5 ? "debug" : "info";
     if (p.message != null) log(id, level, String(p.message));
   }
 
@@ -945,21 +959,58 @@ export function registerLspService(ctx: ServiceContext): () => void {
     serverId: string,
     method: string,
     params: unknown,
+    cancellationToken?: CancellationToken,
   ): Promise<unknown> {
     const requestId = nextClientRequestId++;
+    if (cancellationToken?.isCancellationRequested) {
+      return Promise.reject(
+        new rpc.ResponseError(
+          LSP_REQUEST_CANCELLED,
+          `LSP client request canceled: ${method}`,
+        ),
+      );
+    }
     return new Promise((resolve, reject) => {
+      const timeoutMs = method === "window/showMessageRequest" ? 300_000 : 30_000;
       const timer = setTimeout(() => {
         pendingClientRequests.delete(requestId);
+        cancellation?.dispose();
+        ctx.send(CH.lspClientRequestCancel, { requestId });
         reject(new Error(`LSP client request timed out: ${method}`));
-      }, 30_000);
+      }, timeoutMs);
+      const cancellation = cancellationToken?.onCancellationRequested(() => {
+        const pending = pendingClientRequests.get(requestId);
+        if (!pending) return;
+        pendingClientRequests.delete(requestId);
+        clearTimeout(timer);
+        ctx.send(CH.lspClientRequestCancel, { requestId });
+        reject(
+          new rpc.ResponseError(
+            LSP_REQUEST_CANCELLED,
+            `LSP client request canceled: ${method}`,
+          ),
+        );
+      });
       pendingClientRequests.set(requestId, {
         resolve,
         reject,
         timer,
         serverId,
+        cancellation,
       });
       ctx.send(CH.lspClientRequest, { requestId, serverId, method, params });
     });
+  }
+
+  function rejectRendererRequests(serverId: string, error: Error) {
+    for (const [requestId, pending] of pendingClientRequests) {
+      if (pending.serverId !== serverId) continue;
+      clearTimeout(pending.timer);
+      pending.cancellation?.dispose();
+      pendingClientRequests.delete(requestId);
+      ctx.send(CH.lspClientRequestCancel, { requestId });
+      pending.reject(error);
+    }
   }
 
   async function start(
@@ -969,7 +1020,20 @@ export function registerLspService(ctx: ServiceContext): () => void {
     const s = descriptor(id);
     if (!s) throw new Error(`Unknown language server: ${id}`);
     const existingServer = running.get(id);
-    if (existingServer?.root === root) return existingServer.ready;
+    if (existingServer?.root === root) {
+      const capabilities = await existingServer.ready;
+      if (existingServer.registrations.size) {
+        await requestRenderer(id, "client/registerCapability", {
+          registrations: [...existingServer.registrations].map(
+            ([registrationId, registration]) => ({
+              id: registrationId,
+              ...registration,
+            }),
+          ),
+        });
+      }
+      return capabilities;
+    }
     if (existingServer) await stop(id);
 
     // A2: verify the entry/binary is actually on disk before spawning, so a
@@ -996,10 +1060,14 @@ export function registerLspService(ctx: ServiceContext): () => void {
       if (running.get(id)?.proc !== proc) return;
       progress(id, "error", e.message);
       running.delete(id);
+      rejectRendererRequests(id, new Error(`Language server failed: ${id}`));
+      connection.dispose();
     });
     proc.on("exit", (code, signal) => {
       if (running.get(id)?.proc !== proc) return;
       running.delete(id);
+      rejectRendererRequests(id, new Error(`Language server stopped: ${id}`));
+      connection.dispose();
       if (!initFailed) {
         const suffix = signal ? ` (${signal})` : code == null ? "" : ` (${code})`;
         progress(id, "stopped", `${s.label} stopped${suffix}`);
@@ -1012,34 +1080,64 @@ export function registerLspService(ctx: ServiceContext): () => void {
     );
 
     const rootUri = pathToFileURL(root).toString();
+    const registrations = new Map<
+      string,
+      { method: string; registerOptions?: unknown }
+    >();
 
     connection.onNotification((method: string, params: unknown) => {
       logServerMessage(id, method, params);
       ctx.send(CH.lspNotify, { serverId: id, method, params });
     });
-    // Answer the few server->client requests that block initialization or common
-    // server features. Unsupported client actions are rejected gracefully.
-    connection.onRequest("workspace/configuration", (p: { items: unknown[] }) =>
-      (p.items ?? []).map(() => ({})),
+    // Requests requiring renderer state or UI make a typed round trip over IPC.
+    for (const method of [
+      "workspace/configuration",
+      "window/workDoneProgress/create",
+      "window/showMessageRequest",
+      "window/showDocument",
+      "workspace/applyEdit",
+      "workspace/semanticTokens/refresh",
+      "workspace/inlayHint/refresh",
+      "workspace/codeLens/refresh",
+      "workspace/diagnostic/refresh",
+    ]) {
+      connection.onRequest(method, (params: unknown, token: CancellationToken) =>
+        requestRenderer(id, method, params, token),
+      );
+    }
+    connection.onRequest(
+      "client/registerCapability",
+      async (params: {
+        registrations?: Array<{
+          id: string;
+          method: string;
+          registerOptions?: unknown;
+        }>;
+      }, token: CancellationToken) => {
+        await requestRenderer(id, "client/registerCapability", params, token);
+        for (const registration of params.registrations ?? []) {
+          registrations.set(registration.id, registration);
+        }
+        return null;
+      },
+    );
+    connection.onRequest(
+      "client/unregisterCapability",
+      async (params: {
+        unregisterations?: Array<{ id: string; method?: string }>;
+        unregistrations?: Array<{ id: string; method?: string }>;
+      }, token: CancellationToken) => {
+        await requestRenderer(id, "client/unregisterCapability", params, token);
+        for (const registration of
+          params.unregisterations ?? params.unregistrations ?? []) {
+          registrations.delete(registration.id);
+        }
+        return null;
+      },
     );
     connection.onRequest("workspace/workspaceFolders", () => [
       { uri: rootUri, name: path.basename(root) },
     ]);
-    connection.onRequest("client/registerCapability", () => {
-      throw new rpc.ResponseError(
-        rpc.ErrorCodes.InvalidRequest,
-        "Dynamic registration was not advertised by this client",
-      );
-    });
-    connection.onRequest("client/unregisterCapability", () => null);
-    connection.onRequest("window/workDoneProgress/create", () => null);
-    connection.onRequest("window/showMessageRequest", (p: unknown) => {
-      logServerMessage(id, "window/showMessage", p);
-      return null;
-    });
-    connection.onRequest("workspace/applyEdit", (params: unknown) =>
-      requestRenderer(id, "workspace/applyEdit", params),
-    );
     connection.listen();
 
     let resolveReady!: (capabilities: ServerCapabilities) => void;
@@ -1055,19 +1153,28 @@ export function registerLspService(ctx: ServiceContext): () => void {
       root,
       capabilities: {},
       ready,
+      registrations,
     };
     running.set(id, runningServer);
 
     try {
-      const initializeResult = (await connection.sendRequest("initialize", {
+      const initializeSource = new rpc.CancellationTokenSource();
+      let initializeTimer: ReturnType<typeof setTimeout> | undefined;
+      const initializeResult = (await Promise.race([
+        connection.sendRequest("initialize", {
         processId: process.pid,
         rootUri,
         rootPath: root,
         capabilities: {
           textDocument: {
-            synchronization: { dynamicRegistration: false, didSave: true },
+            synchronization: {
+              dynamicRegistration: true,
+              willSave: true,
+              willSaveWaitUntil: true,
+              didSave: true,
+            },
             completion: {
-              dynamicRegistration: false,
+              dynamicRegistration: true,
               completionItem: {
                 snippetSupport: true,
                 documentationFormat: ["markdown", "plaintext"],
@@ -1076,19 +1183,36 @@ export function registerLspService(ctx: ServiceContext): () => void {
                 },
               },
             },
-            hover: { dynamicRegistration: false, contentFormat: ["markdown", "plaintext"] },
-            definition: { dynamicRegistration: false, linkSupport: true },
-            declaration: { dynamicRegistration: false, linkSupport: true },
-            typeDefinition: { dynamicRegistration: false, linkSupport: true },
-            implementation: { dynamicRegistration: false, linkSupport: true },
-            references: { dynamicRegistration: false },
-            documentHighlight: { dynamicRegistration: false },
-            publishDiagnostics: { relatedInformation: true },
-            documentSymbol: { hierarchicalDocumentSymbolSupport: true },
-            signatureHelp: { dynamicRegistration: false },
-            rename: { dynamicRegistration: false, prepareSupport: true },
+            hover: { dynamicRegistration: true, contentFormat: ["markdown", "plaintext"] },
+            definition: { dynamicRegistration: true, linkSupport: true },
+            declaration: { dynamicRegistration: true, linkSupport: true },
+            typeDefinition: { dynamicRegistration: true, linkSupport: true },
+            implementation: { dynamicRegistration: true, linkSupport: true },
+            references: { dynamicRegistration: true },
+            documentHighlight: { dynamicRegistration: true },
+            publishDiagnostics: {
+              relatedInformation: true,
+              versionSupport: true,
+              tagSupport: { valueSet: [1, 2] },
+              codeDescriptionSupport: true,
+              dataSupport: true,
+            },
+            documentSymbol: {
+              dynamicRegistration: true,
+              hierarchicalDocumentSymbolSupport: true,
+            },
+            signatureHelp: {
+              dynamicRegistration: true,
+              contextSupport: true,
+              signatureInformation: {
+                documentationFormat: ["markdown", "plaintext"],
+                parameterInformation: { labelOffsetSupport: true },
+                activeParameterSupport: true,
+              },
+            },
+            rename: { dynamicRegistration: true, prepareSupport: true },
             codeAction: {
-              dynamicRegistration: false,
+              dynamicRegistration: true,
               codeActionLiteralSupport: {
                 codeActionKind: {
                   valueSet: ["", "quickfix", "refactor", "source"],
@@ -1096,23 +1220,23 @@ export function registerLspService(ctx: ServiceContext): () => void {
               },
               resolveSupport: { properties: ["edit", "command"] },
             },
-            formatting: { dynamicRegistration: false },
-            rangeFormatting: { dynamicRegistration: false },
-            onTypeFormatting: { dynamicRegistration: false },
-            documentLink: { dynamicRegistration: false, tooltipSupport: true },
-            foldingRange: { dynamicRegistration: false },
-            selectionRange: { dynamicRegistration: false },
-            linkedEditingRange: { dynamicRegistration: false },
-            codeLens: { dynamicRegistration: false },
-            colorProvider: { dynamicRegistration: false },
+            formatting: { dynamicRegistration: true },
+            rangeFormatting: { dynamicRegistration: true },
+            onTypeFormatting: { dynamicRegistration: true },
+            documentLink: { dynamicRegistration: true, tooltipSupport: true },
+            foldingRange: { dynamicRegistration: true },
+            selectionRange: { dynamicRegistration: true },
+            linkedEditingRange: { dynamicRegistration: true },
+            codeLens: { dynamicRegistration: true },
+            colorProvider: { dynamicRegistration: true },
             inlayHint: {
-              dynamicRegistration: false,
+              dynamicRegistration: true,
               resolveSupport: {
                 properties: ["tooltip", "textEdits", "label.tooltip", "label.location", "label.command"],
               },
             },
             semanticTokens: {
-              dynamicRegistration: false,
+              dynamicRegistration: true,
               requests: { range: true, full: { delta: true } },
               tokenTypes: [
                 "namespace", "type", "class", "enum", "interface", "struct",
@@ -1126,18 +1250,66 @@ export function registerLspService(ctx: ServiceContext): () => void {
               ],
               formats: ["relative"],
             },
+            callHierarchy: { dynamicRegistration: true },
+            typeHierarchy: { dynamicRegistration: true },
+            moniker: { dynamicRegistration: true },
+            inlineCompletion: { dynamicRegistration: true },
+            diagnostic: {
+              dynamicRegistration: true,
+              relatedDocumentSupport: true,
+            },
           },
           workspace: {
             configuration: true,
             workspaceFolders: true,
             applyEdit: true,
-            workspaceEdit: { documentChanges: true, resourceOperations: ["create", "rename", "delete"] },
-            symbol: { dynamicRegistration: false, resolveSupport: { properties: ["location.range"] } },
+            workspaceEdit: {
+              documentChanges: true,
+              resourceOperations: ["create", "rename", "delete"],
+              changeAnnotationSupport: { groupsOnLabel: false },
+            },
+            symbol: {
+              dynamicRegistration: true,
+              resolveSupport: { properties: ["location.range"] },
+            },
             executeCommand: { dynamicRegistration: false },
+            didChangeWatchedFiles: {
+              dynamicRegistration: true,
+              relativePatternSupport: false,
+            },
+            fileOperations: {
+              dynamicRegistration: true,
+              didCreate: true,
+              willCreate: true,
+              didRename: true,
+              willRename: true,
+              didDelete: true,
+              willDelete: true,
+            },
+            semanticTokens: { refreshSupport: true },
+            inlayHint: { refreshSupport: true },
+            codeLens: { refreshSupport: true },
+            diagnostics: { refreshSupport: true },
           },
-          window: { workDoneProgress: true, showMessage: { messageActionItem: { additionalPropertiesSupport: false } } },
+          window: {
+            workDoneProgress: true,
+            showMessage: {
+              messageActionItem: { additionalPropertiesSupport: true },
+            },
+            showDocument: { support: true },
+          },
         },
-        workspaceFolders: [{ uri: rootUri, name: path.basename(root) }],
+          workspaceFolders: [{ uri: rootUri, name: path.basename(root) }],
+        }, initializeSource.token),
+        new Promise<never>((_resolve, reject) => {
+          initializeTimer = setTimeout(() => {
+            initializeSource.cancel();
+            reject(new Error(`Timed out initializing ${s.label}`));
+          }, 30_000);
+        }),
+      ]).finally(() => {
+        if (initializeTimer) clearTimeout(initializeTimer);
+        initializeSource.dispose();
       })) as InitializeResult;
       runningServer.capabilities = initializeResult.capabilities;
       resolveReady(runningServer.capabilities);
@@ -1167,11 +1339,11 @@ export function registerLspService(ctx: ServiceContext): () => void {
     const server = running.get(id);
     if (!server) return;
     running.delete(id);
-    for (const [requestId, pending] of pendingClientRequests) {
-      if (pending.serverId !== id) continue;
-      clearTimeout(pending.timer);
-      pendingClientRequests.delete(requestId);
-      pending.reject(new Error(`Language server stopped: ${id}`));
+    rejectRendererRequests(id, new Error(`Language server stopped: ${id}`));
+    for (const [key, source] of outboundRequests) {
+      if (!key.startsWith(`${id}:`)) continue;
+      source.cancel();
+      outboundRequests.delete(key);
     }
     try {
       await Promise.race([
@@ -1199,22 +1371,199 @@ export function registerLspService(ctx: ServiceContext): () => void {
       if (!pending) return;
       pendingClientRequests.delete(requestId);
       clearTimeout(pending.timer);
+      pending.cancellation?.dispose();
       if (response.error) pending.reject(new Error(response.error));
       else pending.resolve(response.result);
     },
   );
   ipcMain.handle(
     CH.lspRequest,
-    async (_e, id: string, method: string, params: unknown) => {
+    async (
+      _e,
+      id: string,
+      method: string,
+      params: unknown,
+      requestId?: number,
+    ) => {
       const server = running.get(id);
       if (!server) return null;
       if (NOTIFICATIONS.has(method)) {
         server.connection.sendNotification(method, params);
         return null;
       }
-      return server.connection.sendRequest(method, params);
+      if (requestId == null) return server.connection.sendRequest(method, params);
+      const key = `${id}:${requestId}`;
+      const source = new rpc.CancellationTokenSource();
+      outboundRequests.set(key, source);
+      try {
+        return await server.connection.sendRequest(method, params, source.token);
+      } finally {
+        outboundRequests.delete(key);
+        source.dispose();
+      }
     },
   );
+  ipcMain.on(CH.lspCancelRequest, (_e, id: string, requestId: number) => {
+    outboundRequests.get(`${id}:${requestId}`)?.cancel();
+  });
+  ipcMain.handle(
+    CH.lspFileOperation,
+    async (
+      _e,
+      phase: string,
+      payload: {
+        paths?: string[];
+        kinds?: Array<"file" | "folder">;
+        renames?: Array<{
+          from: string;
+          to: string;
+          kind?: "file" | "folder";
+        }>;
+      },
+    ) => {
+      const method = `workspace/${phase}Files`;
+      const params = phase.endsWith("Rename")
+        ? {
+            files: (payload.renames ?? []).map(({ from, to }) => ({
+              oldUri: pathToFileURL(from).toString(),
+              newUri: pathToFileURL(to).toString(),
+            })),
+          }
+        : {
+            files: (payload.paths ?? []).map((file) => ({
+              uri: pathToFileURL(file).toString(),
+            })),
+          };
+      for (const [serverId, server] of running) {
+        const operation = phase[0].toLowerCase() + phase.slice(1) as
+          | "willCreate"
+          | "didCreate"
+          | "willRename"
+          | "didRename"
+          | "willDelete"
+          | "didDelete";
+        const staticOptions = server.capabilities.workspace?.fileOperations?.[operation];
+        const registrations = [...server.registrations.values()]
+          .filter((registration) => registration.method === method)
+          .map((registration) => registration.registerOptions);
+        const options = [staticOptions, ...registrations].filter(Boolean) as Array<{
+          filters?: Array<{
+            scheme?: string;
+            pattern?: {
+              glob?: string;
+              matches?: "file" | "folder";
+              options?: { ignoreCase?: boolean };
+            };
+          }>;
+        }>;
+        const candidates = phase.endsWith("Rename")
+          ? (payload.renames ?? []).map((entry) => ({
+              uri: pathToFileURL(entry.from),
+              kind: entry.kind,
+            }))
+          : (payload.paths ?? []).map((entry, index) => ({
+              uri: pathToFileURL(entry),
+              kind: payload.kinds?.[index],
+            }));
+        const interested = options.some((entry) =>
+          (entry.filters ?? []).some((filter) =>
+            candidates.some((candidate) => {
+              if (filter.scheme && filter.scheme !== candidate.uri.protocol.slice(0, -1)) {
+                return false;
+              }
+              if (
+                filter.pattern?.matches &&
+                candidate.kind &&
+                filter.pattern.matches !== candidate.kind
+              ) return false;
+              const glob = filter.pattern?.glob;
+              return !glob || matchesLspGlob(
+                glob,
+                decodeURIComponent(candidate.uri.pathname),
+                filter.pattern?.options?.ignoreCase,
+              );
+            }),
+          ),
+        );
+        if (!interested) continue;
+        if (phase.startsWith("will")) {
+          const source = new rpc.CancellationTokenSource();
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const edit = await Promise.race([
+            server.connection.sendRequest(method, params, source.token),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => {
+                source.cancel();
+                reject(new Error(`LSP file operation timed out: ${method}`));
+              }, 5_000);
+            }),
+          ]).finally(() => {
+            if (timer) clearTimeout(timer);
+            source.dispose();
+          });
+          if (edit) {
+            const result = await requestRenderer(serverId, "workspace/applyEdit", {
+              edit,
+            }) as { applied?: boolean; failureReason?: string };
+            if (!result?.applied) {
+              throw new Error(result?.failureReason ?? `${method} edit was not applied`);
+            }
+          }
+        } else {
+          server.connection.sendNotification(method, params);
+        }
+      }
+    },
+  );
+  ipcMain.handle(
+    CH.lspResourceOperation,
+    async (
+      _e,
+      operation: {
+        kind: "create" | "rename" | "delete";
+        path?: string;
+        from?: string;
+        to?: string;
+        overwrite?: boolean;
+      },
+    ) => {
+      if (operation.kind === "create" && operation.path) {
+        await fs.mkdir(path.dirname(operation.path), { recursive: true });
+        await fs.writeFile(operation.path, "", "utf8");
+        return;
+      }
+      if (operation.kind === "rename" && operation.from && operation.to) {
+        if (operation.from === operation.to) return;
+        let backup: string | undefined;
+        if (operation.overwrite) {
+          const targetExists = await fs
+            .access(operation.to)
+            .then(() => true)
+            .catch(() => false);
+          if (targetExists) {
+            backup = `${operation.to}.logos-backup-${randomUUID()}`;
+            await fs.rename(operation.to, backup);
+          }
+        }
+        try {
+          await fs.rename(operation.from, operation.to);
+        } catch (error) {
+          if (backup) await fs.rename(backup, operation.to).catch(() => undefined);
+          throw error;
+        }
+        if (backup) await fs.rm(backup, { recursive: true, force: true });
+        return;
+      }
+      if (operation.kind === "delete" && operation.path) {
+        await fs.rm(operation.path, { recursive: true, force: true });
+        return;
+      }
+      throw new Error("Invalid LSP resource operation");
+    },
+  );
+  ipcMain.handle(CH.lspDirectoryIsEmpty, async (_e, directory: string) => {
+    return (await fs.readdir(directory)).length === 0;
+  });
 
   // Best-effort latest-version probe (network); used by the Extensions/LSP view.
   ipcMain.handle("lsp:checkUpdates", async () => {
@@ -1226,11 +1575,15 @@ export function registerLspService(ctx: ServiceContext): () => void {
   });
 
   return () => {
-    for (const pending of pendingClientRequests.values()) {
+    for (const [requestId, pending] of pendingClientRequests) {
       clearTimeout(pending.timer);
+      pending.cancellation?.dispose();
+      ctx.send(CH.lspClientRequestCancel, { requestId });
       pending.reject(new Error("LSP service stopped"));
     }
     pendingClientRequests.clear();
+    for (const source of outboundRequests.values()) source.cancel();
+    outboundRequests.clear();
     for (const id of [...running.keys()]) void stop(id);
   };
 }

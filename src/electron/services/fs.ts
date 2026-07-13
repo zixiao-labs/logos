@@ -6,6 +6,7 @@ import type { ServiceContext } from "./context";
 
 /** Directories we never want to descend into or list eagerly. */
 const IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
+const WATCH_IGNORED = new Set([".git", ".DS_Store"]);
 
 async function readDir(dirPath: string): Promise<DirListing> {
   const dirents = await fs.readdir(dirPath, { withFileTypes: true });
@@ -31,7 +32,7 @@ async function readDir(dirPath: string): Promise<DirListing> {
 
 export function registerFsService(ctx: ServiceContext): () => void {
   const { ipcMain } = ctx;
-  const watchers = new Map<string, FSWatcher>();
+  const watchers = new Map<string, { watcher: FSWatcher; references: number }>();
   // Coalesce rapid-fire fs events so we don't flood the renderer.
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -80,7 +81,11 @@ export function registerFsService(ctx: ServiceContext): () => void {
   );
 
   ipcMain.handle(CH.fsWatch, (_e, root: string) => {
-    if (watchers.has(root)) return;
+    const existing = watchers.get(root);
+    if (existing) {
+      existing.references++;
+      return;
+    }
     try {
       const w = fsWatch(
         root,
@@ -88,7 +93,7 @@ export function registerFsService(ctx: ServiceContext): () => void {
         (eventType, filename) => {
           if (!filename) return;
           const name = filename.toString();
-          if ([...IGNORED].some((ig) => name.split(path.sep).includes(ig)))
+           if ([...WATCH_IGNORED].some((ig) => name.split(path.sep).includes(ig)))
             return;
           const full = path.join(root, name);
           const key = `${eventType}:${full}`;
@@ -106,19 +111,28 @@ export function registerFsService(ctx: ServiceContext): () => void {
           );
         },
       );
-      watchers.set(root, w);
+      w.on("error", () => {
+        const entry = watchers.get(root);
+        if (entry?.watcher === w) watchers.delete(root);
+        w.close();
+      });
+      watchers.set(root, { watcher: w, references: 1 });
     } catch {
       // Recursive watch is unsupported on some platforms; ignore silently.
     }
   });
 
   ipcMain.handle(CH.fsUnwatch, (_e, root: string) => {
-    watchers.get(root)?.close();
+    const entry = watchers.get(root);
+    if (!entry) return;
+    entry.references--;
+    if (entry.references > 0) return;
+    entry.watcher.close();
     watchers.delete(root);
   });
 
   return () => {
-    for (const w of watchers.values()) w.close();
+    for (const entry of watchers.values()) entry.watcher.close();
     watchers.clear();
     for (const t of pending.values()) clearTimeout(t);
     pending.clear();

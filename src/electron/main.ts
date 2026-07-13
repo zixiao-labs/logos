@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CH } from "../shared/channels";
 import type { WindowControl } from "../shared/types";
 import type { ServiceContext } from "./services/context";
@@ -38,6 +39,18 @@ function registerAppHandlers() {
   }));
 
   ipcMain.handle(CH.appPlatform, () => process.platform);
+  ipcMain.handle(CH.appOpenExternal, async (_event, value: string) => {
+    const url = new URL(value);
+    if (url.protocol === "file:") {
+      const error = await shell.openPath(fileURLToPath(url));
+      if (error) throw new Error(error);
+      return;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "mailto:") {
+      throw new Error(`Unsupported external URL protocol: ${url.protocol}`);
+    }
+    await shell.openExternal(url.toString());
+  });
 
   ipcMain.on(CH.windowControl, (_e, action: WindowControl) => {
     if (!mainWindow) return;

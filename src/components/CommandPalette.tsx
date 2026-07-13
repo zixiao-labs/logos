@@ -3,6 +3,11 @@ import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import { basename } from "../lib/language";
 import { listWorkspaceFiles } from "../lib/workspaceFiles";
+import {
+  lspWorkspaceSymbols,
+  openLspWorkspaceSymbol,
+  type LspWorkspaceSymbolResult,
+} from "../lib/lsp-monaco";
 import { Icon, type IconName } from "./Icon";
 
 interface Command {
@@ -21,6 +26,7 @@ export function CommandPalette() {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   const [files, setFiles] = useState<string[]>([]);
+  const [symbols, setSymbols] = useState<LspWorkspaceSymbolResult[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -57,6 +63,36 @@ export function CommandPalette() {
   }, [t]);
 
   const isCommandMode = query.startsWith(">");
+  const isSymbolMode = query.startsWith("#");
+
+  useEffect(() => {
+    if (!open || !isSymbolMode) {
+      setSymbols([]);
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void lspWorkspaceSymbols(
+        query.slice(1).trim(),
+        controller.signal,
+        (partial) => {
+          if (!cancelled) setSymbols(partial.slice(0, 100));
+        },
+      )
+        .then((result) => {
+          if (!cancelled) setSymbols(result.slice(0, 100));
+        })
+        .catch(() => {
+          if (!cancelled) setSymbols([]);
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [open, isSymbolMode, query]);
 
   const filteredCommands = useMemo(() => {
     const q = query.replace(/^>/, "").trim().toLowerCase();
@@ -64,22 +100,27 @@ export function CommandPalette() {
   }, [commands, query]);
 
   const filteredFiles = useMemo(() => {
-    if (isCommandMode) return [];
+    if (isCommandMode || isSymbolMode) return [];
     const q = query.trim().toLowerCase();
     if (!q) return [];
     return files.filter((f) => f.toLowerCase().includes(q)).slice(0, 50);
-  }, [files, query, isCommandMode]);
+  }, [files, query, isCommandMode, isSymbolMode]);
 
-  const total = isCommandMode
+  const total = isSymbolMode
+    ? symbols.length
+    : isCommandMode
     ? filteredCommands.length
     : filteredFiles.length + (query.trim() ? 0 : filteredCommands.length);
 
   if (!open) return null;
 
-  const showCommands = isCommandMode || !query.trim();
+  const showCommands = isCommandMode || (!isSymbolMode && !query.trim());
 
   function execute(i: number) {
-    if (isCommandMode) {
+    if (isSymbolMode) {
+      const symbol = symbols[i];
+      if (symbol) openLspWorkspaceSymbol(symbol);
+    } else if (isCommandMode) {
       filteredCommands[i]?.run();
     } else if (query.trim()) {
       const f = filteredFiles[i];
@@ -130,6 +171,7 @@ export function CommandPalette() {
               </div>
             ))}
           {!isCommandMode &&
+            !isSymbolMode &&
             filteredFiles.map((f, i) => (
               <div
                 key={f}
@@ -141,6 +183,22 @@ export function CommandPalette() {
                 {basename(f)}
                 <span className="hint">
                   {root && f.startsWith(root) ? f.slice(root.length + 1) : f}
+                </span>
+              </div>
+            ))}
+          {isSymbolMode &&
+            symbols.map((symbol, i) => (
+              <div
+                key={`${symbol.path}:${symbol.range.startLineNumber}:${symbol.name}`}
+                className={`palette-item ${i === index ? "active" : ""}`}
+                onMouseEnter={() => setIndex(i)}
+                onClick={() => execute(i)}
+              >
+                <Icon name="search" size={15} />
+                {symbol.name}
+                <span className="hint">
+                  {symbol.containerName ? `${symbol.containerName} · ` : ""}
+                  {basename(symbol.path)}:{symbol.range.startLineNumber}
                 </span>
               </div>
             ))}

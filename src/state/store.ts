@@ -13,6 +13,7 @@ import type {
   LayoutMode,
   LspLog,
   LspProgress,
+  LspWorkDoneProgress,
   Settings,
   ThemeMode,
 } from "../shared/types";
@@ -123,6 +124,7 @@ interface LogosState {
   lsp: Record<string, LspProgress>;
   /** Language-server stderr/installer/client logs shown in the Output panel. */
   lspLogs: StoredLspLog[];
+  lspWorkDone: Record<string, LspWorkDoneProgress>;
 
   agentSessions: AgentSession[];
   activeAgentId: string | null;
@@ -177,6 +179,8 @@ interface LogosState {
   setLspProgress(p: LspProgress): void;
   appendLspLog(entry: LspLog): void;
   clearLspLogs(): void;
+  setLspWorkDone(progress: LspWorkDoneProgress): void;
+  clearLspWorkDone(serverId: string, token: string | number): void;
   loadAgentModels(): Promise<void>;
   loadAgentCommands(): Promise<void>;
 
@@ -316,6 +320,7 @@ export const useStore = create<LogosState>((set, get) => ({
   diagnostics: {},
   lsp: {},
   lspLogs: [],
+  lspWorkDone: {},
 
   agentSessions: persistedAgent.agentSessions,
   activeAgentId: persistedAgent.activeAgentId,
@@ -587,6 +592,20 @@ export const useStore = create<LogosState>((set, get) => ({
   },
   clearLspLogs() {
     set({ lspLogs: [] });
+  },
+  setLspWorkDone(progress) {
+    const key = `${progress.serverId}:${typeof progress.token}:${progress.token}`;
+    set((state) => ({
+      lspWorkDone: { ...state.lspWorkDone, [key]: progress },
+    }));
+  },
+  clearLspWorkDone(serverId, token) {
+    const key = `${serverId}:${typeof token}:${token}`;
+    set((state) => {
+      const lspWorkDone = { ...state.lspWorkDone };
+      delete lspWorkDone[key];
+      return { lspWorkDone };
+    });
   },
   async loadAgentModels() {
     if (get().agentModels.length) return; // cache: fetch once per run

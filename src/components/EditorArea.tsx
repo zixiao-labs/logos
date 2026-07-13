@@ -1,7 +1,7 @@
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import { Icon } from "./Icon";
-import { MonacoEditor, disposeModel } from "./MonacoEditor";
+import { closeFileEditor, MonacoEditor } from "./MonacoEditor";
 import { SettingsView } from "./SettingsView";
 import { ExtensionsView } from "./ExtensionsView";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -18,10 +18,14 @@ export function EditorArea() {
 
   const active = tabs.find((tb) => tb.id === activeTabId) ?? null;
 
-  function close(e: React.MouseEvent, id: string) {
+  async function close(e: React.MouseEvent, id: string) {
     e.stopPropagation();
     const tab = tabs.find((tb) => tb.id === id);
-    if (tab?.kind === "file" && tab.path) disposeModel(tab.path);
+    if (
+      tab?.kind === "file" &&
+      tab.path &&
+      !(await closeFileEditor(tab.path, Boolean(tab.dirty)))
+    ) return;
     closeTab(id);
   }
 
@@ -41,7 +45,9 @@ export function EditorArea() {
             key={tab.id}
             className={`tab ${tab.id === activeTabId ? "active" : ""}`}
             onClick={() => setActiveTab(tab.id)}
-            onAuxClick={(e) => e.button === 1 && close(e, tab.id)}
+            onAuxClick={(e) => {
+              if (e.button === 1) void close(e, tab.id);
+            }}
             title={tab.path ?? tab.name}
           >
             <Icon
@@ -62,7 +68,7 @@ export function EditorArea() {
             {tab.dirty ? (
               <span className="dirty" />
             ) : (
-              <span className="close" onClick={(e) => close(e, tab.id)}>
+              <span className="close" onClick={(e) => void close(e, tab.id)}>
                 <Icon name="close" size={13} />
               </span>
             )}
