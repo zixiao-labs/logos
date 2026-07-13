@@ -22,16 +22,51 @@ function on<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
   return () => ipcRenderer.removeListener(channel, listener);
 }
 
+async function withLspFileOperation<T>(
+  kind: "Create" | "Rename" | "Delete",
+  payload: unknown,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await ipcRenderer.invoke(CH.lspFileOperation, `will${kind}`, payload);
+  const result = await operation();
+  await ipcRenderer
+    .invoke(CH.lspFileOperation, `did${kind}`, payload)
+    .catch(() => undefined);
+  return result;
+}
+
 const api: LogosAPI = {
   fs: {
     readDir: (p) => ipcRenderer.invoke(CH.fsReadDir, p),
     readFile: (p) => ipcRenderer.invoke(CH.fsReadFile, p),
     writeFile: (p, content) => ipcRenderer.invoke(CH.fsWriteFile, p, content),
     stat: (p) => ipcRenderer.invoke(CH.fsStat, p),
-    createFile: (p, content) => ipcRenderer.invoke(CH.fsCreateFile, p, content),
-    createDir: (p) => ipcRenderer.invoke(CH.fsCreateDir, p),
-    rename: (from, to) => ipcRenderer.invoke(CH.fsRename, from, to),
-    delete: (p) => ipcRenderer.invoke(CH.fsDelete, p),
+    createFile: (p, content) =>
+      withLspFileOperation("Create", { paths: [p], kinds: ["file"] }, () =>
+        ipcRenderer.invoke(CH.fsCreateFile, p, content),
+      ),
+    createDir: (p) =>
+      withLspFileOperation("Create", { paths: [p], kinds: ["folder"] }, () =>
+        ipcRenderer.invoke(CH.fsCreateDir, p),
+      ),
+    rename: async (from, to) => {
+      const stat = await ipcRenderer.invoke(CH.fsStat, from);
+      const kind = stat.type === "directory" ? "folder" : "file";
+      return withLspFileOperation(
+        "Rename",
+        { renames: [{ from, to, kind }] },
+        () => ipcRenderer.invoke(CH.fsRename, from, to),
+      );
+    },
+    delete: async (p) => {
+      const stat = await ipcRenderer.invoke(CH.fsStat, p);
+      const kind = stat.type === "directory" ? "folder" : "file";
+      return withLspFileOperation(
+        "Delete",
+        { paths: [p], kinds: [kind] },
+        () => ipcRenderer.invoke(CH.fsDelete, p),
+      );
+    },
     exists: (p) => ipcRenderer.invoke(CH.fsExists, p),
     watch: (p) => ipcRenderer.invoke(CH.fsWatch, p),
     unwatch: (p) => ipcRenderer.invoke(CH.fsUnwatch, p),
@@ -112,8 +147,16 @@ const api: LogosAPI = {
     uninstall: (id) => ipcRenderer.invoke(CH.lspUninstall, id),
     start: (serverId, root) => ipcRenderer.invoke(CH.lspStart, serverId, root),
     stop: (serverId) => ipcRenderer.invoke(CH.lspStop, serverId),
-    request: (serverId, method, params) =>
-      ipcRenderer.invoke(CH.lspRequest, serverId, method, params),
+    request: (serverId, method, params, requestId) =>
+      ipcRenderer.invoke(CH.lspRequest, serverId, method, params, requestId),
+    notify: (serverId, method, params) =>
+      ipcRenderer.send(CH.lspSendNotification, serverId, method, params),
+    cancelRequest: (serverId, requestId) =>
+      ipcRenderer.send(CH.lspCancelRequest, serverId, requestId),
+    resourceOperation: (operation) =>
+      ipcRenderer.invoke(CH.lspResourceOperation, operation),
+    directoryIsEmpty: (path) =>
+      ipcRenderer.invoke(CH.lspDirectoryIsEmpty, path),
     onProgress: (cb) => on<LspProgress>(CH.lspProgress, cb),
     onLog: (cb) => on<LspLog>(CH.lspLog, cb),
     onNotify: (cb) =>
@@ -122,6 +165,11 @@ const api: LogosAPI = {
         cb,
       ),
     onRequest: (cb) => {
+      const controllers = new Map<number, AbortController>();
+      const cancelListener = (
+        _event: IpcRendererEvent,
+        payload: { requestId: number },
+      ) => controllers.get(payload.requestId)?.abort();
       const listener = async (
         _e: IpcRendererEvent,
         request: {
@@ -131,8 +179,10 @@ const api: LogosAPI = {
           params: unknown;
         },
       ) => {
+        const controller = new AbortController();
+        controllers.set(request.requestId, controller);
         try {
-          const result = await cb(request);
+          const result = await cb({ ...request, signal: controller.signal });
           await ipcRenderer.invoke(CH.lspClientResponse, request.requestId, {
             result,
           });
@@ -140,15 +190,24 @@ const api: LogosAPI = {
           await ipcRenderer.invoke(CH.lspClientResponse, request.requestId, {
             error: error instanceof Error ? error.message : String(error),
           });
+        } finally {
+          controllers.delete(request.requestId);
         }
       };
       ipcRenderer.on(CH.lspClientRequest, listener);
-      return () => ipcRenderer.removeListener(CH.lspClientRequest, listener);
+      ipcRenderer.on(CH.lspClientRequestCancel, cancelListener);
+      return () => {
+        for (const controller of controllers.values()) controller.abort();
+        controllers.clear();
+        ipcRenderer.removeListener(CH.lspClientRequest, listener);
+        ipcRenderer.removeListener(CH.lspClientRequestCancel, cancelListener);
+      };
     },
   },
   app: {
     versions: () => ipcRenderer.invoke(CH.appVersions),
     platform: () => ipcRenderer.invoke(CH.appPlatform),
+    openExternal: (url) => ipcRenderer.invoke(CH.appOpenExternal, url),
     windowControl: (action: WindowControl) =>
       ipcRenderer.send(CH.windowControl, action),
     onWindowState: (cb) => on<{ maximized: boolean }>(CH.windowStateChanged, cb),

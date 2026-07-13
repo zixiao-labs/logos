@@ -1001,6 +1001,49 @@ textarea.field {
   color: var(--muted);
 }
 
+.lsp-message {
+  width: min(520px, 90vw);
+  padding: 20px;
+  background: var(--overlay);
+  color: var(--overlay-foreground);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+.lsp-message p {
+  margin: 12px 0 20px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.lsp-message-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.lsp-message-actions .btn {
+  width: auto;
+}
+.lsp-results-title {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--separator);
+  font-size: 13px;
+  font-weight: 600;
+}
+.lsp-results-empty {
+  padding: 18px 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.lsp-results-expand {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
 /* ---- settings ------------------------------------------------------------ */
 .settings-view,
 .simple-view {

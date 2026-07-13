@@ -327,6 +327,22 @@ export interface LspProgress {
   progress?: number;
 }
 
+export interface LspWorkDoneProgress {
+  serverId: string;
+  token: string | number;
+  title: string;
+  message?: string;
+  percentage?: number;
+  cancellable: boolean;
+}
+
+export interface LspClientRequest {
+  serverId: string;
+  method: string;
+  params: unknown;
+  signal: AbortSignal;
+}
+
 export type LspLogLevel = "info" | "warning" | "error" | "debug";
 
 export interface LspLog {

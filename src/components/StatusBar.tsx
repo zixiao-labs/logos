@@ -13,6 +13,7 @@ export function StatusBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const diagnostics = useStore((s) => s.diagnostics);
   const lsp = useStore((s) => s.lsp);
+  const lspWorkDone = useStore((s) => s.lspWorkDone);
   const agentSessions = useStore((s) => s.agentSessions);
   const toggleLayout = useStore((s) => s.toggleLayout);
   const toggleLanguage = useStore((s) => s.toggleLanguage);
@@ -58,6 +59,7 @@ export function StatusBar() {
   }
 
   const agentRunning = agentSessions.some((a) => a.status === "running");
+  const workDone = Object.values(lspWorkDone);
 
   return (
     <div className="statusbar">
@@ -83,6 +85,27 @@ export function StatusBar() {
         </button>
       )}
       <div className="spacer" />
+      {workDone.map((progress) => (
+        <button
+          key={`${progress.serverId}:${typeof progress.token}:${progress.token}`}
+          className="si"
+          title={progress.message ?? progress.title}
+          disabled={!progress.cancellable}
+          onClick={() => {
+            window.logos.lsp.notify(
+              progress.serverId,
+              "window/workDoneProgress/cancel",
+              { token: progress.token },
+            );
+          }}
+        >
+          <Icon name="extensions" size={13} className="spin" />
+          {progress.message ?? progress.title}
+          {progress.percentage != null
+            ? ` ${Math.round(progress.percentage)}%`
+            : ""}
+        </button>
+      ))}
       {active?.kind === "file" && (
         <>
           <span className="si">

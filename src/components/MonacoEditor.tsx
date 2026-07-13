@@ -6,6 +6,9 @@ import {
   lspCloseDoc,
   lspOpenDoc,
   lspSaveDoc,
+  lspWillSaveDoc,
+  showLspHierarchy,
+  showLspMonikers,
   takeLspNavigationTarget,
 } from "../lib/lsp-monaco";
 import { serverIdForLanguage } from "../lib/language";
@@ -85,6 +88,21 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
     });
     editorRef.current = editor;
 
+    for (const [id, label, run] of [
+      ["incomingCalls", "Show Incoming Calls", () => showLspHierarchyForEditor(editor, "incoming")],
+      ["outgoingCalls", "Show Outgoing Calls", () => showLspHierarchyForEditor(editor, "outgoing")],
+      ["supertypes", "Show Supertypes", () => showLspHierarchyForEditor(editor, "supertypes")],
+      ["subtypes", "Show Subtypes", () => showLspHierarchyForEditor(editor, "subtypes")],
+      ["monikers", "Show Symbol Monikers", () => showLspMonikersForEditor(editor)],
+    ] as const) {
+      editor.addAction({
+        id: `logos.lsp.${id}`,
+        label,
+        contextMenuGroupId: "navigation",
+        run,
+      });
+    }
+
     const cursorSub = editor.onDidChangeCursorPosition((e) =>
       setCursor(e.position.lineNumber, e.position.column),
     );
@@ -105,10 +123,32 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
       editor.trigger("lsp", "editor.action.triggerSuggest", {});
     };
     window.addEventListener("logos:lsp-ready", onLspReady);
+    const onNavigate = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          path: string;
+          target: monaco.IRange | monaco.IPosition;
+          takeFocus?: boolean;
+        }>
+      ).detail;
+      const model = editor.getModel();
+      if (!model || model.uri.fsPath !== detail.path) return;
+      if ("startLineNumber" in detail.target) {
+        editor.setSelection(detail.target);
+        editor.revealRangeInCenter(detail.target);
+      } else {
+        editor.setPosition(detail.target);
+        editor.revealPositionInCenter(detail.target);
+      }
+      if (detail.takeFocus !== false) editor.focus();
+      takeLspNavigationTarget(detail.path);
+    };
+    window.addEventListener("logos:lsp-navigate", onNavigate);
 
     return () => {
       window.removeEventListener("logos:save", onSave);
       window.removeEventListener("logos:lsp-ready", onLspReady);
+      window.removeEventListener("logos:lsp-navigate", onNavigate);
       cursorSub.dispose();
       editor.dispose();
       editorRef.current = null;
@@ -185,6 +225,7 @@ async function saveCurrent(
   const model = editor.getModel();
   if (!model) return;
   const p = model.uri.fsPath;
+  await lspWillSaveDoc(p, model.getLanguageId());
   const content = model.getValue();
   await window.logos.fs.writeFile(p, content);
   baselines.set(p, content);
@@ -193,9 +234,69 @@ async function saveCurrent(
   lspSaveDoc(p, model.getLanguageId(), content);
 }
 
+function showLspHierarchyForEditor(
+  editor: monaco.editor.IStandaloneCodeEditor,
+  kind: "incoming" | "outgoing" | "supertypes" | "subtypes",
+) {
+  const model = editor.getModel();
+  const position = editor.getPosition();
+  if (model && position) void showLspHierarchy(model, position, kind);
+}
+
+function showLspMonikersForEditor(editor: monaco.editor.IStandaloneCodeEditor) {
+  const model = editor.getModel();
+  const position = editor.getPosition();
+  if (model && position) void showLspMonikers(model, position);
+}
+
 export function disposeModel(path: string) {
   const model = monaco.editor.getModel(monaco.Uri.file(path));
+  lspCloseDoc(path);
   model?.dispose();
   baselines.delete(path);
-  lspCloseDoc(path);
+}
+
+export async function closeFileEditor(path: string, dirty: boolean) {
+  const model = monaco.editor.getModel(monaco.Uri.file(path));
+  if (dirty) {
+    const choice = await new Promise<{ title: string } | null>((resolve) => {
+      window.dispatchEvent(
+        new CustomEvent("logos:lsp-message-request", {
+          detail: {
+            type: 2,
+            message: `Save changes to ${path}?`,
+            actions: [{ title: "Save" }, { title: "Don't Save" }],
+            resolve,
+          },
+        }),
+      );
+    });
+    if (!choice) return false;
+    if (choice.title === "Save" && model) {
+      try {
+        await lspWillSaveDoc(path, model.getLanguageId());
+        const content = model.getValue();
+        await window.logos.fs.writeFile(path, content);
+        baselines.set(path, content);
+        useStore.getState().setDirty(`file:${path}`, false);
+        lspSaveDoc(path, model.getLanguageId(), content);
+      } catch {
+        return false;
+      }
+    }
+  }
+  disposeModel(path);
+  return true;
+}
+
+export async function closeTabSafely(id: string) {
+  const { tabs, closeTab } = useStore.getState();
+  const tab = tabs.find((item) => item.id === id);
+  if (
+    tab?.kind === "file" &&
+    tab.path &&
+    !(await closeFileEditor(tab.path, Boolean(tab.dirty)))
+  ) return false;
+  closeTab(id);
+  return true;
 }
