@@ -149,6 +149,8 @@ const api: LogosAPI = {
     stop: (serverId) => ipcRenderer.invoke(CH.lspStop, serverId),
     request: (serverId, method, params, requestId) =>
       ipcRenderer.invoke(CH.lspRequest, serverId, method, params, requestId),
+    notify: (serverId, method, params) =>
+      ipcRenderer.send(CH.lspSendNotification, serverId, method, params),
     cancelRequest: (serverId, requestId) =>
       ipcRenderer.send(CH.lspCancelRequest, serverId, requestId),
     resourceOperation: (operation) =>

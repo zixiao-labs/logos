@@ -15,18 +15,18 @@ export interface LspMessageRequestDetail {
 
 export function LspMessageDialog() {
   const queue = useRef<LspMessageRequestDetail[]>([]);
+  const activeRequest = useRef<LspMessageRequestDetail | null>(null);
   const [request, setRequest] = useState<LspMessageRequestDetail | null>(null);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
       const next = (event as CustomEvent<LspMessageRequestDetail>).detail;
-      setRequest((current) => {
-        if (current) {
-          queue.current.push(next);
-          return current;
-        }
-        return next;
-      });
+      if (activeRequest.current) {
+        queue.current.push(next);
+        return;
+      }
+      activeRequest.current = next;
+      setRequest(next);
     };
     window.addEventListener("logos:lsp-message-request", onRequest);
     return () => window.removeEventListener("logos:lsp-message-request", onRequest);
@@ -36,7 +36,9 @@ export function LspMessageDialog() {
     if (!request?.signal) return;
     const onAbort = () => {
       request.resolve(null);
-      setRequest(queue.current.shift() ?? null);
+      const next = queue.current.shift() ?? null;
+      activeRequest.current = next;
+      setRequest(next);
     };
     if (request.signal.aborted) onAbort();
     else request.signal.addEventListener("abort", onAbort, { once: true });
@@ -47,7 +49,9 @@ export function LspMessageDialog() {
 
   const finish = (value: MessageActionItem | null) => {
     request.resolve(value);
-    setRequest(queue.current.shift() ?? null);
+    const next = queue.current.shift() ?? null;
+    activeRequest.current = next;
+    setRequest(next);
   };
 
   const heading =

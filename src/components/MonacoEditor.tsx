@@ -288,3 +288,15 @@ export async function closeFileEditor(path: string, dirty: boolean) {
   disposeModel(path);
   return true;
 }
+
+export async function closeTabSafely(id: string) {
+  const { tabs, closeTab } = useStore.getState();
+  const tab = tabs.find((item) => item.id === id);
+  if (
+    tab?.kind === "file" &&
+    tab.path &&
+    !(await closeFileEditor(tab.path, Boolean(tab.dirty)))
+  ) return false;
+  closeTab(id);
+  return true;
+}

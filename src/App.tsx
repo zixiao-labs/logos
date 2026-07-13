@@ -4,7 +4,7 @@ import { useStore } from "./state/store";
 import { notifyInfo } from "./lib/toast";
 import type { MenuAction } from "./shared/types";
 import { setupLspMonaco } from "./lib/lsp-monaco";
-import { closeFileEditor } from "./components/MonacoEditor";
+import { closeTabSafely } from "./components/MonacoEditor";
 import { TitleBar } from "./components/TitleBar";
 import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
@@ -98,16 +98,7 @@ export function App() {
           window.dispatchEvent(new CustomEvent("logos:save"));
           break;
         case "file.closeEditor":
-          if (s.activeTabId) {
-            const tab = s.tabs.find((item) => item.id === s.activeTabId);
-            if (tab?.kind === "file" && tab.path) {
-              void closeFileEditor(tab.path, Boolean(tab.dirty)).then((closed) => {
-                if (closed) s.closeTab(tab.id);
-              });
-            } else {
-              s.closeTab(s.activeTabId);
-            }
-          }
+          if (s.activeTabId) void closeTabSafely(s.activeTabId);
           break;
         case "view.commandPalette":
           s.paletteOpen ? s.closePalette() : s.openPalette();

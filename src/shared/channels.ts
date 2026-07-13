@@ -80,6 +80,7 @@ export const CH = {
   lspStart: "lsp:start",
   lspStop: "lsp:stop",
   lspRequest: "lsp:request",
+  lspSendNotification: "lsp:sendNotification",
   lspCancelRequest: "lsp:cancelRequest",
   lspFileOperation: "lsp:fileOperation",
   lspResourceOperation: "lsp:resourceOperation",

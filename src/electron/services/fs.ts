@@ -6,7 +6,7 @@ import type { ServiceContext } from "./context";
 
 /** Directories we never want to descend into or list eagerly. */
 const IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
-const WATCH_IGNORED = new Set([".git", ".DS_Store"]);
+const WATCH_IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
 
 async function readDir(dirPath: string): Promise<DirListing> {
   const dirents = await fs.readdir(dirPath, { withFileTypes: true });
@@ -93,7 +93,7 @@ export function registerFsService(ctx: ServiceContext): () => void {
         (eventType, filename) => {
           if (!filename) return;
           const name = filename.toString();
-           if ([...WATCH_IGNORED].some((ig) => name.split(path.sep).includes(ig)))
+          if ([...WATCH_IGNORED].some((ig) => name.split(path.sep).includes(ig)))
             return;
           const full = path.join(root, name);
           const key = `${eventType}:${full}`;

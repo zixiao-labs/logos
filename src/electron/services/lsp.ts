@@ -17,6 +17,7 @@ import type {
 } from "vscode-languageserver-protocol";
 import type { CancellationToken, Disposable } from "vscode-jsonrpc";
 import { matchesLspGlob } from "../../lib/lsp-client";
+import type { LspResourceOperation } from "../../shared/api";
 import { CH } from "../../shared/channels";
 import type {
   LanguageServerDescriptor,
@@ -1403,6 +1404,9 @@ export function registerLspService(ctx: ServiceContext): () => void {
       }
     },
   );
+  ipcMain.on(CH.lspSendNotification, (_e, id: string, method: string, params: unknown) => {
+    running.get(id)?.connection.sendNotification(method, params);
+  });
   ipcMain.on(CH.lspCancelRequest, (_e, id: string, requestId: number) => {
     outboundRequests.get(`${id}:${requestId}`)?.cancel();
   });
@@ -1519,13 +1523,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
     CH.lspResourceOperation,
     async (
       _e,
-      operation: {
-        kind: "create" | "rename" | "delete";
-        path?: string;
-        from?: string;
-        to?: string;
-        overwrite?: boolean;
-      },
+      operation: LspResourceOperation,
     ) => {
       if (operation.kind === "create" && operation.path) {
         await fs.mkdir(path.dirname(operation.path), { recursive: true });
@@ -1534,16 +1532,17 @@ export function registerLspService(ctx: ServiceContext): () => void {
       }
       if (operation.kind === "rename" && operation.from && operation.to) {
         if (operation.from === operation.to) return;
+        const targetExists = await fs
+          .access(operation.to)
+          .then(() => true)
+          .catch(() => false);
+        if (targetExists && !operation.overwrite) {
+          throw new Error(`Rename target already exists: ${operation.to}`);
+        }
         let backup: string | undefined;
-        if (operation.overwrite) {
-          const targetExists = await fs
-            .access(operation.to)
-            .then(() => true)
-            .catch(() => false);
-          if (targetExists) {
-            backup = `${operation.to}.logos-backup-${randomUUID()}`;
-            await fs.rename(operation.to, backup);
-          }
+        if (targetExists) {
+          backup = `${operation.to}.logos-backup-${randomUUID()}`;
+          await fs.rename(operation.to, backup);
         }
         try {
           await fs.rename(operation.from, operation.to);

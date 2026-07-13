@@ -1,7 +1,7 @@
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import { Icon } from "./Icon";
-import { closeFileEditor, MonacoEditor } from "./MonacoEditor";
+import { closeTabSafely, MonacoEditor } from "./MonacoEditor";
 import { SettingsView } from "./SettingsView";
 import { ExtensionsView } from "./ExtensionsView";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -13,20 +13,13 @@ export function EditorArea() {
   const activeTabId = useStore((s) => s.activeTabId);
   const root = useStore((s) => s.root);
   const setActiveTab = useStore((s) => s.setActiveTab);
-  const closeTab = useStore((s) => s.closeTab);
   const openPreview = useStore((s) => s.openPreview);
 
   const active = tabs.find((tb) => tb.id === activeTabId) ?? null;
 
   async function close(e: React.MouseEvent, id: string) {
     e.stopPropagation();
-    const tab = tabs.find((tb) => tb.id === id);
-    if (
-      tab?.kind === "file" &&
-      tab.path &&
-      !(await closeFileEditor(tab.path, Boolean(tab.dirty)))
-    ) return;
-    closeTab(id);
+    await closeTabSafely(id);
   }
 
   const crumbs =

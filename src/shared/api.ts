@@ -28,6 +28,11 @@ import type { ServerCapabilities } from "vscode-languageserver-protocol";
 /** Unsubscribe handle returned by every `on…` subscription. */
 export type Unsubscribe = () => void;
 
+export type LspResourceOperation =
+  | { kind: "create"; path: string; overwrite?: boolean }
+  | { kind: "rename"; from: string; to: string; overwrite?: boolean }
+  | { kind: "delete"; path: string };
+
 /**
  * The complete surface exposed on `window.logos` by the preload script.
  * The renderer talks to the main process exclusively through this object.
@@ -122,14 +127,9 @@ export interface LogosAPI {
       params: unknown,
       requestId?: number,
     ): Promise<unknown>;
+    notify(serverId: string, method: string, params: unknown): void;
     cancelRequest(serverId: string, requestId: number): void;
-    resourceOperation(operation: {
-      kind: "create" | "rename" | "delete";
-      path?: string;
-      from?: string;
-      to?: string;
-      overwrite?: boolean;
-    }): Promise<void>;
+    resourceOperation(operation: LspResourceOperation): Promise<void>;
     directoryIsEmpty(path: string): Promise<boolean>;
     onProgress(cb: (p: LspProgress) => void): Unsubscribe;
     onLog(cb: (entry: LspLog) => void): Unsubscribe;

@@ -90,9 +90,9 @@ export function StatusBar() {
           key={`${progress.serverId}:${typeof progress.token}:${progress.token}`}
           className="si"
           title={progress.message ?? progress.title}
+          disabled={!progress.cancellable}
           onClick={() => {
-            if (!progress.cancellable) return;
-            void window.logos.lsp.request(
+            window.logos.lsp.notify(
               progress.serverId,
               "window/workDoneProgress/cancel",
               { token: progress.token },

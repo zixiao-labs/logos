@@ -70,11 +70,16 @@ export function CommandPalette() {
       setSymbols([]);
       return;
     }
+    const symbolQuery = query.slice(1).trim();
+    if (!symbolQuery) {
+      setSymbols([]);
+      return;
+    }
     let cancelled = false;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       void lspWorkspaceSymbols(
-        query.slice(1).trim(),
+        symbolQuery,
         controller.signal,
         (partial) => {
           if (!cancelled) setSymbols(partial.slice(0, 100));
