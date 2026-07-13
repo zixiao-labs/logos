@@ -6,6 +6,7 @@ import {
   lspCloseDoc,
   lspOpenDoc,
   lspSaveDoc,
+  takeLspNavigationTarget,
 } from "../lib/lsp-monaco";
 import { serverIdForLanguage } from "../lib/language";
 
@@ -129,15 +130,37 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
           model = monaco.editor.createModel(content, language, uri);
           baselines.set(path, content);
           let version = 1;
-          model.onDidChangeContent(() => {
+          model.onDidChangeContent((event) => {
             const m = model!;
             setDirty(`file:${path}`, m.getValue() !== baselines.get(path));
-            lspChangeDoc(path, language, m.getValue(), ++version);
+            lspChangeDoc(
+              path,
+              language,
+              m.getValue(),
+              ++version,
+              event.changes.map((change) => ({
+                range: change.range,
+                rangeLength: change.rangeLength,
+                text: change.text,
+              })),
+            );
           });
           lspOpenDoc(path, language, content);
         }
       }
-      editorRef.current?.setModel(model);
+      const editor = editorRef.current;
+      editor?.setModel(model);
+      const target = takeLspNavigationTarget(path);
+      if (editor && target) {
+        if ("startLineNumber" in target) {
+          editor.setSelection(target);
+          editor.revealRangeInCenter(target);
+        } else {
+          editor.setPosition(target);
+          editor.revealPositionInCenter(target);
+        }
+        editor.focus();
+      }
     })();
     return () => {
       cancelled = true;

@@ -22,6 +22,7 @@ import type {
   TerminalCreated,
   WindowControl,
 } from "./types";
+import type { ServerCapabilities } from "vscode-languageserver-protocol";
 
 /** Unsubscribe handle returned by every `on…` subscription. */
 export type Unsubscribe = () => void;
@@ -111,7 +112,7 @@ export interface LogosAPI {
     list(): Promise<LanguageServerInfo[]>;
     install(id: string): Promise<void>;
     uninstall(id: string): Promise<void>;
-    start(serverId: string, root: string): Promise<void>;
+    start(serverId: string, root: string): Promise<ServerCapabilities>;
     stop(serverId: string): Promise<void>;
     /** Generic JSON-RPC passthrough to a running server. */
     request(serverId: string, method: string, params: unknown): Promise<unknown>;
@@ -119,6 +120,13 @@ export interface LogosAPI {
     onLog(cb: (entry: LspLog) => void): Unsubscribe;
     onNotify(
       cb: (n: { serverId: string; method: string; params: unknown }) => void,
+    ): Unsubscribe;
+    onRequest(
+      cb: (request: {
+        serverId: string;
+        method: string;
+        params: unknown;
+      }) => Promise<unknown>,
     ): Unsubscribe;
   };
   app: {
