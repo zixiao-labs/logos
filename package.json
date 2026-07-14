@@ -20,7 +20,7 @@
     "postinstall": "electron-rebuild",
     "test": "lightning run",
     "test:watch": "lightning watch",
-    "test:coverage": "lightning run --coverage",
+    "test:coverage": "lightning run --config lightning.coverage.config.ts --coverage",
     "typecheck": "tsc --noEmit"
   },
   "author": "Zixiao Laboratories",
