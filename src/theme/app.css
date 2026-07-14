@@ -596,6 +596,281 @@ textarea.field {
   overflow: hidden;
 }
 
+/* ---- debugger ----------------------------------------------------------- */
+.debug-sidebar {
+  min-height: 0;
+}
+.debug-launch-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 9px;
+  border-bottom: 1px solid var(--separator);
+}
+.debug-launch-row > .select,
+.debug-launch-row > .btn {
+  flex: 1;
+  min-width: 0;
+}
+.debug-run {
+  flex-shrink: 0;
+  color: var(--success, #55a968);
+}
+.debug-toolbar {
+  display: flex;
+  flex-shrink: 0;
+}
+.debug-stop {
+  color: var(--danger);
+}
+.debug-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  border-bottom: 1px solid var(--separator);
+}
+.debug-notice.error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+.debug-session-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--separator);
+  font-size: 11.5px;
+}
+.debug-status-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.debug-session-status.running .debug-status-dot {
+  background: var(--success, #55a968);
+}
+.debug-session-status.stopped .debug-status-dot {
+  background: var(--warning);
+}
+.debug-session-status.error .debug-status-dot {
+  background: var(--danger);
+}
+.debug-status-label {
+  margin-left: auto;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.debug-section {
+  border-bottom: 1px solid var(--separator);
+  padding-bottom: 4px;
+}
+.debug-section-title,
+.debug-scope-title {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 0 9px;
+  color: var(--foreground);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.debug-scope-title {
+  min-height: 21px;
+  padding-left: 12px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.debug-empty {
+  padding: 3px 12px 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.debug-tree-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-height: 21px;
+  padding-right: 7px;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  cursor: default;
+  white-space: nowrap;
+}
+.debug-tree-row:hover,
+.debug-frame:hover,
+.debug-breakpoint:hover {
+  background: var(--surface-secondary);
+}
+.debug-tree-chevron {
+  width: 12px;
+  align-self: center;
+  flex-shrink: 0;
+}
+.debug-variable-name {
+  color: var(--foreground);
+}
+.debug-variable-value {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 72%, var(--foreground));
+  text-overflow: ellipsis;
+}
+.debug-variable-type {
+  margin-left: auto;
+  color: var(--muted);
+  font-style: italic;
+}
+.debug-thread-select {
+  width: calc(100% - 16px);
+  margin: 0 8px 4px;
+}
+.debug-frame {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 23px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px 0 14px;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 11.5px;
+  text-align: left;
+}
+.debug-frame.active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.debug-frame-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.debug-frame-location {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 10.5px;
+}
+.debug-breakpoint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 23px;
+  padding: 0 5px 0 14px;
+  font-size: 11.5px;
+}
+.debug-breakpoint > button:not(.icon-btn) {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.debug-breakpoint-dot {
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--danger);
+  border-radius: 50%;
+}
+.debug-breakpoint-dot.verified {
+  background: var(--danger);
+}
+
+.debug-console {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--background);
+  font-family: var(--mono-font);
+  font-size: 12px;
+}
+.debug-console-output {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 5px 12px;
+  user-select: text;
+}
+.debug-console-entry {
+  min-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+}
+.debug-console-entry.stderr,
+.debug-console-entry.error {
+  color: var(--danger);
+}
+.debug-console-entry.important {
+  color: var(--warning);
+}
+.debug-console-entry.input {
+  color: var(--muted);
+}
+.debug-console-entry.result {
+  color: color-mix(in srgb, var(--accent) 72%, var(--foreground));
+}
+.debug-console-entry.telemetry {
+  color: var(--muted);
+  opacity: 0.7;
+}
+.debug-console-input {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 27px;
+  padding: 2px 12px;
+  border-top: 1px solid var(--separator);
+  color: var(--accent);
+}
+.debug-console-input input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.logos-breakpoint-glyph,
+.logos-breakpoint-glyph-unverified {
+  box-sizing: border-box !important;
+  width: 11px !important;
+  height: 11px !important;
+  margin-left: 4px;
+  margin-top: 5px;
+  border: 2px solid #e05252;
+  border-radius: 50%;
+}
+.logos-breakpoint-glyph {
+  background: #e05252;
+}
+.logos-debug-stack-line {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
 /* ---- status bar ---------------------------------------------------------- */
 .statusbar {
   display: flex;

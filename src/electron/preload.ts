@@ -14,6 +14,11 @@ import type {
   TerminalCreateOptions,
   WindowControl,
 } from "../shared/types";
+import type {
+  DapArguments,
+  DebugSessionEvent,
+  DebugStartRequest,
+} from "../shared/dap";
 
 /** Subscribe to a broadcast channel; returns an unsubscribe handle. */
 function on<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
@@ -203,6 +208,24 @@ const api: LogosAPI = {
         ipcRenderer.removeListener(CH.lspClientRequestCancel, cancelListener);
       };
     },
+  },
+  debug: {
+    list: () => ipcRenderer.invoke(CH.debugList),
+    listAdapters: () => ipcRenderer.invoke(CH.debugListAdapters),
+    start: (request: DebugStartRequest) =>
+      ipcRenderer.invoke(CH.debugStart, request),
+    stop: (sessionId, terminateDebuggee) =>
+      ipcRenderer.invoke(CH.debugStop, sessionId, terminateDebuggee),
+    request: (sessionId, command, args?: DapArguments) =>
+      ipcRenderer.invoke(CH.debugRequest, sessionId, command, args),
+    setBreakpoints: (sessionId, sourcePath, breakpoints) =>
+      ipcRenderer.invoke(
+        CH.debugSetBreakpoints,
+        sessionId,
+        sourcePath,
+        breakpoints,
+      ),
+    onEvent: (cb) => on<DebugSessionEvent>(CH.debugEvent, cb),
   },
   app: {
     versions: () => ipcRenderer.invoke(CH.appVersions),

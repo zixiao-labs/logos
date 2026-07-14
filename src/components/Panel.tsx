@@ -5,6 +5,7 @@ import { basename } from "../lib/language";
 import type { LspLogLevel } from "../shared/types";
 import { Icon } from "./Icon";
 import { TerminalView } from "./TerminalView";
+import { DebugConsole } from "./DebugConsole";
 
 const TABS: { id: PanelTab; key: string }[] = [
   { id: "problems", key: "panel.problems" },
@@ -126,6 +127,8 @@ export function Panel() {
   const openFile = useStore((s) => s.openFile);
   const lspLogs = useStore((s) => s.lspLogs);
   const clearLspLogs = useStore((s) => s.clearLspLogs);
+  const debugConsole = useStore((s) => s.debug.console);
+  const clearDebugConsole = useStore((s) => s.clearDebugConsole);
   const outputRef = useRef<HTMLDivElement>(null);
   const outputRowsCacheRef = useRef<OutputRowsCache>({
     title: "",
@@ -232,6 +235,11 @@ export function Panel() {
         )}
         {panelTab === "output" && lspLogs.length > 0 && (
           <button className="btn ghost" style={{ width: "auto" }} onClick={clearLspLogs}>
+            {t("panel.clear")}
+          </button>
+        )}
+        {panelTab === "debug" && debugConsole.length > 0 && (
+          <button className="btn ghost" style={{ width: "auto" }} onClick={clearDebugConsole}>
             {t("panel.clear")}
           </button>
         )}
@@ -379,7 +387,9 @@ export function Panel() {
           </div>
         )}
 
-        {(panelTab === "debug" || panelTab === "ports") && (
+        {panelTab === "debug" && <DebugConsole />}
+
+        {panelTab === "ports" && (
           <div
             className="scroll-y"
             style={{
@@ -389,8 +399,7 @@ export function Panel() {
               fontSize: 12,
             }}
           >
-            {panelTab === "debug" && "Debugging arrives in Stage 3.5 (DAP)."}
-            {panelTab === "ports" && "No forwarded ports."}
+            No forwarded ports.
           </div>
         )}
       </div>

@@ -92,6 +92,15 @@ export const CH = {
   lspNotify: "lsp:notify", // push (server -> client notifications, e.g. diagnostics)
   lspLog: "lsp:log", // push (server stderr / installer output)
 
+  // debug adapter protocol
+  debugList: "debug:list",
+  debugListAdapters: "debug:listAdapters",
+  debugStart: "debug:start",
+  debugStop: "debug:stop",
+  debugRequest: "debug:request",
+  debugSetBreakpoints: "debug:setBreakpoints",
+  debugEvent: "debug:event", // push
+
   // app / window
   appVersions: "app:versions",
   appPlatform: "app:platform",

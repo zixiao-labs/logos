@@ -36,9 +36,41 @@ export function App() {
   // Global keyboard shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const s = useStore.getState();
+      const debugSession = s.debug.activeSessionId
+        ? s.debug.sessions[s.debug.activeSessionId]
+        : undefined;
+      if (e.key === "F5") {
+        e.preventDefault();
+        if (e.shiftKey) void s.stopDebug();
+        else if (debugSession?.status === "stopped") void s.debugContinue();
+        else if (
+          !debugSession ||
+          debugSession.status === "terminated" ||
+          debugSession.status === "error"
+        ) void s.startDebug();
+        return;
+      }
+      if (e.key === "F9") {
+        const active = s.tabs.find((tab) => tab.id === s.activeTabId);
+        if (active?.kind === "file" && active.path) {
+          e.preventDefault();
+          void s.toggleBreakpoint(active.path, s.cursor.line);
+        }
+        return;
+      }
+      if (e.key === "F10" && debugSession?.status === "stopped") {
+        e.preventDefault();
+        void s.debugStep("next");
+        return;
+      }
+      if (e.key === "F11" && debugSession?.status === "stopped") {
+        e.preventDefault();
+        void s.debugStep(e.shiftKey ? "stepOut" : "stepIn");
+        return;
+      }
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
-      const s = useStore.getState();
       const key = e.key.toLowerCase();
       if (key === "p") {
         e.preventDefault();

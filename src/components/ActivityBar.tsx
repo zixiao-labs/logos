@@ -6,6 +6,7 @@ const VIEW_ITEMS: { view: SidebarView; icon: IconName; label: string }[] = [
   { view: "explorer", icon: "files", label: "activity.explorer" },
   { view: "search", icon: "search", label: "activity.search" },
   { view: "git", icon: "git", label: "activity.git" },
+  { view: "debug", icon: "debug", label: "activity.debug" },
 ];
 
 export function ActivityBar() {
