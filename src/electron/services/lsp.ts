@@ -17,6 +17,7 @@ import type {
 } from "vscode-languageserver-protocol";
 import type { CancellationToken, Disposable } from "vscode-jsonrpc";
 import { matchesLspGlob } from "../../lib/lsp-client";
+import { isLspRequestCancelled } from "../../lib/lsp-errors";
 import type { LspResourceOperation } from "../../shared/api";
 import { CH } from "../../shared/channels";
 import type {
@@ -1398,6 +1399,11 @@ export function registerLspService(ctx: ServiceContext): () => void {
       outboundRequests.set(key, source);
       try {
         return await server.connection.sendRequest(method, params, source.token);
+      } catch (error) {
+        // Monaco routinely cancels stale requests while the user keeps typing.
+        // Resolve those requests normally so Electron does not report an IPC error.
+        if (isLspRequestCancelled(error)) return null;
+        throw error;
       } finally {
         outboundRequests.delete(key);
         source.dispose();
