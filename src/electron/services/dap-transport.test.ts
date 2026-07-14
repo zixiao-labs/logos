@@ -85,4 +85,24 @@ describe("DAP transport", () => {
     expect(() => parser.push("Content-Length: nope\r\n\r\n{}"))
       .toThrow();
   });
+
+  it("rejects oversized headers before buffering them indefinitely", () => {
+    const parser = new DapMessageParser();
+    expect(() => parser.push(`X-Debug: ${"x".repeat(8 * 1024)}`)).toThrow(
+      /header exceeds/,
+    );
+  });
+
+  it("accepts a maximum-size header split inside its separator", () => {
+    const body = JSON.stringify({ seq: 1, type: "event", event: "ready" });
+    const prefix = `Content-Length: ${Buffer.byteLength(body)}\r\nX-Fill: `;
+    const header = `${prefix}${"x".repeat(8 * 1024 - prefix.length)}`;
+    const parser = new DapMessageParser();
+
+    expect(parser.push(`${header}\r`)).toEqual([]);
+    expect(parser.push("\n\r")).toEqual([]);
+    expect(parser.push(`\n${body}`)).toEqual([
+      { seq: 1, type: "event", event: "ready" },
+    ]);
+  });
 });

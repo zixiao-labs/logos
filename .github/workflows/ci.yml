@@ -28,6 +28,9 @@ jobs:
       - name: Install dependencies (skip native rebuild)
         run: npm ci --ignore-scripts
 
+      - name: Run Test
+        run: npm run test  
+
       - name: Unit and integration tests with coverage
         run: npm run test:coverage -- --reporter=github-actions
 

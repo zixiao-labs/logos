@@ -27,6 +27,7 @@ function createContext(): ServiceContext {
         mainWindow.webContents.send(channel, ...args);
     },
     userDataDir: app.getPath("userData"),
+    isPackaged: app.isPackaged,
   };
 }
 

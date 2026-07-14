@@ -5,9 +5,11 @@
   "type": "module",
   "main": "dist/main.cjs",
   "scripts": {
+    "predev": "npm run prepackage:debug-adapters",
     "dev": "nasti dev",
     "build": "nasti build",
     "preview": "nasti preview",
+    "preelectron": "npm run prepackage:debug-adapters",
     "electron": "nasti electron",
     "build:app": "nasti electron-build",
     "prepackage:servers": "node scripts/install-language-servers.mjs",

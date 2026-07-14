@@ -50,7 +50,25 @@ interface DebugSession {
 
 interface DebugServiceDependencies {
   spawnProcess: SpawnProcess;
-  connectSocket(port: number, host: string): Promise<net.Socket>;
+  connectSocket(
+    port: number,
+    host: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<net.Socket>;
+}
+
+interface DebugTransport {
+  connection: DapConnection;
+  adapterProcess?: ChildProcessWithoutNullStreams;
+  socket?: net.Socket;
+  endpoint?: { host: string; port: number };
+}
+
+interface PendingDebugStart {
+  info: DebugSessionInfo;
+  controller: AbortController;
+  transport?: DebugTransport;
 }
 
 const BUILTIN_TYPES: Record<string, string> = {
@@ -100,19 +118,43 @@ function errorMessage(error: unknown): string {
 async function defaultConnectSocket(
   port: number,
   host: string,
+  timeoutMs = 10_000,
+  signal?: AbortSignal,
 ): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Debug session start cancelled"));
+      return;
+    }
     const socket = net.createConnection({ port, host });
-    const onError = (error: Error) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
       socket.off("connect", onConnect);
+      socket.off("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onError = (error: Error) => {
+      cleanup();
       reject(error);
     };
     const onConnect = () => {
-      socket.off("error", onError);
+      cleanup();
       resolve(socket);
     };
+    const onAbort = () => {
+      cleanup();
+      socket.destroy();
+      reject(new Error("Debug session start cancelled"));
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(new Error(`Timed out connecting to debug adapter at ${host}:${port}`));
+    }, timeoutMs);
     socket.once("error", onError);
     socket.once("connect", onConnect);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -140,12 +182,43 @@ function builtInDapType(type: string): string {
 
 function jsDebugCandidates(ctx: ServiceContext): string[] {
   const resourceRoot = process.resourcesPath;
-  return [
-    path.join(process.cwd(), "build", "debug-adapters", "js-debug", "src", "dapDebugServer.js"),
-    path.join(resourceRoot, "debug-adapters", "js-debug", "src", "dapDebugServer.js"),
-    path.join(resourceRoot, "debug-adapters", "js-debug", "dist", "src", "dapDebugServer.js"),
-    path.join(ctx.userDataDir, "debug-adapters", "js-debug", "src", "dapDebugServer.js"),
+  const candidates = [
+    path.join(
+      resourceRoot,
+      "debug-adapters",
+      "js-debug",
+      "src",
+      "dapDebugServer.js",
+    ),
+    path.join(
+      resourceRoot,
+      "debug-adapters",
+      "js-debug",
+      "dist",
+      "src",
+      "dapDebugServer.js",
+    ),
+    path.join(
+      ctx.userDataDir,
+      "debug-adapters",
+      "js-debug",
+      "src",
+      "dapDebugServer.js",
+    ),
   ];
+  if (!ctx.isPackaged) {
+    candidates.unshift(
+      path.join(
+        process.cwd(),
+        "build",
+        "debug-adapters",
+        "js-debug",
+        "src",
+        "dapDebugServer.js",
+      ),
+    );
+  }
+  return candidates;
 }
 
 async function firstExisting(paths: string[]): Promise<string | null> {
@@ -194,17 +267,44 @@ async function adapterInfo(ctx: ServiceContext): Promise<DebugAdapterInfo[]> {
       label: "Node.js",
       builtIn: true,
       available: Boolean(jsDebug),
-      ...(!jsDebug ? { message: "JavaScript debug adapter is not installed" } : {}),
+      ...(!jsDebug
+        ? { message: "JavaScript debug adapter is not installed" }
+        : {}),
     },
     {
       type: "chrome",
       label: "Chrome",
       builtIn: true,
       available: Boolean(jsDebug),
-      ...(!jsDebug ? { message: "JavaScript debug adapter is not installed" } : {}),
+      ...(!jsDebug
+        ? { message: "JavaScript debug adapter is not installed" }
+        : {}),
     },
     {
       type: "electron",
+      label: "Electron",
+      builtIn: true,
+      available: Boolean(jsDebug),
+      ...(!jsDebug
+        ? { message: "JavaScript debug adapter is not installed" }
+        : {}),
+    },
+    {
+      type: "pwa-node",
+      label: "Node.js",
+      builtIn: true,
+      available: Boolean(jsDebug),
+      ...(!jsDebug ? { message: "JavaScript debug adapter is not installed" } : {}),
+    },
+    {
+      type: "pwa-chrome",
+      label: "Chrome",
+      builtIn: true,
+      available: Boolean(jsDebug),
+      ...(!jsDebug ? { message: "JavaScript debug adapter is not installed" } : {}),
+    },
+    {
+      type: "pwa-extensionHost",
       label: "Electron",
       builtIn: true,
       available: Boolean(jsDebug),
@@ -228,6 +328,66 @@ export function registerDebugService(
   const spawnProcess = dependencies.spawnProcess ?? spawn;
   const connectSocket = dependencies.connectSocket ?? defaultConnectSocket;
   const sessions = new Map<string, DebugSession>();
+  const pendingStarts = new Map<string, PendingDebugStart>();
+
+  const disposeTransport = (transport: DebugTransport | undefined) => {
+    transport?.connection.dispose();
+    transport?.socket?.destroy();
+    if (transport?.adapterProcess && !transport.adapterProcess.killed) {
+      transport.adapterProcess.kill();
+    }
+  };
+
+  const connectWithCancellation = (
+    port: number,
+    host: string,
+    timeoutMs: number | undefined,
+    signal: AbortSignal,
+  ): Promise<net.Socket> => {
+    if (signal.aborted) {
+      return Promise.reject(new Error("Debug session start cancelled"));
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("Debug session start cancelled"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      void connectSocket(port, host, timeoutMs, signal).then(
+        (socket) => {
+          signal.removeEventListener("abort", onAbort);
+          if (settled || signal.aborted) {
+            socket.destroy();
+            return;
+          }
+          settled = true;
+          resolve(socket);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          if (settled) return;
+          settled = true;
+          reject(error);
+        },
+      );
+    });
+  };
+
+  const cancelPendingStart = (pendingStart: PendingDebugStart) => {
+    if (pendingStart.controller.signal.aborted) return;
+    pendingStart.controller.abort();
+    disposeTransport(pendingStart.transport);
+    ctx.send(CH.debugEvent, {
+      kind: "session",
+      session: {
+        ...pendingStart.info,
+        status: "terminated",
+        message: undefined,
+      },
+    });
+  };
 
   const publishSession = (session: DebugSession) =>
     ctx.send(CH.debugEvent, { kind: "session", session: cloneInfo(session) });
@@ -248,6 +408,11 @@ export function registerDebugService(
   const cleanupSession = (session: DebugSession) => {
     if (session.disposed) return;
     session.disposed = true;
+    for (const pendingStart of pendingStarts.values()) {
+      if (pendingStart.info.parentSessionId === session.info.id) {
+        cancelPendingStart(pendingStart);
+      }
+    }
     for (const child of sessions.values()) {
       if (child.info.parentSessionId !== session.info.id) continue;
       if (child.info.status !== "terminated") setStatus(child, "terminated");
@@ -335,9 +500,10 @@ export function registerDebugService(
       void configureSession(session);
     } else if (event.event === "stopped") {
       setStatus(session, "stopped");
-    } else if (event.event === "continued" || event.event === "process") {
-      setStatus(session, "running");
-    } else if (event.event === "terminated" || event.event === "exited") {
+    } else if (event.event === "continued") {
+      const body = asArguments(event.body);
+      if (body.allThreadsContinued !== false) setStatus(session, "running");
+    } else if (event.event === "terminated") {
       setStatus(session, "terminated");
     } else if (event.event === "capabilities") {
       const body = asArguments(event.body);
@@ -349,7 +515,7 @@ export function registerDebugService(
       publishSession(session);
     }
     ctx.send(CH.debugEvent, { kind: "dap", sessionId: session.info.id, event });
-    if (event.event === "terminated" || event.event === "exited") {
+    if (event.event === "terminated") {
       queueMicrotask(() => {
         if (session.disposed) return;
         void session.connection
@@ -467,10 +633,13 @@ export function registerDebugService(
         typeof configuration.name === "string" && configuration.name
           ? configuration.name
           : parent.configuration.name,
-      type: parent.configuration.type,
+      type:
+        typeof configuration.type === "string" && configuration.type
+          ? configuration.type
+          : parent.configuration.type,
       request: requestKind,
     };
-    await startSession(
+    const child = await startSession(
       {
         configuration: childConfiguration,
         initialBreakpoints: Object.fromEntries(parent.breakpoints),
@@ -479,6 +648,9 @@ export function registerDebugService(
       { type: "server", ...parent.adapterEndpoint },
       parent,
     );
+    if (child.status === "terminated") {
+      throw new Error("Child debug session start cancelled");
+    }
   };
 
   const handleReverseRequest = (session: DebugSession, request: DapRequest) => {
@@ -488,14 +660,18 @@ export function registerDebugService(
     }
     if (request.command === "startDebugging") {
       void startChildSession(session, request).then(
-        () => session.connection.sendResponse(request, true),
-        (error) =>
+        () => {
+          if (!session.disposed) session.connection.sendResponse(request, true);
+        },
+        (error) => {
+          if (session.disposed) return;
           session.connection.sendResponse(
             request,
             false,
             undefined,
             errorMessage(error),
-          ),
+          );
+        },
       );
       return;
     }
@@ -507,12 +683,16 @@ export function registerDebugService(
     );
   };
 
-  const spawnAdapterProcess = async (descriptor: {
-    command: string;
-    args?: string[];
-    cwd?: string;
-    env?: Record<string, string | null>;
-  }): Promise<ChildProcessWithoutNullStreams> => {
+  const spawnAdapterProcess = async (
+    descriptor: {
+      command: string;
+      args?: string[];
+      cwd?: string;
+      env?: Record<string, string | null>;
+    },
+    signal: AbortSignal,
+  ): Promise<ChildProcessWithoutNullStreams> => {
+    if (signal.aborted) throw new Error("Debug session start cancelled");
     if (!descriptor.command.trim()) {
       throw new Error("Debug adapter command is empty");
     }
@@ -523,6 +703,7 @@ export function registerDebugService(
         );
       });
     }
+    if (signal.aborted) throw new Error("Debug session start cancelled");
     const child = spawnProcess(descriptor.command, descriptor.args ?? [], {
       cwd: descriptor.cwd,
       env: mergeEnvironment(descriptor.env),
@@ -530,28 +711,43 @@ export function registerDebugService(
       stdio: "pipe",
       windowsHide: true,
     });
+    // Keep Node's special EventEmitter "error" event handled between spawning
+    // the process and attaching the session-level failure handler.
+    child.on("error", () => undefined);
     await new Promise<void>((resolve, reject) => {
-      const onSpawn = () => {
+      const cleanup = () => {
+        child.off("spawn", onSpawn);
         child.off("error", onError);
+        signal.removeEventListener("abort", onAbort);
+      };
+      const onSpawn = () => {
+        cleanup();
         resolve();
       };
       const onError = (error: Error) => {
-        child.off("spawn", onSpawn);
+        cleanup();
         reject(error);
+      };
+      const onAbort = () => {
+        cleanup();
+        if (!child.killed) child.kill();
+        reject(new Error("Debug session start cancelled"));
       };
       child.once("spawn", onSpawn);
       child.once("error", onError);
+      signal.addEventListener("abort", onAbort, { once: true });
     });
     return child;
   };
 
   const openExecutable = async (
     descriptor: DebugAdapterExecutable,
+    signal: AbortSignal,
   ): Promise<{
     connection: DapConnection;
     adapterProcess: ChildProcessWithoutNullStreams;
   }> => {
-    const child = await spawnAdapterProcess(descriptor);
+    const child = await spawnAdapterProcess(descriptor, signal);
     return {
       connection: new DapConnection(child.stdout, child.stdin),
       adapterProcess: child,
@@ -560,6 +756,7 @@ export function registerDebugService(
 
   const openExecutableServer = async (
     descriptor: DebugAdapterExecutableServer,
+    signal: AbortSignal,
   ): Promise<{
     connection: DapConnection;
     adapterProcess: ChildProcessWithoutNullStreams;
@@ -581,12 +778,22 @@ export function registerDebugService(
         .replaceAll("${host}", host),
     );
     if (!hasPortVariable) args.push(String(port));
-    const child = await spawnAdapterProcess({ ...descriptor, args });
+    const child = await spawnAdapterProcess({ ...descriptor, args }, signal);
     const deadline = Date.now() + 10_000;
     let lastError: unknown;
-    while (Date.now() < deadline && child.exitCode == null) {
+    while (
+      !signal.aborted &&
+      Date.now() < deadline &&
+      child.exitCode == null &&
+      child.signalCode == null
+    ) {
       try {
-        const socket = await connectSocket(port, host);
+        const socket = await connectWithCancellation(
+          port,
+          host,
+          Math.max(1, Math.min(1_000, deadline - Date.now())),
+          signal,
+        );
         return {
           socket,
           endpoint: { host, port },
@@ -595,10 +802,24 @@ export function registerDebugService(
         };
       } catch (error) {
         lastError = error;
+        if (signal.aborted) break;
         await new Promise((resolve) => setTimeout(resolve, 75));
       }
     }
-    if (!child.killed) child.kill();
+    if (
+      !child.killed &&
+      child.exitCode == null &&
+      child.signalCode == null
+    ) {
+      child.kill();
+    }
+    if (signal.aborted) throw new Error("Debug session start cancelled");
+    if (child.exitCode != null || child.signalCode != null) {
+      const suffix = child.signalCode
+        ? `signal ${child.signalCode}`
+        : `code ${child.exitCode ?? "unknown"}`;
+      throw new Error(`Debug adapter exited with ${suffix}`);
+    }
     throw new Error(
       `Unable to connect to debug adapter at ${host}:${port}: ${errorMessage(lastError)}`,
     );
@@ -610,7 +831,9 @@ export function registerDebugService(
     parentSession?: DebugSession,
   ) => {
     const id = request.sessionId ?? randomUUID();
-    if (sessions.has(id)) throw new Error(`Debug session '${id}' already exists`);
+    if (sessions.has(id) || pendingStarts.has(id)) {
+      throw new Error(`Debug session '${id}' already exists`);
+    }
     const info: DebugSessionInfo = {
       id,
       parentSessionId: parentSession?.info.id,
@@ -620,32 +843,39 @@ export function registerDebugService(
       status: "initializing",
       capabilities: {},
     };
+    const pendingStart: PendingDebugStart = {
+      info,
+      controller: new AbortController(),
+    };
+    pendingStarts.set(id, pendingStart);
+    const signal = pendingStart.controller.signal;
 
-    let transport:
-      | {
-          connection: DapConnection;
-          adapterProcess?: ChildProcessWithoutNullStreams;
-          socket?: net.Socket;
-          endpoint?: { host: string; port: number };
-        }
-      | undefined;
+    let transport: DebugTransport | undefined;
+    let session: DebugSession | undefined;
     try {
       const descriptor =
         adapterOverride ?? (await resolveAdapter(ctx, request.configuration));
+      if (signal.aborted) throw new Error("Debug session start cancelled");
       const dapType = request.configuration.adapter || adapterOverride
         ? request.configuration.type
         : builtInDapType(request.configuration.type);
       if (descriptor.type === "executable") {
-        transport = await openExecutable(descriptor);
+        transport = await openExecutable(descriptor, signal);
       } else if (descriptor.type === "executable-server") {
-        transport = await openExecutableServer(descriptor);
+        transport = await openExecutableServer(descriptor, signal);
       } else {
-        if (!Number.isInteger(descriptor.port) || descriptor.port <= 0) {
+        if (
+          !Number.isInteger(descriptor.port) ||
+          descriptor.port <= 0 ||
+          descriptor.port > 65_535
+        ) {
           throw new Error("Debug adapter server port is invalid");
         }
-        const socket = await connectSocket(
+        const socket = await connectWithCancellation(
           descriptor.port,
           descriptor.host ?? "127.0.0.1",
+          undefined,
+          signal,
         );
         transport = {
           socket,
@@ -656,8 +886,10 @@ export function registerDebugService(
           },
         };
       }
+      pendingStart.transport = transport;
+      if (signal.aborted) throw new Error("Debug session start cancelled");
 
-      const session: DebugSession = {
+      const activeSession: DebugSession = {
         info,
         configuration: request.configuration,
         dapType,
@@ -673,14 +905,20 @@ export function registerDebugService(
         configurationStarted: false,
         disposed: false,
       };
-      sessions.set(id, session);
-      publishSession(session);
-      session.connection.onEvent((event) => handleEvent(session, event));
-      session.connection.onRequest((reverseRequest) =>
-        handleReverseRequest(session, reverseRequest),
+      session = activeSession;
+      sessions.set(id, activeSession);
+      pendingStarts.delete(id);
+      publishSession(activeSession);
+      activeSession.connection.onEvent((event) =>
+        handleEvent(activeSession, event),
       );
-      session.connection.onError((error) => failSession(session, error));
-      session.adapterProcess?.stderr.on("data", (data: Buffer | string) => {
+      activeSession.connection.onRequest((reverseRequest) =>
+        handleReverseRequest(activeSession, reverseRequest),
+      );
+      activeSession.connection.onError((error) =>
+        failSession(activeSession, error),
+      );
+      activeSession.adapterProcess?.stderr.on("data", (data: Buffer | string) => {
         ctx.send(CH.debugEvent, {
           kind: "adapter-output",
           sessionId: id,
@@ -688,62 +926,81 @@ export function registerDebugService(
           output: data.toString(),
         });
       });
-      if (session.adapterOutputFromStdout) {
-        session.adapterProcess?.stdout.on("data", (data: Buffer | string) => {
-          ctx.send(CH.debugEvent, {
-            kind: "adapter-output",
-            sessionId: id,
-            category: "stdout",
-            output: data.toString(),
-          });
-        });
+      if (activeSession.adapterOutputFromStdout) {
+        activeSession.adapterProcess?.stdout.on(
+          "data",
+          (data: Buffer | string) => {
+            ctx.send(CH.debugEvent, {
+              kind: "adapter-output",
+              sessionId: id,
+              category: "stdout",
+              output: data.toString(),
+            });
+          },
+        );
       }
-      session.adapterProcess?.once("exit", (code, signal) => {
-        if (session.disposed) return;
+      activeSession.adapterProcess?.once("exit", (code, signal) => {
+        if (activeSession.disposed) return;
         const suffix = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
-        failSession(session, new Error(`Debug adapter exited with ${suffix}`));
+        failSession(activeSession, new Error(`Debug adapter exited with ${suffix}`));
       });
+      activeSession.adapterProcess?.once("error", (error) =>
+        failSession(activeSession, error),
+      );
 
-      const initialize = await session.connection.sendRequest<DapCapabilities>(
-        "initialize",
-        {
+      const initialize =
+        await activeSession.connection.sendRequest<DapCapabilities>("initialize", {
           clientID: "logos",
           clientName: "Logos",
-          adapterID: session.dapType,
+          adapterID: activeSession.dapType,
           locale: "en-US",
           linesStartAt1: true,
           columnsStartAt1: true,
           pathFormat: "path",
           supportsVariableType: true,
-          supportsVariablePaging: true,
           supportsRunInTerminalRequest: true,
-          supportsStartDebuggingRequest: true,
-          supportsMemoryReferences: true,
-          supportsProgressReporting: true,
-          supportsInvalidatedEvent: true,
-          supportsMemoryEvent: true,
+          supportsStartDebuggingRequest: Boolean(activeSession.adapterEndpoint),
           supportsArgsCanBeInterpretedByShell: true,
-          supportsANSIStyling: true,
         },
       );
-      session.info = {
-        ...session.info,
+      activeSession.info = {
+        ...activeSession.info,
         status: "starting",
         capabilities: initialize.body ?? {},
       };
-      publishSession(session);
-      await session.connection.sendRequest(
+      publishSession(activeSession);
+      await activeSession.connection.sendRequest(
         request.configuration.request,
-        configurationArguments(request.configuration, session.dapType),
+        configurationArguments(request.configuration, activeSession.dapType),
       );
-      if (session.info.status === "starting" && session.configurationStarted) {
-        setStatus(session, "running");
+      if (
+        activeSession.info.status === "starting" &&
+        activeSession.configurationStarted
+      ) {
+        setStatus(activeSession, "running");
       }
-      return cloneInfo(session);
+      return cloneInfo(activeSession);
     } catch (error) {
-      transport?.connection.dispose();
-      transport?.socket?.destroy();
-      transport?.adapterProcess?.kill();
+      const cancelled =
+        signal.aborted ||
+        session?.info.status === "terminating" ||
+        session?.info.status === "terminated";
+      if (session && !session.disposed) {
+        if (cancelled) {
+          setStatus(session, "terminated");
+          cleanupSession(session);
+        } else {
+          failSession(session, error);
+        }
+      } else if (!session) {
+        disposeTransport(transport);
+      }
+      if (cancelled) {
+        return session
+          ? cloneInfo(session)
+          : { ...info, status: "terminated", message: undefined };
+      }
+      if (session) throw error;
       const failed: DebugSessionInfo = {
         ...info,
         status: "error",
@@ -751,6 +1008,8 @@ export function registerDebugService(
       };
       ctx.send(CH.debugEvent, { kind: "session", session: failed });
       throw error;
+    } finally {
+      pendingStarts.delete(id);
     }
   };
 
@@ -790,6 +1049,11 @@ export function registerDebugService(
   ipcMain.handle(
     CH.debugStop,
     async (_event, sessionId: string, terminateDebuggee = true) => {
+      const pendingStart = pendingStarts.get(sessionId);
+      if (pendingStart) {
+        cancelPendingStart(pendingStart);
+        return;
+      }
       const session = sessions.get(sessionId);
       if (!session) return;
       setStatus(session, "terminating");
@@ -815,6 +1079,10 @@ export function registerDebugService(
   );
 
   return () => {
+    for (const pendingStart of pendingStarts.values()) {
+      cancelPendingStart(pendingStart);
+    }
+    pendingStarts.clear();
     for (const session of sessions.values()) {
       setStatus(session, "terminated");
       cleanupSession(session);

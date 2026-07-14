@@ -8,6 +8,7 @@ import type {
 } from "../../shared/dap";
 
 const HEADER_SEPARATOR = Buffer.from("\r\n\r\n", "ascii");
+const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 
 function isDapMessage(value: unknown): value is DapMessage {
@@ -34,7 +35,18 @@ export class DapMessageParser {
     while (true) {
       if (this.contentLength == null) {
         const headerEnd = this.buffer.indexOf(HEADER_SEPARATOR);
-        if (headerEnd < 0) break;
+        if (headerEnd < 0) {
+          if (
+            this.buffer.length >
+            MAX_HEADER_BYTES + HEADER_SEPARATOR.length - 1
+          ) {
+            throw new Error(`DAP header exceeds ${MAX_HEADER_BYTES} bytes`);
+          }
+          break;
+        }
+        if (headerEnd > MAX_HEADER_BYTES) {
+          throw new Error(`DAP header exceeds ${MAX_HEADER_BYTES} bytes`);
+        }
         const header = this.buffer.toString("ascii", 0, headerEnd);
         this.buffer = this.buffer.subarray(headerEnd + HEADER_SEPARATOR.length);
         const lengthHeader = header

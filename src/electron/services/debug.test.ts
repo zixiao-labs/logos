@@ -232,7 +232,11 @@ describe("debug service", () => {
       command: "startDebugging",
       arguments: {
         request: "launch",
-        configuration: { name: "Worker", __pendingTargetId: "target-1" },
+        configuration: {
+          name: "Worker",
+          type: "pwa-node",
+          __pendingTargetId: "target-1",
+        },
       },
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -246,8 +250,169 @@ describe("debug service", () => {
     expect(sessions).toHaveLength(2);
     expect(sessions.find((session) => session.name === "Worker")).toMatchObject({
       parentSessionId: "root-session",
+      debugType: "pwa-node",
       status: "running",
     });
+    cleanup();
+  });
+
+  it("cancels a session while its adapter connection is opening", async () => {
+    const ipc = createIpcHarness();
+    let resolveSocket!: (socket: Socket) => void;
+    const socketPromise = new Promise<Socket>((resolve) => {
+      resolveSocket = resolve;
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      { connectSocket: () => socketPromise },
+    );
+
+    const start = ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+      sessionId: "cancelled-session",
+      configuration: {
+        name: "Cancelled",
+        type: "custom",
+        request: "attach",
+        adapter: { type: "server", host: "127.0.0.1", port: 47121 },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await ipc.invoke(CH.debugStop, "cancelled-session", true);
+    expect(await start).toMatchObject({ status: "terminated" });
+
+    const socket = new PassThrough() as unknown as Socket;
+    resolveSocket(socket);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(socket.destroyed).toBe(true);
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+    cleanup();
+  });
+
+  it("removes a direct-server session when initialization fails", async () => {
+    const ipc = createIpcHarness();
+    let sequence = 1;
+    let adapter: ReturnType<typeof fakeDapSocket>;
+    adapter = fakeDapSocket((message) => {
+      if (message.type !== "request" || message.command !== "initialize") return;
+      adapter.send({
+        seq: sequence++,
+        type: "response",
+        request_seq: message.seq,
+        command: message.command,
+        success: false,
+        message: "initialize rejected",
+      });
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      { connectSocket: async () => adapter.socket },
+    );
+
+    await expect(
+      ipc.invoke(CH.debugStart, {
+        sessionId: "failed-session",
+        configuration: {
+          name: "Failed",
+          type: "custom",
+          request: "attach",
+          adapter: { type: "server", host: "127.0.0.1", port: 47122 },
+        },
+      }),
+    ).rejects.toThrow("initialize rejected");
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+    expect(adapter.socket.destroyed).toBe(true);
+    cleanup();
+  });
+
+  it("cancels an opening child session when its parent stops", async () => {
+    const ipc = createIpcHarness();
+    const fake = fakeAdapterProcess();
+    let sequence = 1;
+    let rootSocket: ReturnType<typeof fakeDapSocket>;
+    rootSocket = fakeDapSocket((message) => {
+      if (message.type !== "request") return;
+      rootSocket.send({
+        seq: sequence++,
+        type: "response",
+        request_seq: message.seq,
+        command: message.command,
+        success: true,
+      });
+      if (message.command === "launch") {
+        rootSocket.send({ seq: sequence++, type: "event", event: "initialized" });
+      }
+    });
+    const spawnProcess = (() => {
+      queueMicrotask(() => fake.proc.emit("spawn"));
+      return fake.proc;
+    }) as unknown as typeof spawn;
+    let resolveChildSocket!: (socket: Socket) => void;
+    let childConnectionStarted!: () => void;
+    const childStarted = new Promise<void>((resolve) => {
+      childConnectionStarted = resolve;
+    });
+    const childSocketPromise = new Promise<Socket>((resolve) => {
+      resolveChildSocket = resolve;
+    });
+    let connectionCount = 0;
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      {
+        spawnProcess,
+        connectSocket: () => {
+          connectionCount++;
+          if (connectionCount === 1) return Promise.resolve(rootSocket.socket);
+          childConnectionStarted();
+          return childSocketPromise;
+        },
+      },
+    );
+
+    await ipc.invoke(CH.debugStart, {
+      sessionId: "parent-session",
+      configuration: {
+        name: "Parent",
+        type: "custom",
+        request: "launch",
+        adapter: {
+          type: "executable-server",
+          command: "mock-adapter",
+          port: 47123,
+        },
+      },
+    });
+    rootSocket.send({
+      seq: sequence++,
+      type: "request",
+      command: "startDebugging",
+      arguments: {
+        request: "launch",
+        configuration: { name: "Child", type: "custom" },
+      },
+    });
+    await childStarted;
+    await ipc.invoke(CH.debugStop, "parent-session", true);
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+
+    const childSocket = new PassThrough() as unknown as Socket;
+    resolveChildSocket(childSocket);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(childSocket.destroyed).toBe(true);
     cleanup();
   });
 });

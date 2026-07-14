@@ -12,4 +12,6 @@ export interface ServiceContext {
   getWindow(): BrowserWindow | null;
   /** Absolute path to Electron's per-user data directory. */
   userDataDir: string;
+  /** Prevent development-only resources from shadowing signed packaged code. */
+  isPackaged?: boolean;
 }
