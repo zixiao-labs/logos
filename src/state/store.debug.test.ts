@@ -1,5 +1,9 @@
 import { describe, expect, it } from "@lightning-js/lightning";
-import type { DapResponse, DebugSessionInfo } from "../shared/dap";
+import type {
+  DapResponse,
+  DebugConsoleEntry,
+  DebugSessionInfo,
+} from "../shared/dap";
 import { useStore } from "./store";
 
 function session(id: string, status: DebugSessionInfo["status"]): DebugSessionInfo {
@@ -36,6 +40,23 @@ function setPausedDebugState() {
       stoppedReason: "breakpoint",
     },
   }));
+}
+
+function fullDebugConsole(): DebugConsoleEntry[] {
+  return Array.from({ length: 2_000 }, (_, index) => ({
+    id: `existing-${index}`,
+    category: "console" as const,
+    output: `${index}\n`,
+  }));
+}
+
+function expectCappedDebugError(message: string) {
+  const console = useStore.getState().debug.console;
+  expect(console).toHaveLength(2_000);
+  expect(console.at(-1)).toMatchObject({
+    category: "error",
+    output: `${message}\n`,
+  });
 }
 
 describe("debug store state isolation", () => {
@@ -207,6 +228,7 @@ describe("debug store state isolation", () => {
               line: 7,
               sessionData: {
                 a: { id: 42, verified: false, line: 9 },
+                b: { id: 43, verified: true, line: 7 },
               },
             },
           ],
@@ -245,9 +267,13 @@ describe("debug store state isolation", () => {
         },
       },
     });
-    expect(useStore.getState().debug.breakpoints["/workspace/app.js"]).toEqual(
-      [],
-    );
+    expect(useStore.getState().debug.breakpoints["/workspace/app.js"]).toEqual([
+      {
+        id: "local-1",
+        line: 7,
+        sessionData: { b: { id: 43, verified: true, line: 7 } },
+      },
+    ]);
   });
 
   it("keeps adapter-created breakpoints transient and out of client requests", async () => {
@@ -299,6 +325,176 @@ describe("debug store state isolation", () => {
     try {
       await useStore.getState().toggleBreakpoint("/workspace/app.js", 8);
       expect(requested).toEqual([{ line: 8 }]);
+    } finally {
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+    }
+
+    useStore.getState().applyDebugEvent({
+      kind: "dap",
+      sessionId: "a",
+      event: {
+        seq: 2,
+        type: "event",
+        event: "breakpoint",
+        body: {
+          reason: "removed",
+          breakpoint: { id: 42, verified: false },
+        },
+      },
+    });
+    const remaining = useStore.getState().debug.breakpoints["/workspace/app.js"];
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({ line: 8 });
+  });
+
+  it("caps errors from breakpoint, thread, and frame requests", async () => {
+    const originalWindow = globalThis.window;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        logos: {
+          debug: {
+            setBreakpoints: () => Promise.reject(new Error("breakpoints failed")),
+            request: (_sessionId: string, command: string) =>
+              Promise.reject(new Error(`${command} failed`)),
+          },
+        },
+      },
+    });
+
+    try {
+      useStore.setState((state) => ({
+        debug: {
+          ...state.debug,
+          sessions: { a: session("a", "running") },
+          activeSessionId: "a",
+          breakpoints: {},
+          console: fullDebugConsole(),
+        },
+      }));
+      await useStore.getState().toggleBreakpoint("/workspace/app.js", 7);
+      expectCappedDebugError("breakpoints failed");
+
+      setPausedDebugState();
+      useStore.setState((state) => ({
+        debug: { ...state.debug, console: fullDebugConsole() },
+      }));
+      await useStore.getState().selectDebugThread(1);
+      expectCappedDebugError("stackTrace failed");
+
+      setPausedDebugState();
+      useStore.setState((state) => ({
+        debug: { ...state.debug, console: fullDebugConsole() },
+      }));
+      await useStore.getState().selectDebugFrame(10);
+      expectCappedDebugError("scopes failed");
+    } finally {
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+    }
+  });
+
+  it("caps a threads error from the current stopped event", async () => {
+    setPausedDebugState();
+    useStore.setState((state) => ({
+      debug: { ...state.debug, console: fullDebugConsole() },
+    }));
+    const originalWindow = globalThis.window;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        logos: {
+          debug: {
+            request: () => Promise.reject(new Error("threads failed")),
+          },
+        },
+      },
+    });
+
+    try {
+      useStore.getState().applyDebugEvent({
+        kind: "dap",
+        sessionId: "a",
+        event: {
+          seq: 1,
+          type: "event",
+          event: "stopped",
+          body: { reason: "breakpoint", threadId: 1 },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expectCappedDebugError("threads failed");
+    } finally {
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+    }
+  });
+
+  it("ignores an older debug configuration load", async () => {
+    let resolveOldRead!: (source: string) => void;
+    let markOldReadStarted!: () => void;
+    const oldRead = new Promise<string>((resolve) => {
+      resolveOldRead = resolve;
+    });
+    const oldReadStarted = new Promise<void>((resolve) => {
+      markOldReadStarted = resolve;
+    });
+    const originalWindow = globalThis.window;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        logos: {
+          fs: {
+            exists: (path: string) =>
+              Promise.resolve(path.endsWith("/.logos/launch.json")),
+            readFile: (path: string) => {
+              if (path.startsWith("/old/")) {
+                markOldReadStarted();
+                return oldRead;
+              }
+              return Promise.resolve(
+                JSON.stringify({
+                  version: "0.2.0",
+                  configurations: [
+                    { name: "New", type: "custom", request: "launch" },
+                  ],
+                }),
+              );
+            },
+          },
+        },
+      },
+    });
+
+    try {
+      useStore.setState({ root: "/old" });
+      const oldLoad = useStore.getState().loadDebugConfigurations();
+      await oldReadStarted;
+      useStore.setState({ root: "/new" });
+      await useStore.getState().loadDebugConfigurations();
+      resolveOldRead(
+        JSON.stringify({
+          version: "0.2.0",
+          configurations: [
+            { name: "Old", type: "custom", request: "launch" },
+          ],
+        }),
+      );
+      await oldLoad;
+
+      expect(useStore.getState().debug.configurationPath).toBe(
+        "/new/.logos/launch.json",
+      );
+      expect(useStore.getState().debug.configurations).toMatchObject([
+        { name: "New" },
+      ]);
     } finally {
       Object.defineProperty(globalThis, "window", {
         configurable: true,

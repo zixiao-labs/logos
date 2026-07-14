@@ -876,7 +876,9 @@ export function registerDebugService(
           ? configuration.name
           : parent.configuration.name,
       type:
-        parent.configuration.type,
+        typeof configuration.type === "string" && configuration.type
+          ? configuration.type
+          : parent.dapType,
       request: requestKind,
     };
     const child = await startSession(
@@ -1385,7 +1387,7 @@ export function registerDebugService(
       const session = sessions.get(sessionId);
       if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
       const executionEventCounter = session.executionEventCounter;
-      const response = await session.connection.sendRequest(command, args);
+      const response = await session.connection.sendRequest(command, args, 30_000);
       if (
         (command === "continue" ||
           command === "next" ||

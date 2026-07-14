@@ -31,10 +31,13 @@ function VariableRow({ variable, depth = 0 }: { variable: DapVariable; depth?: n
 
   return (
     <>
-      <div
+      <button
+        type="button"
         className="debug-tree-row"
         style={{ paddingLeft: 8 + depth * 12 }}
         onClick={toggle}
+        disabled={!expandable}
+        aria-expanded={expandable ? expanded : undefined}
         title={variable.evaluateName ?? variable.name}
       >
         <span className="debug-tree-chevron">
@@ -45,7 +48,7 @@ function VariableRow({ variable, depth = 0 }: { variable: DapVariable; depth?: n
         <span className="debug-variable-name">{variable.name}</span>
         <span className="debug-variable-value">{variable.value}</span>
         {variable.type && <span className="debug-variable-type">{variable.type}</span>}
-      </div>
+      </button>
       {expanded &&
         children.map((child, index) => (
           <VariableRow

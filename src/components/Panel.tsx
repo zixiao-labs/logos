@@ -399,7 +399,7 @@ export function Panel() {
               fontSize: 12,
             }}
           >
-            No forwarded ports.
+            {t("panel.noPorts")}
           </div>
         )}
       </div>

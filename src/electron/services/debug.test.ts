@@ -688,6 +688,8 @@ describe("debug service", () => {
     const rootCommands: string[] = [];
     const childCommands: string[] = [];
     let childDisconnectArguments: unknown;
+    let childInitializeArguments: unknown;
+    let childAttachArguments: unknown;
 
     const createSocket = (isRoot: boolean) => {
       let current: ReturnType<typeof fakeDapSocket>;
@@ -700,6 +702,12 @@ describe("debug service", () => {
         }
         if (message.type !== "request") return;
         (isRoot ? rootCommands : childCommands).push(message.command);
+        if (!isRoot && message.command === "initialize") {
+          childInitializeArguments = message.arguments;
+        }
+        if (!isRoot && message.command === "attach") {
+          childAttachArguments = message.arguments;
+        }
         if (!isRoot && message.command === "disconnect") {
           childDisconnectArguments = message.arguments;
         }
@@ -786,10 +794,12 @@ describe("debug service", () => {
     expect(sessions).toHaveLength(2);
     expect(sessions.find((session) => session.name === "Worker")).toMatchObject({
       parentSessionId: "root-session",
-      debugType: "custom",
+      debugType: "pwa-node",
       request: "attach",
       status: "running",
     });
+    expect(childInitializeArguments).toMatchObject({ adapterID: "pwa-node" });
+    expect(childAttachArguments).toMatchObject({ type: "pwa-node" });
     await ipc.invoke(CH.debugStop, "root-session", true);
     expect(rootCommands).toContain("disconnect");
     expect(childCommands).toContain("disconnect");

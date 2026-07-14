@@ -86,6 +86,7 @@ let nextDebugFrameRequestId = 1;
 let activeDebugThreadRequestId = 0;
 let activeDebugFrameRequestId = 0;
 const debugBreakpointRequestVersions = new Map<string, number>();
+let debugConfigurationRequestVersion = 0;
 let nextDebugVariablePageReference = -1;
 const debugVariablePages = new Map<
   number,
@@ -520,15 +521,7 @@ function dapBreakpoints(
   return Object.fromEntries(
     Object.entries(breakpoints).map(([sourcePath, sourceBreakpoints]) => [
       sourcePath,
-      sourceBreakpoints
-        .filter((breakpoint) => !breakpoint.adapterCreated)
-        .map(({ line, column, condition, hitCondition, logMessage }) => ({
-          line,
-          ...(column == null ? {} : { column }),
-          ...(condition ? { condition } : {}),
-          ...(hitCondition ? { hitCondition } : {}),
-          ...(logMessage ? { logMessage } : {}),
-        })),
+      dapSourceBreakpoints(sourceBreakpoints),
     ]),
   );
 }
@@ -921,8 +914,10 @@ export const useStore = create<LogosState>((set, get) => ({
   },
 
   async loadDebugConfigurations() {
+    const requestVersion = ++debugConfigurationRequestVersion;
     const root = get().root;
     if (!root) {
+      if (debugConfigurationRequestVersion !== requestVersion) return;
       set((state) => ({
         debug: {
           ...state.debug,
@@ -944,6 +939,7 @@ export const useStore = create<LogosState>((set, get) => ({
           exists: await window.logos.fs.exists(candidate).catch(() => false),
         })),
       )).find((entry) => entry.exists)?.candidate ?? null;
+    if (debugConfigurationRequestVersion !== requestVersion) return;
     if (!configurationPath) {
       set((state) => ({
         debug: {
@@ -958,6 +954,7 @@ export const useStore = create<LogosState>((set, get) => ({
     try {
       const source = await window.logos.fs.readFile(configurationPath);
       const file = parseDebugConfigurationFile(source);
+      if (debugConfigurationRequestVersion !== requestVersion) return;
       set((state) => ({
         debug: {
           ...state.debug,
@@ -967,6 +964,7 @@ export const useStore = create<LogosState>((set, get) => ({
         },
       }));
     } catch (error) {
+      if (debugConfigurationRequestVersion !== requestVersion) return;
       set((state) => ({
         debug: {
           ...state.debug,
@@ -1214,18 +1212,7 @@ export const useStore = create<LogosState>((set, get) => ({
         },
       }));
     } catch (error) {
-      set((state) => ({
-        debug: {
-          ...state.debug,
-          console: [
-            ...state.debug.console,
-            consoleEntry(
-              "error",
-              `${error instanceof Error ? error.message : String(error)}\n`,
-            ),
-          ],
-        },
-      }));
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
     }
   },
   async selectDebugThread(threadId) {
@@ -1274,18 +1261,7 @@ export const useStore = create<LogosState>((set, get) => ({
       ) {
         return;
       }
-      set((state) => ({
-        debug: {
-          ...state.debug,
-          console: [
-            ...state.debug.console,
-            consoleEntry(
-              "error",
-              `${error instanceof Error ? error.message : String(error)}\n`,
-            ),
-          ],
-        },
-      }));
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
     }
   },
   async selectDebugFrame(frameId) {
@@ -1376,18 +1352,7 @@ export const useStore = create<LogosState>((set, get) => ({
       ) {
         return;
       }
-      set((state) => ({
-        debug: {
-          ...state.debug,
-          console: [
-            ...state.debug.console,
-            consoleEntry(
-              "error",
-              `${error instanceof Error ? error.message : String(error)}\n`,
-            ),
-          ],
-        },
-      }));
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
     }
   },
   async loadDebugVariables(reference) {
@@ -1821,18 +1786,7 @@ export const useStore = create<LogosState>((set, get) => ({
           if (!isCurrentDebugPause(get().debug, event.sessionId, generation)) {
             return;
           }
-          set((state) => ({
-            debug: {
-              ...state.debug,
-              console: [
-                ...state.debug.console,
-                consoleEntry(
-                  "error",
-                  `${error instanceof Error ? error.message : String(error)}\n`,
-                ),
-              ],
-            },
-          }));
+          set((state) => ({ debug: appendDebugError(state.debug, error) }));
         });
     } else if (dapEvent.event === "continued") {
       const body = dapEvent.body as DapContinuedEventBody | undefined;
@@ -1935,7 +1889,18 @@ export const useStore = create<LogosState>((set, get) => ({
           ];
         } else if (body?.reason === "removed") {
           if (!matchedPath || matchedIndex < 0) return state;
-          breakpoints[matchedPath].splice(matchedIndex, 1);
+          const breakpoint = breakpoints[matchedPath][matchedIndex];
+          if (breakpoint.adapterCreated) {
+            breakpoints[matchedPath].splice(matchedIndex, 1);
+          } else {
+            const sessionData = { ...breakpoint.sessionData };
+            delete sessionData[event.sessionId];
+            breakpoints[matchedPath][matchedIndex] = {
+              ...breakpoint,
+              sessionData:
+                Object.keys(sessionData).length > 0 ? sessionData : undefined,
+            };
+          }
         } else if (body?.reason === "changed") {
           if (!matchedPath || matchedIndex < 0) return state;
           const breakpoint = breakpoints[matchedPath][matchedIndex];

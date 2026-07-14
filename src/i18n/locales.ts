@@ -40,6 +40,7 @@ const en: Dict = {
   "panel.ports": "Ports",
   "panel.noProblems": "No problems have been detected.",
   "panel.noOutput": "No output yet.",
+  "panel.noPorts": "No forwarded ports.",
   "panel.newTerminal": "New Terminal",
   "panel.clear": "Clear",
 
@@ -233,6 +234,7 @@ const zh: Dict = {
   "panel.ports": "端口",
   "panel.noProblems": "未检测到任何问题。",
   "panel.noOutput": "暂无输出。",
+  "panel.noPorts": "暂无转发端口。",
   "panel.newTerminal": "新建终端",
   "panel.clear": "清空",
 

@@ -706,11 +706,18 @@ textarea.field {
   display: flex;
   align-items: baseline;
   gap: 5px;
+  width: 100%;
   min-height: 21px;
+  padding-top: 0;
   padding-right: 7px;
+  padding-bottom: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   font-family: var(--mono-font);
   font-size: 11px;
   cursor: default;
+  text-align: left;
   white-space: nowrap;
 }
 .debug-tree-row:hover,
@@ -810,16 +817,30 @@ textarea.field {
   font-size: 12px;
 }
 .debug-console-output {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 5px 12px;
   user-select: text;
 }
+.debug-console-output-spacer {
+  position: relative;
+  min-width: 100%;
+}
+.debug-console-output-window {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  min-width: 100%;
+  will-change: transform;
+}
 .debug-console-entry {
-  min-height: 18px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  height: 18px;
+  min-width: 100%;
+  width: max-content;
+  padding: 0 12px;
+  line-height: 18px;
+  white-space: pre;
   color: var(--foreground);
 }
 .debug-console-entry.stderr,
@@ -858,6 +879,10 @@ textarea.field {
   font-family: inherit;
   font-size: inherit;
 }
+.debug-console-input input:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: 1px;
+}
 
 .logos-breakpoint-glyph,
 .logos-breakpoint-glyph-unverified {
@@ -866,11 +891,11 @@ textarea.field {
   height: 11px !important;
   margin-left: 4px;
   margin-top: 5px;
-  border: 2px solid #e05252;
+  border: 2px solid var(--danger);
   border-radius: 50%;
 }
 .logos-breakpoint-glyph {
-  background: #e05252;
+  background: var(--danger);
 }
 .logos-debug-stack-line {
   background: color-mix(in srgb, var(--warning) 12%, transparent);

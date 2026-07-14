@@ -263,7 +263,12 @@ export function MonacoEditor({
           useStore.getState().debug.breakpoints[path] ?? EMPTY_DEBUG_BREAKPOINTS,
           useStore.getState().debug.activeSessionId,
         );
-        updateStackFrameDecoration(editor, stackDecorationsRef.current, path);
+        updateStackFrameDecoration(
+          editor,
+          stackDecorationsRef.current,
+          path,
+          readOnly,
+        );
       }
       const target = takeLspNavigationTarget(path);
       if (editor && target) {
@@ -280,7 +285,7 @@ export function MonacoEditor({
     return () => {
       cancelled = true;
     };
-  }, [language, path, providedContent, setDirty]);
+  }, [language, path, providedContent, readOnly, setDirty]);
 
   useEffect(() => {
     updateBreakpointDecorations(
@@ -293,8 +298,13 @@ export function MonacoEditor({
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
-    updateStackFrameDecoration(editor, stackDecorationsRef.current, path);
-  }, [path, selectedFrame]);
+    updateStackFrameDecoration(
+      editor,
+      stackDecorationsRef.current,
+      path,
+      readOnly,
+    );
+  }, [path, readOnly, selectedFrame]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -402,7 +412,9 @@ function updateStackFrameDecoration(
   editor: monaco.editor.IStandaloneCodeEditor,
   collection: monaco.editor.IEditorDecorationsCollection | null,
   path: string,
+  readOnly: boolean,
 ): void {
+  if (readOnly) return;
   const debug = useStore.getState().debug;
   const frame = debug.stackFrames.find(
     (candidate) => candidate.id === debug.selectedFrameId,

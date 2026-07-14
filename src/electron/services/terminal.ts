@@ -52,8 +52,11 @@ export function registerTerminalService(
   };
 
   const killTerminal = (id: string) => {
-    terminals.get(id)?.kill();
-    terminals.delete(id);
+    try {
+      terminals.get(id)?.kill();
+    } finally {
+      terminals.delete(id);
+    }
   };
 
   ctx.terminal = { create: createTerminal, kill: killTerminal };
