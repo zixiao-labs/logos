@@ -60,7 +60,31 @@ export function stripJsonComments(source: string): string {
 }
 
 function removeTrailingCommas(source: string): string {
-  return source.replace(/,\s*([}\]])/g, "$1");
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (inString) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+    if (char === ",") {
+      let next = index + 1;
+      while (/\s/.test(source[next] ?? "")) next++;
+      if (source[next] === "}" || source[next] === "]") continue;
+    }
+    result += char;
+  }
+  return result;
 }
 
 function isConfiguration(value: unknown): value is DebugLaunchConfiguration {
@@ -103,9 +127,14 @@ export interface DebugVariableContext {
 
 function substituteString(value: string, context: DebugVariableContext): string {
   const file = context.file ?? "";
+  const workspaceFolder = context.workspaceFolder.replace(/[/\\]+$/, "");
+  const fileIsInWorkspace =
+    file === workspaceFolder ||
+    file.startsWith(`${workspaceFolder}/`) ||
+    file.startsWith(`${workspaceFolder}\\`);
   const relativeFile =
-    file && file.startsWith(context.workspaceFolder)
-      ? file.slice(context.workspaceFolder.length).replace(/^[/\\]/, "")
+    file && fileIsInWorkspace
+      ? file.slice(workspaceFolder.length).replace(/^[/\\]/, "")
       : file;
   const variables: Record<string, string> = {
     workspaceFolder: context.workspaceFolder,
@@ -117,7 +146,12 @@ function substituteString(value: string, context: DebugVariableContext): string 
     pathSeparator: context.workspaceFolder.includes("\\") ? "\\" : "/",
   };
   return value.replace(/\$\{([^}]+)\}/g, (match, name: string) =>
-    Object.hasOwn(variables, name) ? variables[name] : match,
+    Object.hasOwn(variables, name)
+      ? variables[name]
+      : name.startsWith("workspaceFolder:") &&
+          name.slice("workspaceFolder:".length) === basename(workspaceFolder)
+        ? workspaceFolder
+        : match,
   );
 }
 

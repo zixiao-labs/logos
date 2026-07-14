@@ -24,31 +24,43 @@ export function registerTerminalService(
   const terminals = new Map<string, IPty>();
   let counter = 0;
 
+  const createTerminal = (opts: TerminalCreateOptions): TerminalCreated => {
+    const id = `term-${++counter}`;
+    const shell = opts.executable || opts.shell || defaultShell();
+    const env = { ...process.env } as Record<string, string>;
+    for (const [key, value] of Object.entries(opts.env ?? {})) {
+      if (value == null) delete env[key];
+      else env[key] = value;
+    }
+    env.TERM = "xterm-256color";
+    const proc = pty.spawn(shell, opts.args ?? [], {
+      name: "xterm-256color",
+      cols: opts.cols ?? 80,
+      rows: opts.rows ?? 24,
+      cwd: opts.cwd || os.homedir(),
+      env,
+    });
+    terminals.set(id, proc);
+
+    proc.onData((data) => ctx.send(CH.terminalData, { id, data }));
+    proc.onExit(({ exitCode }) => {
+      ctx.send(CH.terminalExit, { id, code: exitCode });
+      terminals.delete(id);
+    });
+
+    return { id, pid: proc.pid, shell };
+  };
+
+  const killTerminal = (id: string) => {
+    terminals.get(id)?.kill();
+    terminals.delete(id);
+  };
+
+  ctx.terminal = { create: createTerminal, kill: killTerminal };
+
   ipcMain.handle(
     CH.terminalCreate,
-    (_e, opts: TerminalCreateOptions): TerminalCreated => {
-      const id = `term-${++counter}`;
-      const shell = opts.shell || defaultShell();
-      const proc = pty.spawn(shell, [], {
-        name: "xterm-256color",
-        cols: opts.cols ?? 80,
-        rows: opts.rows ?? 24,
-        cwd: opts.cwd || os.homedir(),
-        env: { ...process.env, TERM: "xterm-256color" } as Record<
-          string,
-          string
-        >,
-      });
-      terminals.set(id, proc);
-
-      proc.onData((data) => ctx.send(CH.terminalData, { id, data }));
-      proc.onExit(({ exitCode }) => {
-        ctx.send(CH.terminalExit, { id, code: exitCode });
-        terminals.delete(id);
-      });
-
-      return { id, pid: proc.pid, shell };
-    },
+    (_e, opts: TerminalCreateOptions): TerminalCreated => createTerminal(opts),
   );
 
   // These are fire-and-forget (`send` from renderer), registered with `on`.
@@ -65,8 +77,7 @@ export function registerTerminalService(
   });
 
   ipcMain.on(CH.terminalKill, (_e, id: string) => {
-    terminals.get(id)?.kill();
-    terminals.delete(id);
+    killTerminal(id);
   });
 
   return () => {
@@ -78,5 +89,6 @@ export function registerTerminalService(
       }
     }
     terminals.clear();
+    if (ctx.terminal?.create === createTerminal) delete ctx.terminal;
   };
 }

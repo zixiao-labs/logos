@@ -41,10 +41,17 @@ interface DebugSession {
   adapterOutputFromStdout: boolean;
   socket?: net.Socket;
   terminalProcesses: Set<ChildProcess>;
+  terminalIds: Set<string>;
   breakpoints: Map<string, DapSourceBreakpoint[]>;
+  breakpointVersions: Map<string, number>;
   exceptionBreakpoints: string[];
   readyForBreakpoints: boolean;
   configurationStarted: boolean;
+  initializationTimer?: ReturnType<typeof setTimeout>;
+  executionEventCounter: number;
+  startController: AbortController;
+  shutdownPromise?: Promise<void>;
+  userStopRequested: boolean;
   disposed: boolean;
 }
 
@@ -98,6 +105,32 @@ function configurationArguments(
 ): DapArguments {
   const { adapter: _adapter, ...dapConfiguration } = configuration;
   return { ...dapConfiguration, type: dapType };
+}
+
+function resolveConfigurationEnvironment(value: unknown): unknown {
+  if (typeof value === "string") {
+    const unsupported = value.match(/\$\{(command|input):[^}]+\}/);
+    if (unsupported) {
+      throw new Error(
+        `Debug variable '${unsupported[0]}' is not supported by Logos`,
+      );
+    }
+    return value.replace(/\$\{env:([^}]+)\}/g, (_match, name: string) =>
+      process.env[name] ?? "",
+    );
+  }
+  if (Array.isArray(value)) {
+    return value.map(resolveConfigurationEnvironment);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        resolveConfigurationEnvironment(item),
+      ]),
+    );
+  }
+  return value;
 }
 
 function mergeEnvironment(
@@ -330,11 +363,45 @@ export function registerDebugService(
   const sessions = new Map<string, DebugSession>();
   const pendingStarts = new Map<string, PendingDebugStart>();
 
+  const killProcessTree = (child: ChildProcess, force = false) => {
+    if (child.exitCode != null || child.signalCode != null) return;
+    if (process.platform === "win32" && child.pid) {
+      const killer = spawn(
+        "taskkill.exe",
+        ["/pid", String(child.pid), "/t", ...(force ? ["/f"] : [])],
+        { stdio: "ignore", windowsHide: true },
+      );
+      killer.unref();
+      return;
+    }
+    const signal = force ? "SIGKILL" : "SIGTERM";
+    if (child.pid) {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch {
+        // The process may not be a group leader (for example in injected tests).
+      }
+    }
+    try {
+      child.kill(signal);
+    } catch {
+      // The process may have exited between the checks above.
+    }
+  };
+
+  const stopProcessTree = (child: ChildProcess) => {
+    killProcessTree(child);
+    const forceTimer = setTimeout(() => killProcessTree(child, true), 1_000);
+    forceTimer.unref();
+    child.once("exit", () => clearTimeout(forceTimer));
+  };
+
   const disposeTransport = (transport: DebugTransport | undefined) => {
     transport?.connection.dispose();
     transport?.socket?.destroy();
-    if (transport?.adapterProcess && !transport.adapterProcess.killed) {
-      transport.adapterProcess.kill();
+    if (transport?.adapterProcess) {
+      stopProcessTree(transport.adapterProcess);
     }
   };
 
@@ -405,9 +472,16 @@ export function registerDebugService(
     publishSession(session);
   };
 
-  const cleanupSession = (session: DebugSession) => {
+  const cleanupSession = (
+    session: DebugSession,
+    terminateDebuggee = true,
+  ) => {
     if (session.disposed) return;
     session.disposed = true;
+    if (session.initializationTimer) {
+      clearTimeout(session.initializationTimer);
+      session.initializationTimer = undefined;
+    }
     for (const pendingStart of pendingStarts.values()) {
       if (pendingStart.info.parentSessionId === session.info.id) {
         cancelPendingStart(pendingStart);
@@ -420,13 +494,19 @@ export function registerDebugService(
     }
     session.connection.dispose();
     session.socket?.destroy();
-    if (session.adapterProcess && !session.adapterProcess.killed) {
-      session.adapterProcess.kill();
+    if (session.adapterProcess) {
+      stopProcessTree(session.adapterProcess);
     }
-    for (const child of session.terminalProcesses) {
-      if (!child.killed) child.kill();
+    if (terminateDebuggee) {
+      for (const child of session.terminalProcesses) {
+        stopProcessTree(child);
+      }
+      for (const terminalId of session.terminalIds) {
+        ctx.terminal?.kill(terminalId);
+      }
     }
     session.terminalProcesses.clear();
+    session.terminalIds.clear();
     sessions.delete(session.info.id);
   };
 
@@ -448,6 +528,8 @@ export function registerDebugService(
     sourcePath: string,
     breakpoints: DapSourceBreakpoint[],
   ): Promise<DapBreakpoint[]> => {
+    const version = (session.breakpointVersions.get(sourcePath) ?? 0) + 1;
+    session.breakpointVersions.set(sourcePath, version);
     session.breakpoints.set(sourcePath, breakpoints);
     if (!session.readyForBreakpoints) {
       return breakpoints.map((breakpoint) => ({
@@ -463,33 +545,94 @@ export function registerDebugService(
       breakpoints,
       lines: breakpoints.map((breakpoint) => breakpoint.line),
       sourceModified: false,
-    });
+    }, 30_000);
     const result = response.body?.breakpoints ?? [];
-    ctx.send(CH.debugEvent, {
-      kind: "breakpoints",
-      sessionId: session.info.id,
-      sourcePath,
-      breakpoints: result,
-    });
+    if (
+      !session.disposed &&
+      session.breakpointVersions.get(sourcePath) === version
+    ) {
+      ctx.send(CH.debugEvent, {
+        kind: "breakpoints",
+        sessionId: session.info.id,
+        sourcePath,
+        requestedBreakpoints: breakpoints,
+        breakpoints: result,
+      });
+    }
     return result;
+  };
+
+  const sessionIsStopping = (session: DebugSession): boolean =>
+    session.startController.signal.aborted ||
+    session.disposed ||
+    session.info.status === "terminating" ||
+    session.info.status === "terminated";
+
+  const ensureSessionStarting = (session: DebugSession): void => {
+    if (sessionIsStopping(session)) {
+      throw new Error("Debug session start cancelled");
+    }
+  };
+
+  const armInitializationTimer = (session: DebugSession) => {
+    if (session.initializationTimer) clearTimeout(session.initializationTimer);
+    session.initializationTimer = setTimeout(() => {
+      if (!session.disposed && session.info.status === "starting") {
+        failSession(
+          session,
+          new Error("Debug adapter did not complete session configuration"),
+        );
+      }
+    }, 30_000);
+    session.initializationTimer.unref();
   };
 
   const configureSession = async (session: DebugSession) => {
     if (session.configurationStarted || session.disposed) return;
     session.configurationStarted = true;
+    const errors: string[] = [];
     try {
       for (const [sourcePath, breakpoints] of session.breakpoints) {
-        await sendBreakpoints(session, sourcePath, breakpoints);
+        if (sessionIsStopping(session)) return;
+        try {
+          await sendBreakpoints(session, sourcePath, breakpoints);
+        } catch (error) {
+          errors.push(errorMessage(error));
+        }
       }
-      await session.connection.sendRequest("setExceptionBreakpoints", {
-        filters: session.exceptionBreakpoints,
-      });
+      if (
+        session.info.capabilities.exceptionBreakpointFilters?.length ||
+        !session.info.capabilities.supportsConfigurationDoneRequest
+      ) {
+        try {
+          await session.connection.sendRequest(
+            "setExceptionBreakpoints",
+            { filters: session.exceptionBreakpoints },
+            30_000,
+          );
+        } catch (error) {
+          errors.push(errorMessage(error));
+        }
+      }
+      if (sessionIsStopping(session)) return;
       if (session.info.capabilities.supportsConfigurationDoneRequest) {
-        await session.connection.sendRequest("configurationDone");
+        await session.connection.sendRequest("configurationDone", undefined, 30_000);
+      }
+      if (session.initializationTimer) {
+        clearTimeout(session.initializationTimer);
+        session.initializationTimer = undefined;
+      }
+      if (errors.length) {
+        ctx.send(CH.debugEvent, {
+          kind: "adapter-output",
+          sessionId: session.info.id,
+          category: "stderr",
+          output: `Failed to configure some breakpoints: ${errors.join("; ")}\n`,
+        });
       }
       if (session.info.status === "starting") setStatus(session, "running");
     } catch (error) {
-      failSession(session, error);
+      if (!sessionIsStopping(session)) failSession(session, error);
     }
   };
 
@@ -499,9 +642,15 @@ export function registerDebugService(
       session.readyForBreakpoints = true;
       void configureSession(session);
     } else if (event.event === "stopped") {
+      session.executionEventCounter++;
       setStatus(session, "stopped");
     } else if (event.event === "continued") {
+      session.executionEventCounter++;
       const body = asArguments(event.body);
+      session.connection.cancelPendingRequests(
+        ["threads", "stackTrace", "scopes", "variables", "evaluate"],
+        session.info.capabilities.supportsCancelRequest === true,
+      );
       if (body.allThreadsContinued !== false) setStatus(session, "running");
     } else if (event.event === "terminated") {
       setStatus(session, "terminated");
@@ -516,12 +665,42 @@ export function registerDebugService(
     }
     ctx.send(CH.debugEvent, { kind: "dap", sessionId: session.info.id, event });
     if (event.event === "terminated") {
+      const body = asArguments(event.body);
+      const restartData = body.restart;
+      const shouldRestart =
+        !session.userStopRequested &&
+        restartData != null &&
+        restartData !== false;
       queueMicrotask(() => {
         if (session.disposed) return;
-        void session.connection
-          .sendRequest("disconnect", { terminateDebuggee: false }, 1_000)
-          .catch(() => undefined)
-          .finally(() => cleanupSession(session));
+        const restartRequest: DebugStartRequest = {
+          sessionId: session.info.id,
+          configuration: {
+            ...session.configuration,
+            ...(shouldRestart ? { __restart: restartData } : {}),
+          },
+          initialBreakpoints: Object.fromEntries(session.breakpoints),
+          exceptionBreakpoints: session.exceptionBreakpoints,
+        };
+        const parent = session.info.parentSessionId
+          ? sessions.get(session.info.parentSessionId)
+          : undefined;
+        const adapterOverride =
+          parent && session.adapterEndpoint
+            ? ({ type: "server", ...session.adapterEndpoint } as const)
+            : undefined;
+        void stopSession(
+          session,
+          shouldRestart && session.info.request === "launch",
+          false,
+          shouldRestart,
+        ).then(() => {
+          if (!shouldRestart || session.userStopRequested) return;
+          return startSession(restartRequest, adapterOverride, parent).then(
+            () => undefined,
+            () => undefined,
+          );
+        });
       });
     }
   };
@@ -543,10 +722,62 @@ export function registerDebugService(
       );
       return;
     }
+    if (args.kind === "external") {
+      session.connection.sendResponse(
+        request,
+        false,
+        undefined,
+        "External terminals are not supported",
+      );
+      return;
+    }
     const envOverrides =
       args.env && typeof args.env === "object" && !Array.isArray(args.env)
         ? (args.env as Record<string, string | null>)
         : undefined;
+    if (ctx.terminal) {
+      try {
+        const useShell = args.argsCanBeInterpretedByShell === true;
+        const terminal = ctx.terminal.create({
+          cwd: typeof args.cwd === "string" ? args.cwd : undefined,
+          env: envOverrides,
+          ...(useShell
+            ? process.platform === "win32"
+              ? {
+                  executable: process.env.COMSPEC || "cmd.exe",
+                  args: ["/d", "/s", "/c", commandLine.join(" ")],
+                }
+              : {
+                  executable: process.env.SHELL || "/bin/sh",
+                  args: ["-c", commandLine.join(" ")],
+                }
+            : {
+                executable: commandLine[0],
+                args: commandLine.slice(1),
+              }),
+        });
+        session.terminalIds.add(terminal.id);
+        ctx.send(CH.debugEvent, {
+          kind: "terminal",
+          sessionId: session.info.id,
+          terminal,
+          title: typeof args.title === "string" ? args.title : undefined,
+        });
+        session.connection.sendResponse(request, true, {
+          ...(useShell
+            ? { shellProcessId: terminal.pid }
+            : { processId: terminal.pid }),
+        });
+      } catch (error) {
+        session.connection.sendResponse(
+          request,
+          false,
+          undefined,
+          errorMessage(error),
+        );
+      }
+      return;
+    }
     try {
       const child = spawnProcess(commandLine[0], commandLine.slice(1), {
         cwd: typeof args.cwd === "string" ? args.cwd : undefined,
@@ -554,6 +785,7 @@ export function registerDebugService(
         shell: args.argsCanBeInterpretedByShell === true,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: false,
+        detached: process.platform !== "win32",
       });
       session.terminalProcesses.add(child);
       child.stdout?.on("data", (data: Buffer | string) => {
@@ -577,7 +809,11 @@ export function registerDebugService(
       child.once("spawn", () => {
         responded = true;
         session.connection.sendResponse(request, true, {
-          ...(child.pid ? { processId: child.pid } : {}),
+          ...(child.pid
+            ? args.argsCanBeInterpretedByShell === true
+              ? { shellProcessId: child.pid }
+              : { processId: child.pid }
+            : {}),
         });
       });
       child.once("error", (error) => {
@@ -613,6 +849,12 @@ export function registerDebugService(
     adapterOverride?: DebugAdapterDescriptor,
     parentSession?: DebugSession,
   ) => Promise<DebugSessionInfo>;
+  let stopSession: (
+    session: DebugSession,
+    terminateDebuggee: boolean,
+    sendTerminate?: boolean,
+    restart?: boolean,
+  ) => Promise<void>;
 
   const startChildSession = async (
     parent: DebugSession,
@@ -634,9 +876,7 @@ export function registerDebugService(
           ? configuration.name
           : parent.configuration.name,
       type:
-        typeof configuration.type === "string" && configuration.type
-          ? configuration.type
-          : parent.configuration.type,
+        parent.configuration.type,
       request: requestKind,
     };
     const child = await startSession(
@@ -710,6 +950,7 @@ export function registerDebugService(
       shell: false,
       stdio: "pipe",
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
     // Keep Node's special EventEmitter "error" event handled between spawning
     // the process and attaching the session-level failure handler.
@@ -730,7 +971,7 @@ export function registerDebugService(
       };
       const onAbort = () => {
         cleanup();
-        if (!child.killed) child.kill();
+        stopProcessTree(child);
         reject(new Error("Debug session start cancelled"));
       };
       child.once("spawn", onSpawn);
@@ -807,11 +1048,10 @@ export function registerDebugService(
       }
     }
     if (
-      !child.killed &&
       child.exitCode == null &&
       child.signalCode == null
     ) {
-      child.kill();
+      stopProcessTree(child);
     }
     if (signal.aborted) throw new Error("Debug session start cancelled");
     if (child.exitCode != null || child.signalCode != null) {
@@ -830,6 +1070,12 @@ export function registerDebugService(
     adapterOverride?: DebugAdapterDescriptor,
     parentSession?: DebugSession,
   ) => {
+    request = {
+      ...request,
+      configuration: resolveConfigurationEnvironment(
+        request.configuration,
+      ) as DebugLaunchConfiguration,
+    };
     const id = request.sessionId ?? randomUUID();
     if (sessions.has(id) || pendingStarts.has(id)) {
       throw new Error(`Debug session '${id}' already exists`);
@@ -899,10 +1145,15 @@ export function registerDebugService(
         adapterOutputFromStdout: descriptor.type === "executable-server",
         socket: transport.socket,
         terminalProcesses: new Set(),
+        terminalIds: new Set(),
         breakpoints: new Map(Object.entries(request.initialBreakpoints ?? {})),
+        breakpointVersions: new Map(),
         exceptionBreakpoints: request.exceptionBreakpoints ?? [],
         readyForBreakpoints: false,
         configurationStarted: false,
+        executionEventCounter: 0,
+        startController: pendingStart.controller,
+        userStopRequested: false,
         disposed: false,
       };
       session = activeSession;
@@ -949,30 +1200,49 @@ export function registerDebugService(
       );
 
       const initialize =
-        await activeSession.connection.sendRequest<DapCapabilities>("initialize", {
-          clientID: "logos",
-          clientName: "Logos",
-          adapterID: activeSession.dapType,
-          locale: "en-US",
-          linesStartAt1: true,
-          columnsStartAt1: true,
-          pathFormat: "path",
-          supportsVariableType: true,
-          supportsRunInTerminalRequest: true,
-          supportsStartDebuggingRequest: Boolean(activeSession.adapterEndpoint),
-          supportsArgsCanBeInterpretedByShell: true,
-        },
-      );
+        await activeSession.connection.sendRequest<DapCapabilities>(
+          "initialize",
+          {
+            clientID: "logos",
+            clientName: "Logos",
+            adapterID: activeSession.dapType,
+            locale: "en-US",
+            linesStartAt1: true,
+            columnsStartAt1: true,
+            pathFormat: "path",
+            supportsVariableType: true,
+            supportsVariablePaging: true,
+            supportsRunInTerminalRequest: true,
+            supportsStartDebuggingRequest: Boolean(activeSession.adapterEndpoint),
+            supportsArgsCanBeInterpretedByShell: true,
+          },
+          30_000,
+        );
+      ensureSessionStarting(activeSession);
       activeSession.info = {
         ...activeSession.info,
         status: "starting",
         capabilities: initialize.body ?? {},
       };
       publishSession(activeSession);
-      await activeSession.connection.sendRequest(
+      armInitializationTimer(activeSession);
+      const launchOrAttach = await activeSession.connection.sendRequest(
         request.configuration.request,
         configurationArguments(request.configuration, activeSession.dapType),
+        60_000,
       );
+      ensureSessionStarting(activeSession);
+      const additionalCapabilities = asArguments(launchOrAttach.body);
+      if (Object.keys(additionalCapabilities).length) {
+        activeSession.info = {
+          ...activeSession.info,
+          capabilities: {
+            ...activeSession.info.capabilities,
+            ...additionalCapabilities,
+          },
+        };
+        publishSession(activeSession);
+      }
       if (
         activeSession.info.status === "starting" &&
         activeSession.configurationStarted
@@ -987,8 +1257,12 @@ export function registerDebugService(
         session?.info.status === "terminated";
       if (session && !session.disposed) {
         if (cancelled) {
-          setStatus(session, "terminated");
-          cleanupSession(session);
+          if (session.shutdownPromise) {
+            await session.shutdownPromise;
+          } else {
+            setStatus(session, "terminated");
+            cleanupSession(session);
+          }
         } else {
           failSession(session, error);
         }
@@ -1013,6 +1287,86 @@ export function registerDebugService(
     }
   };
 
+  stopSession = (
+    session: DebugSession,
+    terminateDebuggee: boolean,
+    sendTerminate = true,
+    restart = false,
+  ): Promise<void> => {
+    if (sendTerminate) session.userStopRequested = true;
+    if (session.shutdownPromise) return session.shutdownPromise;
+    session.startController.abort();
+    const shutdown = (async () => {
+      if (
+        session.info.status !== "terminated" &&
+        session.info.status !== "error"
+      ) {
+        setStatus(session, "terminating");
+      }
+      session.connection.cancelPendingRequests(
+        undefined,
+        session.info.capabilities.supportsCancelRequest === true,
+      );
+
+      for (const pendingStart of pendingStarts.values()) {
+        if (pendingStart.info.parentSessionId === session.info.id) {
+          cancelPendingStart(pendingStart);
+        }
+      }
+      const children = Array.from(sessions.values()).filter(
+        (child) => child.info.parentSessionId === session.info.id,
+      );
+      if (children.length) {
+        await Promise.all(
+          children.map((child) => {
+            child.userStopRequested = true;
+            return stopSession(
+              child,
+              child.info.request === "launch",
+              sendTerminate,
+              restart,
+            );
+          }),
+        );
+      }
+
+      if (
+        sendTerminate &&
+        terminateDebuggee &&
+        session.info.request === "launch" &&
+        session.info.capabilities.supportsTerminateRequest
+      ) {
+        try {
+          await session.connection.sendRequest("terminate", {}, 2_000);
+        } catch {
+          // A failed graceful terminate must not prevent disconnect.
+        }
+      }
+
+      try {
+        const disconnectArguments: DapArguments = {};
+        if (restart) disconnectArguments.restart = true;
+        if (session.info.capabilities.supportTerminateDebuggee) {
+          disconnectArguments.terminateDebuggee = terminateDebuggee;
+        }
+        await session.connection.sendRequest(
+          "disconnect",
+          disconnectArguments,
+          2_000,
+        );
+      } catch {
+        // The adapter often exits before acknowledging disconnect.
+      } finally {
+        if (!session.disposed) {
+          setStatus(session, "terminated");
+          cleanupSession(session, terminateDebuggee);
+        }
+      }
+    })();
+    session.shutdownPromise = shutdown;
+    return shutdown;
+  };
+
   ipcMain.handle(CH.debugList, () =>
     Array.from(sessions.values(), cloneInfo),
   );
@@ -1030,7 +1384,33 @@ export function registerDebugService(
     ): Promise<DapResponse> => {
       const session = sessions.get(sessionId);
       if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
-      return session.connection.sendRequest(command, args);
+      const executionEventCounter = session.executionEventCounter;
+      const response = await session.connection.sendRequest(command, args);
+      if (
+        (command === "continue" ||
+          command === "next" ||
+          command === "stepIn" ||
+          command === "stepOut") &&
+        !session.disposed &&
+        session.executionEventCounter === executionEventCounter
+      ) {
+        const responseBody = asArguments(response.body);
+        handleEvent(session, {
+          seq: 0,
+          type: "event",
+          event: "continued",
+          body: {
+            threadId: typeof args?.threadId === "number" ? args.threadId : 0,
+            allThreadsContinued:
+              command === "continue"
+                ? responseBody.allThreadsContinued !== false
+                : args?.singleThread === true
+                  ? false
+                  : true,
+          },
+        });
+      }
+      return response;
     },
   );
   ipcMain.handle(
@@ -1056,25 +1436,7 @@ export function registerDebugService(
       }
       const session = sessions.get(sessionId);
       if (!session) return;
-      setStatus(session, "terminating");
-      try {
-        if (
-          terminateDebuggee &&
-          session.info.capabilities.supportsTerminateRequest
-        ) {
-          await session.connection.sendRequest("terminate", {}, 2_000);
-        }
-        await session.connection.sendRequest(
-          "disconnect",
-          { terminateDebuggee },
-          2_000,
-        );
-      } catch {
-        // The adapter often exits before acknowledging disconnect.
-      } finally {
-        setStatus(session, "terminated");
-        cleanupSession(session);
-      }
+      await stopSession(session, terminateDebuggee);
     },
   );
 

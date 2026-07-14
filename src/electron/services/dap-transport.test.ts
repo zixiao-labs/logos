@@ -105,4 +105,74 @@ describe("DAP transport", () => {
       { seq: 1, type: "event", event: "ready" },
     ]);
   });
+
+  it("rejects protocol messages with missing required fields", () => {
+    const parser = new DapMessageParser();
+    const body = JSON.stringify({ seq: 1, type: "response", success: true });
+    expect(() =>
+      parser.push(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`),
+    ).toThrow("Invalid DAP protocol message");
+  });
+
+  it("rejects zero protocol sequence numbers", () => {
+    const parser = new DapMessageParser();
+    const body = JSON.stringify({ seq: 0, type: "event", event: "stopped" });
+    expect(() =>
+      parser.push(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`),
+    ).toThrow("Invalid DAP protocol message");
+  });
+
+  it("uses structured DAP error details", async () => {
+    const fromAdapter = new PassThrough();
+    const toAdapter = new PassThrough();
+    const outgoing = new DapMessageParser();
+    const seen: DapMessage[] = [];
+    toAdapter.on("data", (data: Buffer) => seen.push(...outgoing.push(data)));
+    const connection = new DapConnection(fromAdapter, toAdapter);
+    const result = connection.sendRequest("launch");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const request = seen[0] as DapRequest;
+
+    fromAdapter.write(
+      encodeDapMessage({
+        seq: 2,
+        type: "response",
+        request_seq: request.seq,
+        command: request.command,
+        success: false,
+        message: "failed",
+        body: {
+          error: {
+            format: "Cannot launch {program}",
+            variables: { program: "app.js" },
+          },
+        },
+      }),
+    );
+
+    await expect(result).rejects.toThrow("Cannot launch app.js");
+    connection.dispose();
+  });
+
+  it("cancels pending requests and notifies capable adapters", async () => {
+    const fromAdapter = new PassThrough();
+    const toAdapter = new PassThrough();
+    const outgoing = new DapMessageParser();
+    const seen: DapMessage[] = [];
+    toAdapter.on("data", (data: Buffer) => seen.push(...outgoing.push(data)));
+    const connection = new DapConnection(fromAdapter, toAdapter);
+    const result = connection.sendRequest("stackTrace", { threadId: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    connection.cancelPendingRequests(["stackTrace"], true);
+
+    await expect(result).rejects.toThrow("cancelled");
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toMatchObject({
+      type: "request",
+      command: "cancel",
+      arguments: { requestId: (seen[0] as DapRequest).seq },
+    });
+    connection.dispose();
+  });
 });

@@ -71,6 +71,15 @@ describe("debug service", () => {
         success: true,
         ...(body === undefined ? {} : { body }),
       });
+    const reject = (request: DapRequest, message: string) =>
+      send({
+        seq: adapterSequence++,
+        type: "response",
+        request_seq: request.seq,
+        command: request.command,
+        success: false,
+        message,
+      });
     fake.stdin.on("data", (data: Buffer) => {
       for (const message of parser.push(data)) {
         if (message.type !== "request") continue;
@@ -89,6 +98,8 @@ describe("debug service", () => {
           });
         } else if (message.command === "threads") {
           respond(message, { threads: [{ id: 1, name: "main" }] });
+        } else if (message.command === "terminate") {
+          reject(message, "graceful termination failed");
         } else {
           respond(message);
         }
@@ -133,7 +144,6 @@ describe("debug service", () => {
       "initialize",
       "launch",
       "setBreakpoints",
-      "setExceptionBreakpoints",
       "configurationDone",
     ]);
 
@@ -154,6 +164,520 @@ describe("debug service", () => {
     cleanup();
   });
 
+  it("does not launch after stop wins the initialize race", async () => {
+    const ipc = createIpcHarness();
+    let sequence = 1;
+    let initializeRequest: DapRequest | undefined;
+    let initializeSeen!: () => void;
+    const sawInitialize = new Promise<void>((resolve) => {
+      initializeSeen = resolve;
+    });
+    const commands: string[] = [];
+    let adapter: ReturnType<typeof fakeDapSocket>;
+    adapter = fakeDapSocket((message) => {
+      if (message.type !== "request") return;
+      commands.push(message.command);
+      if (message.command === "initialize") {
+        initializeRequest = message;
+        initializeSeen();
+        return;
+      }
+      if (message.command === "disconnect") {
+        if (initializeRequest) {
+          adapter.send({
+            seq: sequence++,
+            type: "response",
+            request_seq: initializeRequest.seq,
+            command: initializeRequest.command,
+            success: true,
+          });
+        }
+        adapter.send({
+          seq: sequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+        });
+      }
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      { connectSocket: async () => adapter.socket },
+    );
+
+    const start = ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+      sessionId: "initialize-race",
+      configuration: {
+        name: "Initialize race",
+        type: "custom",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47124 },
+      },
+    });
+    await sawInitialize;
+    await ipc.invoke(CH.debugStop, "initialize-race", true);
+
+    expect(await start).toMatchObject({ status: "terminated" });
+    expect(commands).toEqual(["initialize", "disconnect"]);
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+    cleanup();
+  });
+
+  it("finishes configuration when a breakpoint request fails", async () => {
+    const ipc = createIpcHarness();
+    const sent: Array<[string, ...unknown[]]> = [];
+    let sequence = 1;
+    const commands: string[] = [];
+    let adapter: ReturnType<typeof fakeDapSocket>;
+    adapter = fakeDapSocket((message) => {
+      if (message.type !== "request") return;
+      commands.push(message.command);
+      adapter.send({
+        seq: sequence++,
+        type: "response",
+        request_seq: message.seq,
+        command: message.command,
+        success: message.command !== "setBreakpoints",
+        ...(message.command === "initialize"
+          ? { body: { supportsConfigurationDoneRequest: true } }
+          : {}),
+        ...(message.command === "setBreakpoints"
+          ? { message: "invalid breakpoint" }
+          : {}),
+      });
+      if (message.command === "launch") {
+        adapter.send({ seq: sequence++, type: "event", event: "initialized" });
+      }
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: (channel, ...args) => sent.push([channel, ...args]),
+      } satisfies ServiceContext,
+      { connectSocket: async () => adapter.socket },
+    );
+
+    const session = await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+      sessionId: "breakpoint-failure",
+      configuration: {
+        name: "Breakpoint failure",
+        type: "custom",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47125 },
+      },
+      initialBreakpoints: { "/workspace/app.js": [{ line: 7 }] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(session.status).toBe("running");
+    expect(commands).toEqual([
+      "initialize",
+      "launch",
+      "setBreakpoints",
+      "configurationDone",
+    ]);
+    expect(
+      sent.some(
+        ([, event]) =>
+          typeof event === "object" &&
+          event !== null &&
+          "kind" in event &&
+          event.kind === "adapter-output",
+      ),
+    ).toBe(true);
+    cleanup();
+  });
+
+  it("restarts a session with terminated restart data", async () => {
+    const ipc = createIpcHarness();
+    let sequence = 1;
+    const launchArguments: unknown[] = [];
+    const createAdapter = () => {
+      let adapter: ReturnType<typeof fakeDapSocket>;
+      adapter = fakeDapSocket((message) => {
+        if (message.type !== "request") return;
+        adapter.send({
+          seq: sequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+          ...(message.command === "initialize"
+            ? {
+                body: {
+                  supportsConfigurationDoneRequest: true,
+                  supportTerminateDebuggee: true,
+                },
+              }
+            : {}),
+        });
+        if (message.command === "launch") {
+          launchArguments.push(message.arguments);
+          adapter.send({ seq: sequence++, type: "event", event: "initialized" });
+        }
+      });
+      return adapter;
+    };
+    const first = createAdapter();
+    const second = createAdapter();
+    const sockets = [first.socket, second.socket];
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      {
+        connectSocket: async () => {
+          const socket = sockets.shift();
+          if (!socket) throw new Error("Unexpected adapter connection");
+          return socket;
+        },
+      },
+    );
+
+    await ipc.invoke(CH.debugStart, {
+      sessionId: "restart-session",
+      configuration: {
+        name: "Restart",
+        type: "custom",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47126 },
+      },
+    });
+    first.send({
+      seq: sequence++,
+      type: "event",
+      event: "terminated",
+      body: { restart: { token: "restart-token" } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(launchArguments).toHaveLength(2);
+    expect(launchArguments[1]).toMatchObject({
+      __restart: { token: "restart-token" },
+    });
+    expect(await ipc.invoke(CH.debugList)).toMatchObject([
+      { id: "restart-session", status: "running" },
+    ]);
+    cleanup();
+  });
+
+  it("does not restart when terminated restart races with user stop", async () => {
+    const ipc = createIpcHarness();
+    let sequence = 1;
+    let connections = 0;
+    let adapter: ReturnType<typeof fakeDapSocket>;
+    adapter = fakeDapSocket((message) => {
+      if (message.type !== "request") return;
+      if (message.command === "terminate") {
+        adapter.send({
+          seq: sequence++,
+          type: "event",
+          event: "terminated",
+          body: { restart: true },
+        });
+      }
+      adapter.send({
+        seq: sequence++,
+        type: "response",
+        request_seq: message.seq,
+        command: message.command,
+        success: true,
+        ...(message.command === "initialize"
+          ? {
+              body: {
+                supportsConfigurationDoneRequest: true,
+                supportsTerminateRequest: true,
+                supportTerminateDebuggee: true,
+              },
+            }
+          : {}),
+      });
+      if (message.command === "launch") {
+        adapter.send({ seq: sequence++, type: "event", event: "initialized" });
+      }
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      {
+        connectSocket: async () => {
+          connections++;
+          return adapter.socket;
+        },
+      },
+    );
+
+    await ipc.invoke(CH.debugStart, {
+      sessionId: "stop-restart-race",
+      configuration: {
+        name: "Stop restart race",
+        type: "custom",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47128 },
+      },
+    });
+    await ipc.invoke(CH.debugStop, "stop-restart-race", true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(connections).toBe(1);
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+    cleanup();
+  });
+
+  it("does not restart when user stop follows a restart event", async () => {
+    const ipc = createIpcHarness();
+    let sequence = 1;
+    let connections = 0;
+    let disconnectRequest: DapRequest | undefined;
+    let disconnectSeen!: () => void;
+    const sawDisconnect = new Promise<void>((resolve) => {
+      disconnectSeen = resolve;
+    });
+    let adapter: ReturnType<typeof fakeDapSocket>;
+    adapter = fakeDapSocket((message) => {
+      if (message.type !== "request") return;
+      if (message.command === "disconnect") {
+        disconnectRequest = message;
+        disconnectSeen();
+        return;
+      }
+      adapter.send({
+        seq: sequence++,
+        type: "response",
+        request_seq: message.seq,
+        command: message.command,
+        success: true,
+        ...(message.command === "initialize"
+          ? {
+              body: {
+                supportsConfigurationDoneRequest: true,
+                supportTerminateDebuggee: true,
+              },
+            }
+          : {}),
+      });
+      if (message.command === "launch") {
+        adapter.send({ seq: sequence++, type: "event", event: "initialized" });
+      }
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      {
+        connectSocket: async () => {
+          connections++;
+          return adapter.socket;
+        },
+      },
+    );
+    await ipc.invoke(CH.debugStart, {
+      sessionId: "restart-stop-race",
+      configuration: {
+        name: "Restart then stop",
+        type: "custom",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47130 },
+      },
+    });
+    adapter.send({
+      seq: sequence++,
+      type: "event",
+      event: "terminated",
+      body: { restart: true },
+    });
+    await sawDisconnect;
+    const stop = ipc.invoke(CH.debugStop, "restart-stop-race", true);
+    adapter.send({
+      seq: sequence++,
+      type: "response",
+      request_seq: disconnectRequest!.seq,
+      command: "disconnect",
+      success: true,
+    });
+    await stop;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(connections).toBe(1);
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+    cleanup();
+  });
+
+  it("synthesizes continued when a stepping adapter omits it", async () => {
+    const ipc = createIpcHarness();
+    const sent: Array<[string, ...unknown[]]> = [];
+    let sequence = 1;
+    let adapter: ReturnType<typeof fakeDapSocket>;
+    adapter = fakeDapSocket((message) => {
+      if (message.type !== "request") return;
+      adapter.send({
+        seq: sequence++,
+        type: "response",
+        request_seq: message.seq,
+        command: message.command,
+        success: true,
+        ...(message.command === "initialize"
+          ? { body: { supportsConfigurationDoneRequest: true } }
+          : {}),
+      });
+      if (message.command === "launch") {
+        adapter.send({ seq: sequence++, type: "event", event: "initialized" });
+      }
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: (channel, ...args) => sent.push([channel, ...args]),
+      } satisfies ServiceContext,
+      { connectSocket: async () => adapter.socket },
+    );
+    await ipc.invoke(CH.debugStart, {
+      sessionId: "step-session",
+      configuration: {
+        name: "Step",
+        type: "custom",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47129 },
+      },
+    });
+    adapter.send({
+      seq: sequence++,
+      type: "event",
+      event: "stopped",
+      body: { reason: "breakpoint", threadId: 1 },
+    });
+
+    await ipc.invoke(CH.debugRequest, "step-session", "next", { threadId: 1 });
+
+    expect(await ipc.invoke(CH.debugList)).toMatchObject([
+      { id: "step-session", status: "running" },
+    ]);
+    expect(
+      sent.some(
+        ([, event]) =>
+          typeof event === "object" &&
+          event !== null &&
+          "kind" in event &&
+          event.kind === "dap" &&
+          "event" in event &&
+          typeof event.event === "object" &&
+          event.event !== null &&
+          "event" in event.event &&
+          event.event.event === "continued",
+      ),
+    ).toBe(true);
+    cleanup();
+  });
+
+  it("runs reverse terminal requests in the managed PTY", async () => {
+    const ipc = createIpcHarness();
+    const sent: Array<[string, ...unknown[]]> = [];
+    let sequence = 1;
+    let reverseResponse: DapMessage | undefined;
+    let terminalOptions: unknown;
+    const killedTerminals: string[] = [];
+    let adapter: ReturnType<typeof fakeDapSocket>;
+    adapter = fakeDapSocket((message) => {
+      if (message.type === "response") {
+        if (message.command === "runInTerminal") reverseResponse = message;
+        return;
+      }
+      if (message.type !== "request") return;
+      adapter.send({
+        seq: sequence++,
+        type: "response",
+        request_seq: message.seq,
+        command: message.command,
+        success: true,
+        ...(message.command === "initialize"
+          ? { body: { supportsConfigurationDoneRequest: true } }
+          : {}),
+      });
+      if (message.command === "launch") {
+        adapter.send({ seq: sequence++, type: "event", event: "initialized" });
+      }
+    });
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: (channel, ...args) => sent.push([channel, ...args]),
+        terminal: {
+          create: (options) => {
+            terminalOptions = options;
+            return { id: "term-debug", pid: 4242, shell: "node" };
+          },
+          kill: (id) => killedTerminals.push(id),
+        },
+      } satisfies ServiceContext,
+      { connectSocket: async () => adapter.socket },
+    );
+    await ipc.invoke(CH.debugStart, {
+      sessionId: "terminal-session",
+      configuration: {
+        name: "Terminal",
+        type: "custom",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47127 },
+      },
+    });
+
+    adapter.send({
+      seq: sequence++,
+      type: "request",
+      command: "runInTerminal",
+      arguments: {
+        kind: "integrated",
+        title: "Debug process",
+        cwd: "/workspace",
+        args: ["node", "app.js", "two words"],
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(terminalOptions).toMatchObject({
+      cwd: "/workspace",
+      executable: "node",
+      args: ["app.js", "two words"],
+    });
+    expect(reverseResponse).toMatchObject({
+      success: true,
+      body: { processId: 4242 },
+    });
+    expect(
+      sent.some(
+        ([, event]) =>
+          typeof event === "object" &&
+          event !== null &&
+          "kind" in event &&
+          event.kind === "terminal",
+      ),
+    ).toBe(true);
+    cleanup();
+    expect(killedTerminals).toEqual(["term-debug"]);
+  });
+
   it("starts a child session for the startDebugging reverse request", async () => {
     const ipc = createIpcHarness();
     const fake = fakeAdapterProcess();
@@ -161,6 +685,9 @@ describe("debug service", () => {
     let rootSocket: ReturnType<typeof fakeDapSocket>;
     let childSocket: ReturnType<typeof fakeDapSocket>;
     let reverseResponse: DapMessage | undefined;
+    const rootCommands: string[] = [];
+    const childCommands: string[] = [];
+    let childDisconnectArguments: unknown;
 
     const createSocket = (isRoot: boolean) => {
       let current: ReturnType<typeof fakeDapSocket>;
@@ -172,6 +699,10 @@ describe("debug service", () => {
           return;
         }
         if (message.type !== "request") return;
+        (isRoot ? rootCommands : childCommands).push(message.command);
+        if (!isRoot && message.command === "disconnect") {
+          childDisconnectArguments = message.arguments;
+        }
         current.send({
           seq: sequence++,
           type: "response",
@@ -179,10 +710,15 @@ describe("debug service", () => {
           command: message.command,
           success: true,
           ...(message.command === "initialize"
-            ? { body: { supportsConfigurationDoneRequest: true } }
+            ? {
+                body: {
+                  supportsConfigurationDoneRequest: true,
+                  supportTerminateDebuggee: true,
+                },
+              }
             : {}),
         });
-        if (message.command === "launch") {
+        if (message.command === "launch" || message.command === "attach") {
           current.send({ seq: sequence++, type: "event", event: "initialized" });
         }
       });
@@ -231,7 +767,7 @@ describe("debug service", () => {
       type: "request",
       command: "startDebugging",
       arguments: {
-        request: "launch",
+        request: "attach",
         configuration: {
           name: "Worker",
           type: "pwa-node",
@@ -250,9 +786,15 @@ describe("debug service", () => {
     expect(sessions).toHaveLength(2);
     expect(sessions.find((session) => session.name === "Worker")).toMatchObject({
       parentSessionId: "root-session",
-      debugType: "pwa-node",
+      debugType: "custom",
+      request: "attach",
       status: "running",
     });
+    await ipc.invoke(CH.debugStop, "root-session", true);
+    expect(rootCommands).toContain("disconnect");
+    expect(childCommands).toContain("disconnect");
+    expect(childDisconnectArguments).toMatchObject({ terminateDebuggee: false });
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
     cleanup();
   });
 

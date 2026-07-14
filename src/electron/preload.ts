@@ -27,6 +27,60 @@ function on<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
   return () => ipcRenderer.removeListener(channel, listener);
 }
 
+const terminalDataBuffer = new Map<string, string>();
+const terminalExitBuffer = new Map<string, number>();
+const terminalDataListeners = new Map<string, Set<(data: string) => void>>();
+const terminalExitListeners = new Map<string, Set<(code: number) => void>>();
+const disposedTerminals = new Set<string>();
+
+ipcRenderer.on(
+  CH.terminalData,
+  (_event, payload: { id: string; data: string }) => {
+    if (disposedTerminals.has(payload.id)) return;
+    const listeners = terminalDataListeners.get(payload.id);
+    terminalDataBuffer.set(
+      payload.id,
+      `${terminalDataBuffer.get(payload.id) ?? ""}${payload.data}`.slice(
+        -64 * 1024,
+      ),
+    );
+    if (listeners?.size) {
+      for (const listener of listeners) listener(payload.data);
+    }
+  },
+);
+
+ipcRenderer.on(
+  CH.terminalExit,
+  (_event, payload: { id: string; code: number }) => {
+    if (disposedTerminals.has(payload.id)) return;
+    terminalExitBuffer.set(payload.id, payload.code);
+    const listeners = terminalExitListeners.get(payload.id);
+    if (listeners?.size) {
+      for (const listener of listeners) listener(payload.code);
+    }
+  },
+);
+
+function subscribeTerminal<T>(
+  listeners: Map<string, Set<(value: T) => void>>,
+  buffered: Map<string, T>,
+  id: string,
+  callback: (value: T) => void,
+): Unsubscribe {
+  const current = listeners.get(id) ?? new Set<(value: T) => void>();
+  current.add(callback);
+  listeners.set(id, current);
+  const pending = buffered.get(id);
+  if (pending !== undefined) {
+    callback(pending);
+  }
+  return () => {
+    current.delete(callback);
+    if (current.size === 0) listeners.delete(id);
+  };
+}
+
 async function withLspFileOperation<T>(
   kind: "Create" | "Rename" | "Delete",
   payload: unknown,
@@ -112,19 +166,25 @@ const api: LogosAPI = {
   },
   terminal: {
     create: (opts: TerminalCreateOptions) =>
-      ipcRenderer.invoke(CH.terminalCreate, opts),
+      ipcRenderer.invoke(CH.terminalCreate, opts).then((terminal) => {
+        disposedTerminals.delete(terminal.id);
+        return terminal;
+      }),
     write: (id, data) => ipcRenderer.send(CH.terminalWrite, id, data),
     resize: (id, cols, rows) =>
       ipcRenderer.send(CH.terminalResize, id, cols, rows),
-    kill: (id) => ipcRenderer.send(CH.terminalKill, id),
+    kill: (id) => {
+      disposedTerminals.add(id);
+      terminalDataBuffer.delete(id);
+      terminalExitBuffer.delete(id);
+      terminalDataListeners.delete(id);
+      terminalExitListeners.delete(id);
+      ipcRenderer.send(CH.terminalKill, id);
+    },
     onData: (id, cb) =>
-      on<{ id: string; data: string }>(CH.terminalData, (p) => {
-        if (p.id === id) cb(p.data);
-      }),
+      subscribeTerminal(terminalDataListeners, terminalDataBuffer, id, cb),
     onExit: (id, cb) =>
-      on<{ id: string; code: number }>(CH.terminalExit, (p) => {
-        if (p.id === id) cb(p.code);
-      }),
+      subscribeTerminal(terminalExitListeners, terminalExitBuffer, id, cb),
   },
   settings: {
     getAll: () => ipcRenderer.invoke(CH.settingsGetAll),

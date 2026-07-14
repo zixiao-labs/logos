@@ -1,3 +1,5 @@
+import type { TerminalCreated } from "./types";
+
 /**
  * Debug Adapter Protocol (DAP) data shared by the main process, preload and UI.
  *
@@ -302,14 +304,21 @@ export type DebugSessionEvent =
       kind: "breakpoints";
       sessionId: string;
       sourcePath: string;
+      requestedBreakpoints: DapSourceBreakpoint[];
       breakpoints: DapBreakpoint[];
+    }
+  | {
+      kind: "terminal";
+      sessionId: string;
+      terminal: TerminalCreated;
+      title?: string;
     }
   | { kind: "adapter-output"; sessionId: string; category: "stdout" | "stderr"; output: string };
 
 export interface DebugBreakpointState extends DapSourceBreakpoint {
   id: string;
-  verified?: boolean;
-  message?: string;
+  sessionData?: Record<string, DapBreakpoint>;
+  adapterCreated?: boolean;
 }
 
 export interface DebugConsoleEntry {

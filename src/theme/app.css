@@ -691,6 +691,11 @@ textarea.field {
   padding-left: 12px;
   color: var(--muted);
   font-size: 10px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
 }
 .debug-empty {
   padding: 3px 12px 8px;

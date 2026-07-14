@@ -93,13 +93,17 @@ export function EditorArea() {
       )}
 
       <div className="editor-host">
-        {active?.kind === "file" && active.path && (
+        {(active?.kind === "file" || active?.kind === "debug-source") &&
+          active.path && (
           <MonacoEditor
             key={active.path}
             path={active.path}
             language={active.language ?? "plaintext"}
+            content={active.content}
+            readOnly={active.content !== undefined}
+            debugPosition={active.debugPosition}
           />
-        )}
+          )}
         {active?.kind === "welcome" && <Welcome />}
         {active?.kind === "settings" && <SettingsView />}
         {active?.kind === "extensions" && <ExtensionsView />}

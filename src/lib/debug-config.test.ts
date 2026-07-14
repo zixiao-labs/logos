@@ -32,6 +32,21 @@ describe("debug configuration", () => {
       .toContain("// not a comment /* still text */");
   });
 
+  it("preserves trailing-comma-like text inside strings", () => {
+    const file = parseDebugConfigurationFile(`{
+      "configurations": [{
+        "name": "value,}",
+        "type": "node",
+        "request": "launch",
+        "args": ["value,]"],
+      }],
+    }`);
+    expect(file.configurations[0]).toMatchObject({
+      name: "value,}",
+      args: ["value,]"],
+    });
+  });
+
   it("resolves workspace and active-file variables recursively", () => {
     expect(
       resolveDebugConfiguration(
@@ -57,5 +72,22 @@ describe("debug configuration", () => {
       args: ["src/main.ts", "main.ts"],
       adapter: { cwd: "/workspace/project" },
     });
+  });
+
+  it("does not treat a sibling path prefix as part of the workspace", () => {
+    expect(
+      resolveDebugConfiguration(
+        {
+          name: "Sibling",
+          type: "node",
+          request: "launch",
+          program: "${relativeFile}",
+        },
+        {
+          workspaceFolder: "/workspace/app",
+          file: "/workspace/app2/main.ts",
+        },
+      ),
+    ).toMatchObject({ program: "/workspace/app2/main.ts" });
   });
 });

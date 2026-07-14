@@ -14,11 +14,20 @@ const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 function isDapMessage(value: unknown): value is DapMessage {
   if (!value || typeof value !== "object") return false;
   const message = value as Partial<DapMessage>;
+  if (
+    !Number.isInteger(message.seq) ||
+    (message.seq ?? 0) < 1 ||
+    (message.seq ?? 0) > 2_147_483_647
+  ) return false;
+  if (message.type === "request") return typeof message.command === "string";
+  if (message.type === "event") return typeof message.event === "string";
   return (
-    typeof message.seq === "number" &&
-    (message.type === "request" ||
-      message.type === "response" ||
-      message.type === "event")
+    message.type === "response" &&
+    Number.isInteger(message.request_seq) &&
+    (message.request_seq ?? 0) >= 1 &&
+    (message.request_seq ?? 0) <= 2_147_483_647 &&
+    typeof message.command === "string" &&
+    typeof message.success === "boolean"
   );
 }
 
@@ -49,11 +58,14 @@ export class DapMessageParser {
         }
         const header = this.buffer.toString("ascii", 0, headerEnd);
         this.buffer = this.buffer.subarray(headerEnd + HEADER_SEPARATOR.length);
-        const lengthHeader = header
-          .split(/\r\n/)
+        const lengthHeaders = header
+          .split(/\r?\n/)
           .map((line) => line.split(/:\s*/, 2))
-          .find(([name]) => name.toLowerCase() === "content-length");
-        const length = Number(lengthHeader?.[1]);
+          .filter(([name]) => name.toLowerCase() === "content-length");
+        if (lengthHeaders.length !== 1) {
+          throw new Error("DAP message must have one Content-Length header");
+        }
+        const length = Number(lengthHeaders[0][1]);
         if (!Number.isSafeInteger(length) || length < 0) {
           throw new Error("Malformed DAP Content-Length header");
         }
@@ -89,8 +101,42 @@ type PendingRequest = {
   command: string;
   resolve: (response: DapResponse) => void;
   reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
 };
+
+export class DapResponseError extends Error {
+  constructor(
+    message: string,
+    readonly response: DapResponse,
+  ) {
+    super(message);
+    this.name = "DapResponseError";
+  }
+}
+
+function responseErrorMessage(
+  response: DapResponse,
+  fallbackCommand: string,
+): string {
+  const body =
+    response.body && typeof response.body === "object"
+      ? (response.body as Record<string, unknown>)
+      : undefined;
+  const detail =
+    body?.error && typeof body.error === "object"
+      ? (body.error as Record<string, unknown>)
+      : undefined;
+  if (typeof detail?.format === "string") {
+    const variables =
+      detail.variables && typeof detail.variables === "object"
+        ? (detail.variables as Record<string, unknown>)
+        : {};
+    return detail.format.replace(/\{([^}]+)\}/g, (match, name: string) =>
+      Object.hasOwn(variables, name) ? String(variables[name]) : match,
+    );
+  }
+  return response.message || `Debug adapter request '${fallbackCommand}' failed`;
+}
 
 /** Bidirectional DAP peer over a pair of Node streams. */
 export class DapConnection {
@@ -139,7 +185,7 @@ export class DapConnection {
   sendRequest<T = unknown>(
     command: string,
     args?: DapArguments,
-    timeoutMs = 30_000,
+    timeoutMs?: number,
   ): Promise<DapResponse<T>> {
     if (this.disposed) return Promise.reject(new Error("DAP connection is closed"));
     const request: DapRequest = {
@@ -149,10 +195,13 @@ export class DapConnection {
       ...(args && Object.keys(args).length ? { arguments: args } : {}),
     };
     return new Promise<DapResponse<T>>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(request.seq);
-        reject(new Error(`Debug adapter request '${command}' timed out`));
-      }, timeoutMs);
+      const timer =
+        timeoutMs == null
+          ? undefined
+          : setTimeout(() => {
+              this.pending.delete(request.seq);
+              reject(new Error(`Debug adapter request '${command}' timed out`));
+            }, timeoutMs);
       this.pending.set(request.seq, {
         command,
         resolve: (response) => resolve(response as DapResponse<T>),
@@ -169,6 +218,7 @@ export class DapConnection {
     body?: unknown,
     message?: string,
   ): void {
+    if (this.disposed) return;
     const response: DapResponse = {
       seq: this.sequence++,
       type: "response",
@@ -189,10 +239,34 @@ export class DapConnection {
     this.readable.off("close", this.onStreamClose);
     this.writable.off("error", this.onStreamError);
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(new Error(reason));
     }
     this.pending.clear();
+  }
+
+  cancelPendingRequests(
+    commands?: readonly string[],
+    notifyAdapter = false,
+  ): void {
+    if (this.disposed) return;
+    const commandSet = commands ? new Set(commands) : undefined;
+    const cancelled = Array.from(this.pending.entries()).filter(
+      ([, pending]) => !commandSet || commandSet.has(pending.command),
+    );
+    for (const [requestId, pending] of cancelled) {
+      this.pending.delete(requestId);
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(new Error(`Debug adapter request '${pending.command}' cancelled`));
+    }
+    if (notifyAdapter) {
+      for (const [requestId, pending] of cancelled) {
+        if (pending.command === "cancel") continue;
+        void this.sendRequest("cancel", { requestId }, 2_000).catch(
+          () => undefined,
+        );
+      }
+    }
   }
 
   private accept(message: DapMessage): void {
@@ -206,13 +280,21 @@ export class DapConnection {
       case "response": {
         const pending = this.pending.get(message.request_seq);
         if (!pending) return;
-        clearTimeout(pending.timer);
+        if (pending.timer) clearTimeout(pending.timer);
         this.pending.delete(message.request_seq);
-        if (!message.success) {
+        if (message.command !== pending.command) {
           pending.reject(
             new Error(
-              message.message ||
-                `Debug adapter request '${pending.command}' failed`,
+              `Debug adapter response command '${message.command}' does not match '${pending.command}'`,
+            ),
+          );
+          return;
+        }
+        if (!message.success) {
+          pending.reject(
+            new DapResponseError(
+              responseErrorMessage(message, pending.command),
+              message,
             ),
           );
           return;

@@ -26,6 +26,7 @@ import {
 } from "../lib/debug-config";
 import type {
   DapBreakpoint,
+  DapContinuedEventBody,
   DapEvaluateResult,
   DapOutputEventBody,
   DapScope,
@@ -48,6 +49,7 @@ import type {
 
 export type TabKind =
   | "file"
+  | "debug-source"
   | "preview"
   | "settings"
   | "extensions"
@@ -62,6 +64,9 @@ export interface EditorTab {
   language?: string;
   dirty?: boolean;
   url?: string;
+  content?: string;
+  debugPosition?: { line: number; column: number };
+  debugSessionId?: string;
 }
 
 export type SidebarView =
@@ -76,6 +81,21 @@ export type StoredLspLog = LspLog & { id: number };
 
 let nextLspLogId = 1;
 let nextDebugConsoleId = 1;
+let nextDebugThreadRequestId = 1;
+let nextDebugFrameRequestId = 1;
+let activeDebugThreadRequestId = 0;
+let activeDebugFrameRequestId = 0;
+const debugBreakpointRequestVersions = new Map<string, number>();
+let nextDebugVariablePageReference = -1;
+const debugVariablePages = new Map<
+  number,
+  {
+    reference: number;
+    filter: "indexed" | "named";
+    start: number;
+    count: number;
+  }
+>();
 
 export interface TerminalInstance {
   id: string;
@@ -135,6 +155,8 @@ export interface DebugViewState {
   variables: Record<number, DapVariable[]>;
   console: DebugConsoleEntry[];
   stoppedReason: string | null;
+  pausedSessionId: string | null;
+  pauseGeneration: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -369,11 +391,23 @@ function loadPersistedBreakpoints(): Record<string, DebugBreakpointState[]> {
       Object.entries(parsed as Record<string, DebugBreakpointState[]>).map(
         ([sourcePath, breakpoints]) => [
           sourcePath,
-          breakpoints.map((breakpoint) => ({
-            ...breakpoint,
-            verified: false,
-            message: undefined,
-          })),
+          breakpoints.map(
+            ({
+              id,
+              line,
+              column,
+              condition,
+              hitCondition,
+              logMessage,
+            }) => ({
+              id: typeof id === "string" ? id : crypto.randomUUID(),
+              line,
+              ...(column == null ? {} : { column }),
+              ...(condition ? { condition } : {}),
+              ...(hitCondition ? { hitCondition } : {}),
+              ...(logMessage ? { logMessage } : {}),
+            }),
+          ),
         ],
       ),
     );
@@ -386,7 +420,35 @@ function persistBreakpoints(
   breakpoints: Record<string, DebugBreakpointState[]>,
 ): void {
   try {
-    localStorage.setItem(DEBUG_BREAKPOINTS_KEY, JSON.stringify(breakpoints));
+    localStorage.setItem(
+      DEBUG_BREAKPOINTS_KEY,
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(breakpoints).map(([sourcePath, sourceBreakpoints]) => [
+            sourcePath,
+            sourceBreakpoints
+              .filter((breakpoint) => !breakpoint.adapterCreated)
+              .map(
+                ({
+                  id,
+                  line,
+                  column,
+                  condition,
+                  hitCondition,
+                  logMessage,
+                }) => ({
+                  id,
+                  line,
+                  ...(column == null ? {} : { column }),
+                  ...(condition ? { condition } : {}),
+                  ...(hitCondition ? { hitCondition } : {}),
+                  ...(logMessage ? { logMessage } : {}),
+                }),
+              ),
+          ]),
+        ),
+      ),
+    );
   } catch {
     /* storage unavailable — breakpoints remain valid for this session */
   }
@@ -409,7 +471,21 @@ function initialDebugState(): DebugViewState {
     variables: {},
     console: [],
     stoppedReason: null,
+    pausedSessionId: null,
+    pauseGeneration: 0,
   };
+}
+
+function isCurrentDebugPause(
+  debug: DebugViewState,
+  sessionId: string,
+  generation: number,
+): boolean {
+  return (
+    debug.activeSessionId === sessionId &&
+    debug.pausedSessionId === sessionId &&
+    debug.pauseGeneration === generation
+  );
 }
 
 function consoleEntry(
@@ -425,20 +501,70 @@ function consoleEntry(
   };
 }
 
+function appendDebugError(debug: DebugViewState, error: unknown): DebugViewState {
+  return {
+    ...debug,
+    console: [
+      ...debug.console,
+      consoleEntry(
+        "error",
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      ),
+    ].slice(-2_000),
+  };
+}
+
 function dapBreakpoints(
   breakpoints: Record<string, DebugBreakpointState[]>,
 ): Record<string, DapSourceBreakpoint[]> {
   return Object.fromEntries(
     Object.entries(breakpoints).map(([sourcePath, sourceBreakpoints]) => [
       sourcePath,
-      sourceBreakpoints.map(({ line, column, condition, hitCondition, logMessage }) => ({
-        line,
-        ...(column == null ? {} : { column }),
-        ...(condition ? { condition } : {}),
-        ...(hitCondition ? { hitCondition } : {}),
-        ...(logMessage ? { logMessage } : {}),
-      })),
+      sourceBreakpoints
+        .filter((breakpoint) => !breakpoint.adapterCreated)
+        .map(({ line, column, condition, hitCondition, logMessage }) => ({
+          line,
+          ...(column == null ? {} : { column }),
+          ...(condition ? { condition } : {}),
+          ...(hitCondition ? { hitCondition } : {}),
+          ...(logMessage ? { logMessage } : {}),
+        })),
     ]),
+  );
+}
+
+function dapSourceBreakpoints(
+  breakpoints: DebugBreakpointState[],
+): DapSourceBreakpoint[] {
+  return breakpoints
+    .filter((breakpoint) => !breakpoint.adapterCreated)
+    .map(({ line, column, condition, hitCondition, logMessage }) => ({
+      line,
+      ...(column == null ? {} : { column }),
+      ...(condition ? { condition } : {}),
+      ...(hitCondition ? { hitCondition } : {}),
+      ...(logMessage ? { logMessage } : {}),
+    }));
+}
+
+function pathIsInWorkspace(sourcePath: string, root: string | null): boolean {
+  if (!root) return false;
+  const workspace = root.replace(/[/\\]+$/, "");
+  return (
+    sourcePath === workspace ||
+    sourcePath.startsWith(`${workspace}/`) ||
+    sourcePath.startsWith(`${workspace}\\`)
+  );
+}
+
+function clearDebugSourcePositions(
+  tabs: EditorTab[],
+  sessionId: string,
+): EditorTab[] {
+  return tabs.map((tab) =>
+    tab.debugSessionId === sessionId && tab.debugPosition
+      ? { ...tab, debugPosition: undefined }
+      : tab,
   );
 }
 
@@ -878,6 +1004,7 @@ export const useStore = create<LogosState>((set, get) => ({
     }
     const active = state.tabs.find((tab) => tab.id === state.activeTabId);
     const sessionId = crypto.randomUUID();
+    debugVariablePages.clear();
     const resolved = resolveDebugConfiguration(selected, {
       workspaceFolder: state.root ?? ".",
       file: active?.kind === "file" ? active.path : undefined,
@@ -904,6 +1031,8 @@ export const useStore = create<LogosState>((set, get) => ({
         scopes: [],
         variables: {},
         stoppedReason: null,
+        pausedSessionId: null,
+        pauseGeneration: current.debug.pauseGeneration + 1,
         console: [
           ...current.debug.console,
           consoleEntry("console", `Starting ${resolved.name}…\n`),
@@ -914,7 +1043,13 @@ export const useStore = create<LogosState>((set, get) => ({
       await window.logos.debug.start({
         sessionId,
         configuration: resolved,
-        initialBreakpoints: dapBreakpoints(get().debug.breakpoints),
+        initialBreakpoints: dapBreakpoints(
+          Object.fromEntries(
+            Object.entries(get().debug.breakpoints).filter(([sourcePath]) =>
+              pathIsInWorkspace(sourcePath, state.root),
+            ),
+          ),
+        ),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -952,44 +1087,66 @@ export const useStore = create<LogosState>((set, get) => ({
       if (!parentSessionId) break;
       sessionId = parentSessionId;
     }
-    if (sessionId) await window.logos.debug.stop(sessionId, true);
+    if (sessionId) {
+      const terminateDebuggee = debug.sessions[sessionId]?.request === "launch";
+      await window.logos.debug.stop(sessionId, terminateDebuggee);
+    }
   },
   async debugContinue() {
     const debug = get().debug;
     if (!debug.activeSessionId || debug.selectedThreadId == null) return;
-    await window.logos.debug.request(debug.activeSessionId, "continue", {
-      threadId: debug.selectedThreadId,
-    });
+    try {
+      await window.logos.debug.request(debug.activeSessionId, "continue", {
+        threadId: debug.selectedThreadId,
+      });
+    } catch (error) {
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
   },
   async debugPause() {
     const debug = get().debug;
     if (!debug.activeSessionId) return;
-    let threadId = debug.selectedThreadId ?? debug.threads[0]?.id;
-    if (threadId == null) {
-      const response = await window.logos.debug.request<{ threads?: DapThread[] }>(
-        debug.activeSessionId,
-        "threads",
-      );
-      const threads = response.body?.threads ?? [];
-      threadId = threads[0]?.id;
-      set((state) => ({
-        debug: { ...state.debug, threads },
-      }));
+    try {
+      let threadId = debug.selectedThreadId ?? debug.threads[0]?.id;
+      if (threadId == null) {
+        const response = await window.logos.debug.request<{
+          threads?: DapThread[];
+        }>(debug.activeSessionId, "threads");
+        const threads = response.body?.threads ?? [];
+        if (get().debug.activeSessionId !== debug.activeSessionId) return;
+        threadId = threads[0]?.id;
+        set((state) => ({
+          debug: { ...state.debug, threads },
+        }));
+      }
+      if (threadId == null) return;
+      await window.logos.debug.request(debug.activeSessionId, "pause", {
+        threadId,
+      });
+    } catch (error) {
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
     }
-    if (threadId == null) return;
-    await window.logos.debug.request(debug.activeSessionId, "pause", {
-      threadId,
-    });
   },
   async debugStep(command) {
     const debug = get().debug;
     if (!debug.activeSessionId || debug.selectedThreadId == null) return;
-    await window.logos.debug.request(debug.activeSessionId, command, {
-      threadId: debug.selectedThreadId,
-      granularity: "statement",
-    });
+    const session = debug.sessions[debug.activeSessionId];
+    try {
+      await window.logos.debug.request(debug.activeSessionId, command, {
+        threadId: debug.selectedThreadId,
+        ...(session?.capabilities.supportsSteppingGranularity
+          ? { granularity: "statement" }
+          : {}),
+      });
+    } catch (error) {
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
   },
   async toggleBreakpoint(sourcePath, line) {
+    const requestKey = sourcePath;
+    const requestVersion =
+      (debugBreakpointRequestVersions.get(requestKey) ?? 0) + 1;
+    debugBreakpointRequestVersions.set(requestKey, requestVersion);
     const current = get().debug.breakpoints[sourcePath] ?? [];
     const existing = current.find((breakpoint) => breakpoint.line === line);
     const next = existing
@@ -999,7 +1156,6 @@ export const useStore = create<LogosState>((set, get) => ({
           {
             id: crypto.randomUUID(),
             line,
-            verified: false,
           } satisfies DebugBreakpointState,
         ].sort((a, b) => a.line - b.line);
     set((state) => ({
@@ -1020,23 +1176,40 @@ export const useStore = create<LogosState>((set, get) => ({
       session.status === "terminated" ||
       session.status === "error"
     ) return;
+    const requestedBreakpoints = next.filter(
+      (breakpoint) => !breakpoint.adapterCreated,
+    );
     try {
       const protocolBreakpoints = await window.logos.debug.setBreakpoints(
         debug.activeSessionId,
         sourcePath,
-        next,
+        dapSourceBreakpoints(next),
       );
+      if (debugBreakpointRequestVersions.get(requestKey) !== requestVersion) {
+        return;
+      }
       set((state) => ({
         debug: {
           ...state.debug,
           breakpoints: {
             ...state.debug.breakpoints,
-            [sourcePath]: next.map((breakpoint, index) => ({
-              ...breakpoint,
-              verified: protocolBreakpoints[index]?.verified,
-              message: protocolBreakpoints[index]?.message,
-              line: protocolBreakpoints[index]?.line ?? breakpoint.line,
-            })),
+            [sourcePath]: (
+              state.debug.breakpoints[sourcePath] ?? []
+            ).map((breakpoint) => {
+              const index = requestedBreakpoints.findIndex(
+                (item) => item.id === breakpoint.id,
+              );
+              if (index < 0) return breakpoint;
+              return {
+                ...breakpoint,
+                sessionData: {
+                  ...breakpoint.sessionData,
+                  [debug.activeSessionId!]: protocolBreakpoints[index] ?? {
+                    verified: false,
+                  },
+                },
+              };
+            }),
           },
         },
       }));
@@ -1056,16 +1229,34 @@ export const useStore = create<LogosState>((set, get) => ({
     }
   },
   async selectDebugThread(threadId) {
-    const sessionId = get().debug.activeSessionId;
-    if (!sessionId) return;
+    const debug = get().debug;
+    const sessionId = debug.activeSessionId;
+    if (!sessionId || debug.pausedSessionId !== sessionId) return;
+    const generation = debug.pauseGeneration;
+    const requestId = nextDebugThreadRequestId++;
+    activeDebugThreadRequestId = requestId;
     set((state) => ({
-      debug: { ...state.debug, selectedThreadId: threadId },
+      debug: {
+        ...state.debug,
+        selectedThreadId: threadId,
+        stackFrames: [],
+        selectedFrameId: null,
+        scopes: [],
+        variables: {},
+      },
     }));
     try {
       const response = await window.logos.debug.request<{
         stackFrames?: DapStackFrame[];
-      }>(sessionId, "stackTrace", { threadId, startFrame: 0, levels: 100 });
+      }>(sessionId, "stackTrace", { threadId });
       const stackFrames = response.body?.stackFrames ?? [];
+      if (
+        activeDebugThreadRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation) ||
+        get().debug.selectedThreadId !== threadId
+      ) {
+        return;
+      }
       set((state) => ({
         debug: {
           ...state.debug,
@@ -1077,6 +1268,12 @@ export const useStore = create<LogosState>((set, get) => ({
       }));
       if (stackFrames[0]) await get().selectDebugFrame(stackFrames[0].id);
     } catch (error) {
+      if (
+        activeDebugThreadRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation)
+      ) {
+        return;
+      }
       set((state) => ({
         debug: {
           ...state.debug,
@@ -1094,8 +1291,12 @@ export const useStore = create<LogosState>((set, get) => ({
   async selectDebugFrame(frameId) {
     const debug = get().debug;
     const sessionId = debug.activeSessionId;
-    if (!sessionId) return;
+    if (!sessionId || debug.pausedSessionId !== sessionId) return;
+    const generation = debug.pauseGeneration;
+    const requestId = nextDebugFrameRequestId++;
+    activeDebugFrameRequestId = requestId;
     const frame = debug.stackFrames.find((item) => item.id === frameId);
+    if (!frame) return;
     set((state) => ({
       debug: {
         ...state.debug,
@@ -1104,7 +1305,48 @@ export const useStore = create<LogosState>((set, get) => ({
         variables: {},
       },
     }));
-    if (frame?.source?.path) get().openFile(frame.source.path);
+    if (frame.source?.sourceReference) {
+      const source = frame.source;
+      void window.logos.debug
+        .request<{ content?: string; mimeType?: string }>(sessionId, "source", {
+          source,
+          sourceReference: source.sourceReference,
+        })
+        .then((response) => {
+          if (
+            activeDebugFrameRequestId !== requestId ||
+            !isCurrentDebugPause(get().debug, sessionId, generation) ||
+            get().debug.selectedFrameId !== frameId
+          ) {
+            return;
+          }
+          const id = `debug-source:${sessionId}:${source.sourceReference}`;
+          const name =
+            source.name ||
+            (source.path ? basename(source.path) : undefined) ||
+            `Source ${source.sourceReference}`;
+          const tab: EditorTab = {
+            id,
+            kind: "debug-source",
+            name,
+            path: id,
+            language: languageFromPath(name),
+            content: response.body?.content ?? "",
+            debugSessionId: sessionId,
+            debugPosition: {
+              line: Math.max(frame.line, 1),
+              column: Math.max(frame.column, 1),
+            },
+          };
+          set((state) => ({
+            tabs: [...state.tabs.filter((item) => item.id !== id), tab],
+            activeTabId: id,
+          }));
+        })
+        .catch(() => undefined);
+    } else if (frame.source?.path) {
+      get().openFile(frame.source.path);
+    }
     try {
       const response = await window.logos.debug.request<{ scopes?: DapScope[] }>(
         sessionId,
@@ -1112,13 +1354,28 @@ export const useStore = create<LogosState>((set, get) => ({
         { frameId },
       );
       const scopes = response.body?.scopes ?? [];
+      if (
+        activeDebugFrameRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation) ||
+        get().debug.selectedFrameId !== frameId
+      ) {
+        return;
+      }
       set((state) => ({
         debug: { ...state.debug, scopes },
       }));
       await Promise.all(
-        scopes.map((scope) => get().loadDebugVariables(scope.variablesReference)),
+        scopes
+          .filter((scope) => !scope.expensive)
+          .map((scope) => get().loadDebugVariables(scope.variablesReference)),
       );
     } catch (error) {
+      if (
+        activeDebugFrameRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation)
+      ) {
+        return;
+      }
       set((state) => ({
         debug: {
           ...state.debug,
@@ -1135,17 +1392,124 @@ export const useStore = create<LogosState>((set, get) => ({
   },
   async loadDebugVariables(reference) {
     if (!reference) return;
-    const sessionId = get().debug.activeSessionId;
-    if (!sessionId) return;
-    const response = await window.logos.debug.request<{
-      variables?: DapVariable[];
-    }>(sessionId, "variables", { variablesReference: reference });
+    const debug = get().debug;
+    const sessionId = debug.activeSessionId;
+    if (!sessionId || debug.pausedSessionId !== sessionId) return;
+    const generation = debug.pauseGeneration;
+    const frameId = debug.selectedFrameId;
+    const page = debugVariablePages.get(reference);
+    const container = page
+      ? undefined
+      : [
+          ...debug.scopes,
+          ...Object.values(debug.variables).flat(),
+        ].find((item) => item.variablesReference === reference);
+    const chunks: DapVariable[] = [];
+    const requests: Array<Record<string, unknown>> = [];
+    const addPageLevel = (
+      filter: "indexed" | "named",
+      first: number,
+      total: number,
+    ) => {
+      let chunkSize = 100;
+      while (Math.ceil(total / chunkSize) > 100) chunkSize *= 100;
+      for (let offset = 0; offset < total; offset += chunkSize) {
+        const count = Math.min(chunkSize, total - offset);
+        const start = first + offset;
+        const pageReference = nextDebugVariablePageReference--;
+        debugVariablePages.set(pageReference, {
+          reference: page?.reference ?? reference,
+          filter,
+          start,
+          count,
+        });
+        chunks.push({
+          name:
+            filter === "indexed"
+              ? `[${start}..${start + count - 1}]`
+              : `named[${start}..${start + count - 1}]`,
+          value: "",
+          variablesReference: pageReference,
+          ...(filter === "indexed"
+            ? { indexedVariables: count }
+            : { namedVariables: count }),
+          presentationHint: { kind: "virtual" },
+        });
+      }
+    };
+    if (page) {
+      if (page.count > 100) {
+        addPageLevel(page.filter, page.start, page.count);
+      } else {
+        requests.push({
+          variablesReference: page.reference,
+          filter: page.filter,
+          start: page.start,
+          count: page.count,
+        });
+      }
+    } else if (
+      container &&
+      (container.indexedVariables != null || container.namedVariables != null)
+    ) {
+      if (container.namedVariables === undefined) {
+        requests.push({ variablesReference: reference, filter: "named" });
+      } else if (container.namedVariables > 100) {
+        addPageLevel("named", 0, container.namedVariables);
+      } else if (container.namedVariables > 0) {
+        requests.push({ variablesReference: reference, filter: "named" });
+      }
+      if ((container.indexedVariables ?? 0) > 100) {
+        addPageLevel("indexed", 0, container.indexedVariables!);
+      } else if ((container.indexedVariables ?? 0) > 0) {
+        requests.push({ variablesReference: reference, filter: "indexed" });
+      }
+    } else {
+      requests.push({ variablesReference: reference });
+    }
+    let responses: Array<{ body?: { variables?: DapVariable[] } }>;
+    try {
+      responses = await Promise.all(
+        requests.map((args) =>
+          window.logos.debug.request<{ variables?: DapVariable[] }>(
+            sessionId,
+            "variables",
+            args,
+          ),
+        ),
+      );
+    } catch (error) {
+      if (isCurrentDebugPause(get().debug, sessionId, generation)) {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            console: [
+              ...state.debug.console,
+              consoleEntry(
+                "error",
+                `${error instanceof Error ? error.message : String(error)}\n`,
+              ),
+            ].slice(-2_000),
+          },
+        }));
+      }
+      return;
+    }
+    if (
+      !isCurrentDebugPause(get().debug, sessionId, generation) ||
+      get().debug.selectedFrameId !== frameId
+    ) {
+      return;
+    }
     set((state) => ({
       debug: {
         ...state.debug,
         variables: {
           ...state.debug.variables,
-          [reference]: response.body?.variables ?? [],
+          [reference]: [
+            ...responses.flatMap((response) => response.body?.variables ?? []),
+            ...chunks,
+          ],
         },
       },
     }));
@@ -1161,7 +1525,7 @@ export const useStore = create<LogosState>((set, get) => ({
         console: [
           ...state.debug.console,
           consoleEntry("input", `> ${value}\n`),
-        ],
+        ].slice(-2_000),
       },
     }));
     try {
@@ -1185,7 +1549,7 @@ export const useStore = create<LogosState>((set, get) => ({
             consoleEntry("result", `${result?.result ?? ""}\n`, {
               variablesReference: result?.variablesReference,
             }),
-          ],
+          ].slice(-2_000),
         },
       }));
     } catch (error) {
@@ -1198,7 +1562,7 @@ export const useStore = create<LogosState>((set, get) => ({
               "error",
               `${error instanceof Error ? error.message : String(error)}\n`,
             ),
-          ],
+          ].slice(-2_000),
         },
       }));
     }
@@ -1224,46 +1588,95 @@ export const useStore = create<LogosState>((set, get) => ({
             ? [
                 ...state.debug.console,
                 consoleEntry("error", errorOutput),
-              ]
+              ].slice(-2_000)
             : state.debug.console;
-        const sessions = {
+        const sessions: Record<string, DebugSessionInfo> = {
           ...state.debug.sessions,
           [event.session.id]: event.session,
         };
+        const removable = Object.values(sessions).filter(
+          (session) =>
+            session.id !== event.session.id &&
+            session.id !== state.debug.activeSessionId &&
+            (session.status === "terminated" || session.status === "error"),
+        );
+        while (Object.keys(sessions).length > 50 && removable.length) {
+          const stale = removable.shift();
+          if (stale) delete sessions[stale.id];
+        }
         const allSessionsEnded = Object.values(sessions).every(
           (session) =>
             session.status === "terminated" || session.status === "error",
         );
-        const breakpoints = allSessionsEnded
-          ? Object.fromEntries(
-              Object.entries(state.debug.breakpoints).map(
-                ([sourcePath, sourceBreakpoints]) => [
-                  sourcePath,
-                  sourceBreakpoints.map((breakpoint) => ({
+        const breakpoints = Object.fromEntries(
+          Object.entries(state.debug.breakpoints).map(
+            ([sourcePath, sourceBreakpoints]) => [
+              sourcePath,
+              sourceBreakpoints
+                .filter(
+                  (breakpoint) =>
+                    !(
+                      ended &&
+                      breakpoint.adapterCreated &&
+                      (allSessionsEnded ||
+                        breakpoint.sessionData?.[event.session.id])
+                    ),
+                )
+                .map((breakpoint) => {
+                  if (allSessionsEnded) {
+                    const { sessionData: _sessionData, ...persistent } =
+                      breakpoint;
+                    return persistent;
+                  }
+                  if (!ended || !breakpoint.sessionData?.[event.session.id]) {
+                    return breakpoint;
+                  }
+                  const sessionData = { ...breakpoint.sessionData };
+                  delete sessionData[event.session.id];
+                  return {
                     ...breakpoint,
-                    verified: false,
-                    message: undefined,
-                  })),
-                ],
-              ),
-            )
-          : state.debug.breakpoints;
+                    sessionData: Object.keys(sessionData).length
+                      ? sessionData
+                      : undefined,
+                  };
+                }),
+            ],
+          ),
+        );
         const fallbackSession = Object.values(sessions).find(
           (session) =>
             session.status !== "terminated" && session.status !== "error",
         );
         const activeSessionId = ended
           ? state.debug.activeSessionId === event.session.id
-            ? (fallbackSession?.id ?? event.session.id)
+            ? (fallbackSession?.id ?? null)
             : state.debug.activeSessionId
-          : event.session.id;
+          : (state.debug.activeSessionId ?? event.session.id);
+        const clearPause =
+          ended && state.debug.pausedSessionId === event.session.id;
         return {
+          ...(ended
+            ? { tabs: clearDebugSourcePositions(state.tabs, event.session.id) }
+            : {}),
           debug: {
             ...state.debug,
             sessions,
             activeSessionId,
             breakpoints,
             console,
+            ...(clearPause
+              ? {
+                  threads: [],
+                  selectedThreadId: null,
+                  stackFrames: [],
+                  selectedFrameId: null,
+                  scopes: [],
+                  variables: {},
+                  stoppedReason: null,
+                  pausedSessionId: null,
+                  pauseGeneration: state.debug.pauseGeneration + 1,
+                }
+              : {}),
           },
         };
       });
@@ -1281,6 +1694,27 @@ export const useStore = create<LogosState>((set, get) => ({
       }));
       return;
     }
+    if (event.kind === "terminal") {
+      set((state) => {
+        if (state.terminals.some((terminal) => terminal.id === event.terminal.id)) {
+          return state;
+        }
+        const terminal: TerminalInstance = {
+          id: event.terminal.id,
+          name:
+            event.title ||
+            `${basename(event.terminal.shell)} ${state.terminals.length + 1}`,
+          pid: event.terminal.pid,
+        };
+        return {
+          terminals: [...state.terminals, terminal],
+          activeTerminalId: terminal.id,
+          panelVisible: true,
+          panelTab: "terminal",
+        };
+      });
+      return;
+    }
     if (event.kind === "breakpoints") {
       set((state) => ({
         debug: {
@@ -1289,12 +1723,26 @@ export const useStore = create<LogosState>((set, get) => ({
             ...state.debug.breakpoints,
             [event.sourcePath]: (
               state.debug.breakpoints[event.sourcePath] ?? []
-            ).map((breakpoint, index) => ({
-              ...breakpoint,
-              verified: event.breakpoints[index]?.verified,
-              message: event.breakpoints[index]?.message,
-              line: event.breakpoints[index]?.line ?? breakpoint.line,
-            })),
+            ).map((breakpoint, fallbackIndex) => {
+              const requestedIndex = event.requestedBreakpoints.findIndex(
+                (requested) =>
+                  requested.line === breakpoint.line &&
+                  requested.column === breakpoint.column,
+              );
+              const index = requestedIndex >= 0 ? requestedIndex : fallbackIndex;
+              if (requestedIndex < 0 && event.requestedBreakpoints.length) {
+                return breakpoint;
+              }
+              return {
+                ...breakpoint,
+                sessionData: {
+                  ...breakpoint.sessionData,
+                  [event.sessionId]: event.breakpoints[index] ?? {
+                    verified: false,
+                  },
+                },
+              };
+            }),
           },
         },
       }));
@@ -1304,7 +1752,7 @@ export const useStore = create<LogosState>((set, get) => ({
     const dapEvent = event.event;
     if (dapEvent.event === "output") {
       const body = dapEvent.body as DapOutputEventBody | undefined;
-      if (body?.output) {
+      if (body?.output && body.category !== "telemetry") {
         set((state) => ({
           debug: {
             ...state.debug,
@@ -1322,19 +1770,42 @@ export const useStore = create<LogosState>((set, get) => ({
       }
     } else if (dapEvent.event === "stopped") {
       const body = dapEvent.body as DapStoppedEventBody | undefined;
+      const currentDebug = get().debug;
+      if (
+        body?.preserveFocusHint &&
+        currentDebug.activeSessionId &&
+        currentDebug.activeSessionId !== event.sessionId
+      ) {
+        return;
+      }
+      debugVariablePages.clear();
       set((state) => ({
-        panelVisible: true,
-        panelTab: "debug",
+        ...(body?.preserveFocusHint
+          ? {}
+          : { panelVisible: true, panelTab: "debug" as const }),
         debug: {
           ...state.debug,
           activeSessionId: event.sessionId,
+          pausedSessionId: event.sessionId,
+          pauseGeneration: state.debug.pauseGeneration + 1,
+          threads: [],
+          selectedThreadId: null,
+          stackFrames: [],
+          selectedFrameId: null,
+          scopes: [],
+          variables: {},
           stoppedReason: body?.description ?? body?.reason ?? "stopped",
         },
+        tabs: clearDebugSourcePositions(state.tabs, event.sessionId),
       }));
+      const generation = get().debug.pauseGeneration;
       void window.logos.debug
         .request<{ threads?: DapThread[] }>(event.sessionId, "threads")
         .then(async (response) => {
           const threads = response.body?.threads ?? [];
+          if (!isCurrentDebugPause(get().debug, event.sessionId, generation)) {
+            return;
+          }
           set((state) => ({
             debug: {
               ...state.debug,
@@ -1347,6 +1818,9 @@ export const useStore = create<LogosState>((set, get) => ({
           if (threadId != null) await get().selectDebugThread(threadId);
         })
         .catch((error) => {
+          if (!isCurrentDebugPause(get().debug, event.sessionId, generation)) {
+            return;
+          }
           set((state) => ({
             debug: {
               ...state.debug,
@@ -1361,56 +1835,123 @@ export const useStore = create<LogosState>((set, get) => ({
           }));
         });
     } else if (dapEvent.event === "continued") {
-      set((state) => ({
-        debug: {
-          ...state.debug,
-          stackFrames: [],
-          selectedFrameId: null,
-          scopes: [],
-          variables: {},
-          stoppedReason: null,
-        },
-      }));
+      const body = dapEvent.body as DapContinuedEventBody | undefined;
+      set((state) => {
+        if (state.debug.pausedSessionId !== event.sessionId) return state;
+        const allThreadsContinued = body?.allThreadsContinued !== false;
+        if (
+          !allThreadsContinued &&
+          body?.threadId !== state.debug.selectedThreadId
+        ) {
+          return state;
+        }
+        activeDebugThreadRequestId = nextDebugThreadRequestId++;
+        activeDebugFrameRequestId = nextDebugFrameRequestId++;
+        debugVariablePages.clear();
+        return {
+          tabs: clearDebugSourcePositions(state.tabs, event.sessionId),
+          debug: {
+            ...state.debug,
+            ...(allThreadsContinued
+              ? { threads: [], pausedSessionId: null }
+              : {}),
+            selectedThreadId: null,
+            stackFrames: [],
+            selectedFrameId: null,
+            scopes: [],
+            variables: {},
+            stoppedReason: allThreadsContinued
+              ? null
+              : state.debug.stoppedReason,
+            pauseGeneration: state.debug.pauseGeneration + 1,
+          },
+        };
+      });
     } else if (dapEvent.event === "thread") {
       const session = get().debug.sessions[event.sessionId];
       if (session?.status === "stopped") {
+        const generation = get().debug.pauseGeneration;
         void window.logos.debug
           .request<{ threads?: DapThread[] }>(event.sessionId, "threads")
           .then((response) =>
-            set((state) => ({
-              debug: {
-                ...state.debug,
-                threads: response.body?.threads ?? [],
-              },
-            })),
-          );
+            isCurrentDebugPause(get().debug, event.sessionId, generation)
+              ? set((state) => ({
+                  debug: {
+                    ...state.debug,
+                    threads: response.body?.threads ?? [],
+                  },
+                }))
+              : undefined,
+          )
+          .catch(() => undefined);
       }
     } else if (dapEvent.event === "breakpoint") {
       const body = dapEvent.body as
         | { reason?: string; breakpoint?: DapBreakpoint }
         | undefined;
       const protocolBreakpoint = body?.breakpoint;
-      if (protocolBreakpoint?.source?.path && protocolBreakpoint.line != null) {
-        const sourcePath = protocolBreakpoint.source.path;
-        set((state) => ({
-          debug: {
-            ...state.debug,
-            breakpoints: {
-              ...state.debug.breakpoints,
-              [sourcePath]: (state.debug.breakpoints[sourcePath] ?? []).map(
-                (breakpoint) =>
-                  breakpoint.line === protocolBreakpoint.line
-                    ? {
-                        ...breakpoint,
-                        verified: protocolBreakpoint.verified,
-                        message: protocolBreakpoint.message,
-                      }
-                    : breakpoint,
-              ),
+      if (!protocolBreakpoint) return;
+      set((state) => {
+        const breakpoints = Object.fromEntries(
+          Object.entries(state.debug.breakpoints).map(
+            ([sourcePath, sourceBreakpoints]) => [sourcePath, [...sourceBreakpoints]],
+          ),
+        );
+        let matchedPath: string | undefined;
+        let matchedIndex = -1;
+        for (const [sourcePath, sourceBreakpoints] of Object.entries(breakpoints)) {
+          const index = sourceBreakpoints.findIndex((breakpoint) => {
+            const sessionData = breakpoint.sessionData?.[event.sessionId];
+            if (protocolBreakpoint.id != null) {
+              return sessionData?.id === protocolBreakpoint.id;
+            }
+            return (
+              protocolBreakpoint.source?.path === sourcePath &&
+              protocolBreakpoint.line != null &&
+              (sessionData?.line === protocolBreakpoint.line ||
+                breakpoint.line === protocolBreakpoint.line)
+            );
+          });
+          if (index >= 0) {
+            matchedPath = sourcePath;
+            matchedIndex = index;
+            break;
+          }
+        }
+
+        if (body?.reason === "new") {
+          const sourcePath = protocolBreakpoint.source?.path;
+          if (!sourcePath || protocolBreakpoint.line == null || matchedPath) {
+            return state;
+          }
+          breakpoints[sourcePath] = [
+            ...(breakpoints[sourcePath] ?? []),
+            {
+              id: crypto.randomUUID(),
+              line: protocolBreakpoint.line,
+              sessionData: { [event.sessionId]: protocolBreakpoint },
+              adapterCreated: true,
             },
-          },
-        }));
-      }
+          ];
+        } else if (body?.reason === "removed") {
+          if (!matchedPath || matchedIndex < 0) return state;
+          breakpoints[matchedPath].splice(matchedIndex, 1);
+        } else if (body?.reason === "changed") {
+          if (!matchedPath || matchedIndex < 0) return state;
+          const breakpoint = breakpoints[matchedPath][matchedIndex];
+          breakpoints[matchedPath][matchedIndex] = {
+            ...breakpoint,
+            sessionData: {
+              ...breakpoint.sessionData,
+              [event.sessionId]: protocolBreakpoint,
+            },
+          };
+        } else {
+          return state;
+        }
+        persistBreakpoints(breakpoints);
+        return { debug: { ...state.debug, breakpoints } };
+      });
     }
   },
 

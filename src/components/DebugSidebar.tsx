@@ -2,7 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useT } from "../i18n";
 import { basename } from "../lib/language";
 import { useStore } from "../state/store";
-import type { DapVariable, DebugLaunchConfiguration } from "../shared/dap";
+import type {
+  DapScope,
+  DapVariable,
+  DebugLaunchConfiguration,
+} from "../shared/dap";
 import { Icon } from "./Icon";
 
 function sessionCanRun(status: string | undefined): boolean {
@@ -14,7 +18,7 @@ function VariableRow({ variable, depth = 0 }: { variable: DapVariable; depth?: n
   const loadVariables = useStore((state) => state.loadDebugVariables);
   const [expanded, setExpanded] = useState(false);
   const children = variables[variable.variablesReference] ?? [];
-  const expandable = variable.variablesReference > 0;
+  const expandable = variable.variablesReference !== 0;
 
   const toggle = () => {
     if (!expandable) return;
@@ -51,6 +55,36 @@ function VariableRow({ variable, depth = 0 }: { variable: DapVariable; depth?: n
           />
         ))}
     </>
+  );
+}
+
+function ScopeView({ scope }: { scope: DapScope }) {
+  const variables = useStore(
+    (state) => state.debug.variables[scope.variablesReference],
+  );
+  const loadVariables = useStore((state) => state.loadDebugVariables);
+  const [expanded, setExpanded] = useState(!scope.expensive);
+
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && !variables) void loadVariables(scope.variablesReference);
+  };
+
+  return (
+    <div>
+      <button className="debug-scope-title" onClick={toggle}>
+        <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+        {scope.name}
+      </button>
+      {expanded &&
+        (variables ?? []).map((variable, index) => (
+          <VariableRow
+            key={`${variable.name}:${index}`}
+            variable={variable}
+          />
+        ))}
+    </div>
   );
 }
 
@@ -210,17 +244,10 @@ export function DebugSidebar() {
             <div className="debug-empty">{stopped ? t("debug.noVariables") : t("debug.notStopped")}</div>
           ) : (
             debug.scopes.map((scope) => (
-              <div key={`${scope.name}:${scope.variablesReference}`}>
-                <div className="debug-scope-title">{scope.name}</div>
-                {(debug.variables[scope.variablesReference] ?? []).map(
-                  (variable, index) => (
-                    <VariableRow
-                      key={`${variable.name}:${index}`}
-                      variable={variable}
-                    />
-                  ),
-                )}
-              </div>
+              <ScopeView
+                key={`${scope.name}:${scope.variablesReference}`}
+                scope={scope}
+              />
             ))
           )}
         </section>
@@ -265,25 +292,34 @@ export function DebugSidebar() {
             <div className="debug-empty">{t("debug.noBreakpoints")}</div>
           ) : (
             Object.entries(debug.breakpoints).flatMap(([sourcePath, breakpoints]) =>
-              breakpoints.map((breakpoint) => (
-                <div
-                  key={breakpoint.id}
-                  className="debug-breakpoint"
-                  title={breakpoint.message ?? sourcePath}
-                >
-                  <span className={`debug-breakpoint-dot ${breakpoint.verified ? "verified" : ""}`} />
-                  <button onClick={() => openFile(sourcePath)}>
-                    {basename(sourcePath)}:{breakpoint.line}
-                  </button>
-                  <button
-                    className="icon-btn"
-                    title={t("debug.removeBreakpoint")}
-                    onClick={() => void toggleBreakpoint(sourcePath, breakpoint.line)}
+              breakpoints.map((breakpoint) => {
+                const sessionData = debug.activeSessionId
+                  ? breakpoint.sessionData?.[debug.activeSessionId]
+                  : undefined;
+                return (
+                  <div
+                    key={breakpoint.id}
+                    className="debug-breakpoint"
+                    title={sessionData?.message ?? sourcePath}
                   >
-                    <Icon name="close" size={11} />
-                  </button>
-                </div>
-              )),
+                    <span className={`debug-breakpoint-dot ${sessionData?.verified ? "verified" : ""}`} />
+                    <button onClick={() => openFile(sourcePath)}>
+                      {basename(sourcePath)}:{breakpoint.line}
+                      {sessionData?.line != null &&
+                      sessionData.line !== breakpoint.line
+                        ? ` -> ${sessionData.line}`
+                        : ""}
+                    </button>
+                    <button
+                      className="icon-btn"
+                      title={t("debug.removeBreakpoint")}
+                      onClick={() => void toggleBreakpoint(sourcePath, breakpoint.line)}
+                    >
+                      <Icon name="close" size={11} />
+                    </button>
+                  </div>
+                );
+              }),
             )
           )}
         </section>
