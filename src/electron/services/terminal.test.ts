@@ -108,9 +108,12 @@ describe("terminal service", () => {
     const ipc = createIpcHarness();
     let resizeCalls = 0;
     let killCalls = 0;
+    let writeCalls = 0;
     const proc = {
       pid: 7,
-      write: () => undefined,
+      write: () => {
+        writeCalls++;
+      },
       resize: () => {
         resizeCalls++;
         throw new Error("already exited");
@@ -137,7 +140,16 @@ describe("terminal service", () => {
 
     ipc.emit(CH.terminalResize, terminal.id, 80, 24);
     expect(resizeCalls).toBe(1);
+    expect(() => ipc.emit(CH.terminalKill, terminal.id)).toThrow(
+      "already exited",
+    );
+    ipc.emit(CH.terminalWrite, terminal.id, "ignored");
+    expect(writeCalls).toBe(0);
+
+    await ipc.invoke<TerminalCreated>(CH.terminalCreate, {
+      shell: "/bin/test-shell",
+    });
     cleanup();
-    expect(killCalls).toBe(1);
+    expect(killCalls).toBe(2);
   });
 });

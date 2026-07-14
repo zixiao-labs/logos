@@ -82,6 +82,9 @@ export interface TerminalCreateOptions {
   cols?: number;
   rows?: number;
   shell?: string;
+  executable?: string;
+  args?: string[];
+  env?: Record<string, string | null>;
 }
 
 export interface TerminalCreated {

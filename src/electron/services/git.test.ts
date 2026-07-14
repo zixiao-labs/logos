@@ -50,6 +50,28 @@ describe("git service", () => {
     });
   });
 
+  it("normalizes command failures and a removed workspace", async () => {
+    expect(await service.invoke<string>(CH.gitFetch, root)).toMatch(
+      /^Fetch failed:/,
+    );
+
+    await service.invoke(CH.gitInit, root);
+    await expect(
+      service.invoke(CH.gitDiscard, root, ["missing.txt"]),
+    ).resolves.toBeUndefined();
+    await fs.rm(root, { recursive: true, force: true });
+
+    expect(await service.invoke<GitStatus>(CH.gitStatus, root)).toEqual({
+      isRepo: false,
+      branch: null,
+      ahead: 0,
+      behind: 0,
+      changes: [],
+      clean: true,
+    });
+    expect(await service.invoke(CH.gitHead, root)).toBeNull();
+  });
+
   it("tracks the stage, commit, head, log, branches, and working diff", async () => {
     await service.invoke(CH.gitInit, root);
     await exec("git", ["-C", root, "config", "user.name", "Logos Tests"]);

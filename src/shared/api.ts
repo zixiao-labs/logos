@@ -24,6 +24,16 @@ import type {
   WindowControl,
 } from "./types";
 import type { ServerCapabilities } from "vscode-languageserver-protocol";
+import type {
+  DapArguments,
+  DapBreakpoint,
+  DapResponse,
+  DapSourceBreakpoint,
+  DebugAdapterInfo,
+  DebugSessionEvent,
+  DebugSessionInfo,
+  DebugStartRequest,
+} from "./dap";
 
 /** Unsubscribe handle returned by every `on…` subscription. */
 export type Unsubscribe = () => void;
@@ -139,6 +149,23 @@ export interface LogosAPI {
     onRequest(
       cb: (request: LspClientRequest) => Promise<unknown>,
     ): Unsubscribe;
+  };
+  debug: {
+    list(): Promise<DebugSessionInfo[]>;
+    listAdapters(): Promise<DebugAdapterInfo[]>;
+    start(request: DebugStartRequest): Promise<DebugSessionInfo>;
+    stop(sessionId: string, terminateDebuggee?: boolean): Promise<void>;
+    request<T = unknown>(
+      sessionId: string,
+      command: string,
+      args?: DapArguments,
+    ): Promise<DapResponse<T>>;
+    setBreakpoints(
+      sessionId: string,
+      sourcePath: string,
+      breakpoints: DapSourceBreakpoint[],
+    ): Promise<DapBreakpoint[]>;
+    onEvent(cb: (event: DebugSessionEvent) => void): Unsubscribe;
   };
   app: {
     versions(): Promise<AppVersions>;

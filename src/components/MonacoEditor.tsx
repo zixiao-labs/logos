@@ -12,9 +12,11 @@ import {
   takeLspNavigationTarget,
 } from "../lib/lsp-monaco";
 import { serverIdForLanguage } from "../lib/language";
+import type { DebugBreakpointState } from "../shared/dap";
 
 /** path -> last-saved content, for dirty tracking. */
 const baselines = new Map<string, string>();
+const EMPTY_DEBUG_BREAKPOINTS: DebugBreakpointState[] = [];
 let themesDefined = false;
 
 function defineThemes() {
@@ -54,20 +56,41 @@ function editorOptions(
     wordWrap: settings["editor.wordWrap"],
     minimap: { enabled: settings["editor.minimap"] },
     lineNumbers: settings["editor.lineNumbers"],
+    glyphMargin: true,
   };
 }
 
 interface MonacoEditorProps {
   path: string;
   language: string;
+  content?: string;
+  readOnly?: boolean;
+  debugPosition?: { line: number; column: number };
 }
 
-export function MonacoEditor({ path, language }: MonacoEditorProps) {
+export function MonacoEditor({
+  path,
+  language,
+  content: providedContent,
+  readOnly = false,
+  debugPosition,
+}: MonacoEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const breakpointDecorationsRef =
+    useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
+  const stackDecorationsRef =
+    useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
   const settings = useStore((s) => s.settings);
   const setDirty = useStore((s) => s.setDirty);
   const setCursor = useStore((s) => s.setCursor);
+  const breakpoints = useStore(
+    (s) => s.debug.breakpoints[path] ?? EMPTY_DEBUG_BREAKPOINTS,
+  );
+  const activeDebugSessionId = useStore((s) => s.debug.activeSessionId);
+  const selectedFrame = useStore((s) =>
+    s.debug.stackFrames.find((frame) => frame.id === s.debug.selectedFrameId),
+  );
 
   // Create the editor once.
   useEffect(() => {
@@ -84,9 +107,12 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
       renderWhitespace: "selection",
       padding: { top: 8 },
       fixedOverflowWidgets: true,
+      readOnly,
       ...editorOptions(useStore.getState().settings),
     });
     editorRef.current = editor;
+    breakpointDecorationsRef.current = editor.createDecorationsCollection();
+    stackDecorationsRef.current = editor.createDecorationsCollection();
 
     for (const [id, label, run] of [
       ["incomingCalls", "Show Incoming Calls", () => showLspHierarchyForEditor(editor, "incoming")],
@@ -106,10 +132,37 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
     const cursorSub = editor.onDidChangeCursorPosition((e) =>
       setCursor(e.position.lineNumber, e.position.column),
     );
+    const mouseSub = editor.onMouseDown((event) => {
+      if (readOnly) return;
+      if (
+        event.target.type !==
+          monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN ||
+        !event.target.position
+      ) return;
+      const debug = useStore.getState().debug;
+      const existing = (debug.breakpoints[path] ?? []).find((breakpoint) => {
+        const sessionData = debug.activeSessionId
+          ? breakpoint.sessionData?.[debug.activeSessionId]
+          : undefined;
+        return (
+          (sessionData?.line ?? breakpoint.line) ===
+          event.target.position!.lineNumber
+        );
+      });
+      void useStore
+        .getState()
+        .toggleBreakpoint(
+          path,
+          existing?.line ?? event.target.position.lineNumber,
+        );
+    });
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      if (readOnly) return;
       void saveCurrent(editor, setDirty);
     });
-    const onSave = () => void saveCurrent(editor, setDirty);
+    const onSave = () => {
+      if (!readOnly) void saveCurrent(editor, setDirty);
+    };
     window.addEventListener("logos:save", onSave);
 
     // C2: when a cold language server becomes ready, re-trigger the suggest
@@ -150,6 +203,9 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
       window.removeEventListener("logos:lsp-ready", onLspReady);
       window.removeEventListener("logos:lsp-navigate", onNavigate);
       cursorSub.dispose();
+      mouseSub.dispose();
+      breakpointDecorationsRef.current = null;
+      stackDecorationsRef.current = null;
       editor.dispose();
       editorRef.current = null;
     };
@@ -159,37 +215,61 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
   // Swap the model when the active file changes.
   useEffect(() => {
     let cancelled = false;
-    const uri = monaco.Uri.file(path);
+    const uri = providedContent === undefined
+      ? monaco.Uri.file(path)
+      : monaco.Uri.parse(path);
     (async () => {
       let model = monaco.editor.getModel(uri);
       if (!model) {
-        const content = await window.logos.fs.readFile(path).catch(() => "");
+        const content =
+          providedContent ??
+          (await window.logos.fs.readFile(path).catch(() => ""));
         if (cancelled) return;
         model = monaco.editor.getModel(uri);
         if (!model) {
           model = monaco.editor.createModel(content, language, uri);
-          baselines.set(path, content);
-          let version = 1;
-          model.onDidChangeContent((event) => {
-            const m = model!;
-            setDirty(`file:${path}`, m.getValue() !== baselines.get(path));
-            lspChangeDoc(
-              path,
-              language,
-              m.getValue(),
-              ++version,
-              event.changes.map((change) => ({
-                range: change.range,
-                rangeLength: change.rangeLength,
-                text: change.text,
-              })),
-            );
-          });
-          lspOpenDoc(path, language, content);
+          if (providedContent === undefined) {
+            baselines.set(path, content);
+            let version = 1;
+            model.onDidChangeContent((event) => {
+              const m = model!;
+              setDirty(`file:${path}`, m.getValue() !== baselines.get(path));
+              lspChangeDoc(
+                path,
+                language,
+                m.getValue(),
+                ++version,
+                event.changes.map((change) => ({
+                  range: change.range,
+                  rangeLength: change.rangeLength,
+                  text: change.text,
+                })),
+              );
+            });
+            lspOpenDoc(path, language, content);
+          }
         }
+      } else if (
+        providedContent !== undefined &&
+        model.getValue() !== providedContent
+      ) {
+        model.setValue(providedContent);
       }
       const editor = editorRef.current;
       editor?.setModel(model);
+      if (editor) {
+        updateBreakpointDecorations(
+          breakpointDecorationsRef.current,
+          useStore.getState().debug.breakpoints[path] ?? EMPTY_DEBUG_BREAKPOINTS,
+          useStore.getState().debug.activeSessionId,
+        );
+        updateStackFrameDecoration(
+          editor,
+          stackDecorationsRef.current,
+          path,
+          readOnly,
+        );
+      }
       const target = takeLspNavigationTarget(path);
       if (editor && target) {
         if ("startLineNumber" in target) {
@@ -205,7 +285,47 @@ export function MonacoEditor({ path, language }: MonacoEditorProps) {
     return () => {
       cancelled = true;
     };
-  }, [path, language, setDirty]);
+  }, [language, path, providedContent, readOnly, setDirty]);
+
+  useEffect(() => {
+    updateBreakpointDecorations(
+      breakpointDecorationsRef.current,
+      breakpoints,
+      activeDebugSessionId,
+    );
+  }, [activeDebugSessionId, breakpoints]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    updateStackFrameDecoration(
+      editor,
+      stackDecorationsRef.current,
+      path,
+      readOnly,
+    );
+  }, [path, readOnly, selectedFrame]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || !readOnly) return;
+    if (!debugPosition) {
+      stackDecorationsRef.current?.clear();
+      return;
+    }
+    const position = {
+      lineNumber: debugPosition.line,
+      column: debugPosition.column,
+    };
+    editor.setPosition(position);
+    editor.revealPositionInCenter(position);
+    stackDecorationsRef.current?.set([
+      {
+        range: new monaco.Range(position.lineNumber, 1, position.lineNumber, 1),
+        options: { isWholeLine: true, className: "logos-debug-stack-line" },
+      },
+    ]);
+  }, [debugPosition, readOnly]);
 
   // Apply settings live.
   useEffect(() => {
@@ -256,6 +376,67 @@ export function disposeModel(path: string) {
   baselines.delete(path);
 }
 
+function updateBreakpointDecorations(
+  collection: monaco.editor.IEditorDecorationsCollection | null,
+  breakpoints: DebugBreakpointState[],
+  activeSessionId: string | null,
+): void {
+  collection?.set(
+    breakpoints.map((breakpoint) => {
+      const sessionData = activeSessionId
+        ? breakpoint.sessionData?.[activeSessionId]
+        : undefined;
+      return {
+        range: new monaco.Range(
+          sessionData?.line ?? breakpoint.line,
+          1,
+          sessionData?.line ?? breakpoint.line,
+          1,
+        ),
+        options: {
+          isWholeLine: true,
+          glyphMarginClassName: sessionData?.verified
+            ? "logos-breakpoint-glyph"
+            : "logos-breakpoint-glyph-unverified",
+          glyphMarginHoverMessage: {
+            value:
+              sessionData?.message ?? `Breakpoint at line ${breakpoint.line}`,
+          },
+        },
+      };
+    }),
+  );
+}
+
+function updateStackFrameDecoration(
+  editor: monaco.editor.IStandaloneCodeEditor,
+  collection: monaco.editor.IEditorDecorationsCollection | null,
+  path: string,
+  readOnly: boolean,
+): void {
+  if (readOnly) return;
+  const debug = useStore.getState().debug;
+  const frame = debug.stackFrames.find(
+    (candidate) => candidate.id === debug.selectedFrameId,
+  );
+  if (frame?.source?.path !== path) {
+    collection?.clear();
+    return;
+  }
+  const position = {
+    lineNumber: Math.max(frame.line, 1),
+    column: Math.max(frame.column, 1),
+  };
+  editor.setPosition(position);
+  editor.revealPositionInCenter(position);
+  collection?.set([
+    {
+      range: new monaco.Range(position.lineNumber, 1, position.lineNumber, 1),
+      options: { isWholeLine: true, className: "logos-debug-stack-line" },
+    },
+  ]);
+}
+
 export async function closeFileEditor(path: string, dirty: boolean) {
   const model = monaco.editor.getModel(monaco.Uri.file(path));
   if (dirty) {
@@ -297,6 +478,9 @@ export async function closeTabSafely(id: string) {
     tab.path &&
     !(await closeFileEditor(tab.path, Boolean(tab.dirty)))
   ) return false;
+  if (tab?.kind === "debug-source" && tab.path) {
+    monaco.editor.getModel(monaco.Uri.parse(tab.path))?.dispose();
+  }
   closeTab(id);
   return true;
 }

@@ -45,4 +45,27 @@ exports.default = async function afterPack(context) {
     },
   });
   console.log(`[afterPack] bundled language servers → ${dest}`);
+
+  const adapterSrc = path.join(
+    context.packager.projectDir,
+    "build",
+    "debug-adapters",
+  );
+  const adapterEntry = path.join(
+    adapterSrc,
+    "js-debug",
+    "src",
+    "dapDebugServer.js",
+  );
+  if (!existsSync(adapterEntry)) {
+    throw new Error(
+      `[afterPack] ${adapterEntry} missing — run \`npm run prepackage:debug-adapters\` before packaging`,
+    );
+  }
+  const adapterDest = path.join(
+    context.packager.getResourcesDir(context.appOutDir),
+    "debug-adapters",
+  );
+  cpSync(adapterSrc, adapterDest, { recursive: true });
+  console.log(`[afterPack] bundled debug adapters → ${adapterDest}`);
 };

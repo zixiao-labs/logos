@@ -6,6 +6,8 @@ describe("translate", () => {
   it("returns localized English and Chinese strings", () => {
     expect(translate("en", "common.cancel")).toBe("Cancel");
     expect(translate("zh", "common.cancel")).toBe("取消");
+    expect(translate("en", "panel.noPorts")).toBe("No forwarded ports.");
+    expect(translate("zh", "panel.noPorts")).toBe("暂无转发端口。");
   });
 
   it("falls back to English and then to the key", () => {

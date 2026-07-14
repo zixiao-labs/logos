@@ -4,6 +4,7 @@ export type IconName =
   | "files"
   | "search"
   | "git"
+  | "debug"
   | "extensions"
   | "agent"
   | "settings"
@@ -25,6 +26,10 @@ export type IconName =
   | "check"
   | "play"
   | "stop"
+  | "pause"
+  | "step-over"
+  | "step-into"
+  | "step-out"
   | "send"
   | "layout"
   | "sun"
@@ -52,6 +57,8 @@ const PATHS: Record<IconName, string> = {
     "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7",
   search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3",
   git: "M6 3v12M18 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a9 9 0 0 0 9-9",
+  debug:
+    "M8 2l1.4 2.2A7 7 0 0 1 12 3.7c.9 0 1.8.2 2.6.5L16 2m-8 7H4m16 0h-4M7 14H3m18 0h-4M8 19l-2 3m10-3 2 3M8 8h8v7a4 4 0 0 1-8 0V8zM12 8V4",
   extensions:
     "M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v3.8h1.5a2.7 2.7 0 0 1 0 5.4H2V20a2 2 0 0 0 2 2h3.8v-1.5a2.7 2.7 0 0 1 5.4 0V22H17a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z",
   agent:
@@ -79,6 +86,10 @@ const PATHS: Record<IconName, string> = {
   check: "M20 6L9 17l-5-5",
   play: "M5 3l14 9-14 9V3z",
   stop: "M6 6h12v12H6z",
+  pause: "M8 5v14M16 5v14",
+  "step-over": "M4 17v-2a7 7 0 0 1 12-5l3 3M19 8v5h-5M12 17v.01",
+  "step-into": "M12 3v13M7 11l5 5 5-5M5 21h14",
+  "step-out": "M12 21V8M7 13l5-5 5 5M5 3h14",
   send: "M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z",
   layout: "M3 3h18v18H3zM9 3v18M9 13h12",
   sun: "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4",

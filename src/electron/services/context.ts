@@ -1,4 +1,8 @@
 import type { BrowserWindow, IpcMain } from "electron";
+import type {
+  TerminalCreateOptions,
+  TerminalCreated,
+} from "../../shared/types";
 
 /**
  * Passed to every service's `register` function. Keeps services decoupled from
@@ -12,4 +16,10 @@ export interface ServiceContext {
   getWindow(): BrowserWindow | null;
   /** Absolute path to Electron's per-user data directory. */
   userDataDir: string;
+  /** Prevent development-only resources from shadowing signed packaged code. */
+  isPackaged?: boolean;
+  terminal?: {
+    create(options: TerminalCreateOptions): TerminalCreated;
+    kill(id: string): void;
+  };
 }

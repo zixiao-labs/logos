@@ -61,6 +61,11 @@ jobs:
       - name: Stage bundled language servers
         run: npm run prepackage:servers
 
+      - name: Stage bundled JavaScript debug adapter
+        run: npm run prepackage:debug-adapters
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
       - name: Build (renderer + main + preload)
         run: npm run build:app
 

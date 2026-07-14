@@ -19,6 +19,29 @@ import type {
 } from "../shared/types";
 import { basename, languageFromPath } from "../lib/language";
 import { notifyResult } from "../lib/toast";
+import {
+  DEFAULT_DEBUG_CONFIGURATION,
+  parseDebugConfigurationFile,
+  resolveDebugConfiguration,
+} from "../lib/debug-config";
+import type {
+  DapBreakpoint,
+  DapContinuedEventBody,
+  DapEvaluateResult,
+  DapOutputEventBody,
+  DapScope,
+  DapSourceBreakpoint,
+  DapStackFrame,
+  DapStoppedEventBody,
+  DapThread,
+  DapVariable,
+  DebugAdapterInfo,
+  DebugBreakpointState,
+  DebugConsoleEntry,
+  DebugLaunchConfiguration,
+  DebugSessionEvent,
+  DebugSessionInfo,
+} from "../shared/dap";
 
 // ---------------------------------------------------------------------------
 // Models
@@ -26,6 +49,7 @@ import { notifyResult } from "../lib/toast";
 
 export type TabKind =
   | "file"
+  | "debug-source"
   | "preview"
   | "settings"
   | "extensions"
@@ -40,13 +64,39 @@ export interface EditorTab {
   language?: string;
   dirty?: boolean;
   url?: string;
+  content?: string;
+  debugPosition?: { line: number; column: number };
+  debugSessionId?: string;
 }
 
-export type SidebarView = "explorer" | "search" | "git" | "extensions" | "agent";
+export type SidebarView =
+  | "explorer"
+  | "search"
+  | "git"
+  | "debug"
+  | "extensions"
+  | "agent";
 export type PanelTab = "problems" | "output" | "debug" | "terminal" | "ports";
 export type StoredLspLog = LspLog & { id: number };
 
 let nextLspLogId = 1;
+let nextDebugConsoleId = 1;
+let nextDebugThreadRequestId = 1;
+let nextDebugFrameRequestId = 1;
+let activeDebugThreadRequestId = 0;
+let activeDebugFrameRequestId = 0;
+const debugBreakpointRequestVersions = new Map<string, number>();
+let debugConfigurationRequestVersion = 0;
+let nextDebugVariablePageReference = -1;
+const debugVariablePages = new Map<
+  number,
+  {
+    reference: number;
+    filter: "indexed" | "named";
+    start: number;
+    count: number;
+  }
+>();
 
 export interface TerminalInstance {
   id: string;
@@ -90,6 +140,26 @@ export interface Diagnostic {
   source?: string;
 }
 
+export interface DebugViewState {
+  sessions: Record<string, DebugSessionInfo>;
+  activeSessionId: string | null;
+  adapters: DebugAdapterInfo[];
+  configurations: DebugLaunchConfiguration[];
+  configurationPath: string | null;
+  configurationError: string | null;
+  breakpoints: Record<string, DebugBreakpointState[]>;
+  threads: DapThread[];
+  selectedThreadId: number | null;
+  stackFrames: DapStackFrame[];
+  selectedFrameId: number | null;
+  scopes: DapScope[];
+  variables: Record<number, DapVariable[]>;
+  console: DebugConsoleEntry[];
+  stoppedReason: string | null;
+  pausedSessionId: string | null;
+  pauseGeneration: number;
+}
+
 // ---------------------------------------------------------------------------
 // Store shape
 // ---------------------------------------------------------------------------
@@ -125,6 +195,8 @@ interface LogosState {
   /** Language-server stderr/installer/client logs shown in the Output panel. */
   lspLogs: StoredLspLog[];
   lspWorkDone: Record<string, LspWorkDoneProgress>;
+
+  debug: DebugViewState;
 
   agentSessions: AgentSession[];
   activeAgentId: string | null;
@@ -183,6 +255,21 @@ interface LogosState {
   clearLspWorkDone(serverId: string, token: string | number): void;
   loadAgentModels(): Promise<void>;
   loadAgentCommands(): Promise<void>;
+
+  loadDebugConfigurations(): Promise<void>;
+  createDebugConfiguration(): Promise<void>;
+  startDebug(configuration?: DebugLaunchConfiguration): Promise<void>;
+  stopDebug(): Promise<void>;
+  debugContinue(): Promise<void>;
+  debugPause(): Promise<void>;
+  debugStep(command: "next" | "stepIn" | "stepOut"): Promise<void>;
+  toggleBreakpoint(path: string, line: number): Promise<void>;
+  selectDebugThread(threadId: number): Promise<void>;
+  selectDebugFrame(frameId: number): Promise<void>;
+  loadDebugVariables(reference: number): Promise<void>;
+  evaluateDebug(expression: string): Promise<void>;
+  clearDebugConsole(): void;
+  applyDebugEvent(event: DebugSessionEvent): void;
 
   newAgentSession(name?: string): string;
   removeAgentSession(id: string): void;
@@ -293,6 +380,187 @@ function persistAgent(
 
 const persistedAgent = loadPersistedAgent();
 
+const DEBUG_BREAKPOINTS_KEY = "logos.debug.breakpoints.v1";
+
+function loadPersistedBreakpoints(): Record<string, DebugBreakpointState[]> {
+  try {
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(DEBUG_BREAKPOINTS_KEY) ?? "{}",
+    );
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, DebugBreakpointState[]>).map(
+        ([sourcePath, breakpoints]) => [
+          sourcePath,
+          breakpoints.map(
+            ({
+              id,
+              line,
+              column,
+              condition,
+              hitCondition,
+              logMessage,
+            }) => ({
+              id: typeof id === "string" ? id : crypto.randomUUID(),
+              line,
+              ...(column == null ? {} : { column }),
+              ...(condition ? { condition } : {}),
+              ...(hitCondition ? { hitCondition } : {}),
+              ...(logMessage ? { logMessage } : {}),
+            }),
+          ),
+        ],
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistBreakpoints(
+  breakpoints: Record<string, DebugBreakpointState[]>,
+): void {
+  try {
+    localStorage.setItem(
+      DEBUG_BREAKPOINTS_KEY,
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(breakpoints).map(([sourcePath, sourceBreakpoints]) => [
+            sourcePath,
+            sourceBreakpoints
+              .filter((breakpoint) => !breakpoint.adapterCreated)
+              .map(
+                ({
+                  id,
+                  line,
+                  column,
+                  condition,
+                  hitCondition,
+                  logMessage,
+                }) => ({
+                  id,
+                  line,
+                  ...(column == null ? {} : { column }),
+                  ...(condition ? { condition } : {}),
+                  ...(hitCondition ? { hitCondition } : {}),
+                  ...(logMessage ? { logMessage } : {}),
+                }),
+              ),
+          ]),
+        ),
+      ),
+    );
+  } catch {
+    /* storage unavailable — breakpoints remain valid for this session */
+  }
+}
+
+function initialDebugState(): DebugViewState {
+  return {
+    sessions: {},
+    activeSessionId: null,
+    adapters: [],
+    configurations: [],
+    configurationPath: null,
+    configurationError: null,
+    breakpoints: loadPersistedBreakpoints(),
+    threads: [],
+    selectedThreadId: null,
+    stackFrames: [],
+    selectedFrameId: null,
+    scopes: [],
+    variables: {},
+    console: [],
+    stoppedReason: null,
+    pausedSessionId: null,
+    pauseGeneration: 0,
+  };
+}
+
+function isCurrentDebugPause(
+  debug: DebugViewState,
+  sessionId: string,
+  generation: number,
+): boolean {
+  return (
+    debug.activeSessionId === sessionId &&
+    debug.pausedSessionId === sessionId &&
+    debug.pauseGeneration === generation
+  );
+}
+
+function consoleEntry(
+  category: DebugConsoleEntry["category"],
+  output: string,
+  details: Partial<DebugConsoleEntry> = {},
+): DebugConsoleEntry {
+  return {
+    id: `debug-console-${nextDebugConsoleId++}`,
+    category,
+    output,
+    ...details,
+  };
+}
+
+function appendDebugError(debug: DebugViewState, error: unknown): DebugViewState {
+  return {
+    ...debug,
+    console: [
+      ...debug.console,
+      consoleEntry(
+        "error",
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      ),
+    ].slice(-2_000),
+  };
+}
+
+function dapBreakpoints(
+  breakpoints: Record<string, DebugBreakpointState[]>,
+): Record<string, DapSourceBreakpoint[]> {
+  return Object.fromEntries(
+    Object.entries(breakpoints).map(([sourcePath, sourceBreakpoints]) => [
+      sourcePath,
+      dapSourceBreakpoints(sourceBreakpoints),
+    ]),
+  );
+}
+
+function dapSourceBreakpoints(
+  breakpoints: DebugBreakpointState[],
+): DapSourceBreakpoint[] {
+  return breakpoints
+    .filter((breakpoint) => !breakpoint.adapterCreated)
+    .map(({ line, column, condition, hitCondition, logMessage }) => ({
+      line,
+      ...(column == null ? {} : { column }),
+      ...(condition ? { condition } : {}),
+      ...(hitCondition ? { hitCondition } : {}),
+      ...(logMessage ? { logMessage } : {}),
+    }));
+}
+
+function pathIsInWorkspace(sourcePath: string, root: string | null): boolean {
+  if (!root) return false;
+  const workspace = root.replace(/[/\\]+$/, "");
+  return (
+    sourcePath === workspace ||
+    sourcePath.startsWith(`${workspace}/`) ||
+    sourcePath.startsWith(`${workspace}\\`)
+  );
+}
+
+function clearDebugSourcePositions(
+  tabs: EditorTab[],
+  sessionId: string,
+): EditorTab[] {
+  return tabs.map((tab) =>
+    tab.debugSessionId === sessionId && tab.debugPosition
+      ? { ...tab, debugPosition: undefined }
+      : tab,
+  );
+}
+
 export const useStore = create<LogosState>((set, get) => ({
   ready: false,
   settings: { ...DEFAULT_SETTINGS },
@@ -322,6 +590,8 @@ export const useStore = create<LogosState>((set, get) => ({
   lspLogs: [],
   lspWorkDone: {},
 
+  debug: initialDebugState(),
+
   agentSessions: persistedAgent.agentSessions,
   activeAgentId: persistedAgent.activeAgentId,
   agentModels: [],
@@ -330,23 +600,43 @@ export const useStore = create<LogosState>((set, get) => ({
   paletteOpen: false,
 
   async bootstrap() {
-    const [settings, root, recent, servers] = await Promise.all([
-      window.logos.settings.getAll(),
-      window.logos.workspace.getRoot(),
-      window.logos.workspace.recent(),
-      window.logos.lsp.list().catch(() => []),
-    ]);
+    const [settings, root, recent, servers, debugSessions, debugAdapters] =
+      await Promise.all([
+        window.logos.settings.getAll(),
+        window.logos.workspace.getRoot(),
+        window.logos.workspace.recent(),
+        window.logos.lsp.list().catch(() => []),
+        window.logos.debug.list().catch(() => []),
+        window.logos.debug.listAdapters().catch(() => []),
+      ]);
     const lsp: Record<string, LspProgress> = {};
     for (const s of servers)
       lsp[s.id] = { id: s.id, status: s.status, message: s.message };
-    set({ settings, root, recent, lsp, ready: true });
+    const sessions = Object.fromEntries(
+      debugSessions.map((session) => [session.id, session]),
+    );
+    set((state) => ({
+      settings,
+      root,
+      recent,
+      lsp,
+      debug: {
+        ...state.debug,
+        sessions,
+        activeSessionId: debugSessions.at(-1)?.id ?? null,
+        adapters: debugAdapters,
+      },
+      ready: true,
+    }));
 
     window.logos.settings.onChanged((s) => set({ settings: s }));
     window.logos.workspace.onChanged((r) => {
       set({ root: r });
       void get().refreshGit();
+      void get().loadDebugConfigurations();
     });
     window.logos.agent.onEvent((e) => get().applyAgentEvent(e));
+    window.logos.debug.onEvent((event) => get().applyDebugEvent(event));
     // C1: the single store-side LSP status subscriber (status bar + Extensions
     // view both read this slice). lsp-monaco keeps its own subscriber for the
     // Monaco-side self-heal.
@@ -356,6 +646,7 @@ export const useStore = create<LogosState>((set, get) => ({
     // Always have at least one agent session ready (the Cursor layout shows it).
     if (get().agentSessions.length === 0) get().newAgentSession("Agent 1");
     if (root) void get().refreshGit();
+    void get().loadDebugConfigurations();
   },
 
   async setSetting(key, value) {
@@ -395,6 +686,7 @@ export const useStore = create<LogosState>((set, get) => ({
     const recent = await window.logos.workspace.recent();
     set({ root: path, recent });
     await get().refreshGit();
+    await get().loadDebugConfigurations();
   },
 
   openFile(path) {
@@ -619,6 +911,1013 @@ export const useStore = create<LogosState>((set, get) => ({
       .listCommands(agentAuthCtx(get()))
       .catch(() => []);
     set({ agentCommands: commands });
+  },
+
+  async loadDebugConfigurations() {
+    const requestVersion = ++debugConfigurationRequestVersion;
+    const root = get().root;
+    if (!root) {
+      if (debugConfigurationRequestVersion !== requestVersion) return;
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          configurations: [],
+          configurationPath: null,
+          configurationError: null,
+        },
+      }));
+      return;
+    }
+    const candidates = [
+      `${root}/.logos/launch.json`,
+      `${root}/.vscode/launch.json`,
+    ];
+    const configurationPath =
+      (await Promise.all(
+        candidates.map(async (candidate) => ({
+          candidate,
+          exists: await window.logos.fs.exists(candidate).catch(() => false),
+        })),
+      )).find((entry) => entry.exists)?.candidate ?? null;
+    if (debugConfigurationRequestVersion !== requestVersion) return;
+    if (!configurationPath) {
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          configurations: [],
+          configurationPath: null,
+          configurationError: null,
+        },
+      }));
+      return;
+    }
+    try {
+      const source = await window.logos.fs.readFile(configurationPath);
+      const file = parseDebugConfigurationFile(source);
+      if (debugConfigurationRequestVersion !== requestVersion) return;
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          configurations: file.configurations,
+          configurationPath,
+          configurationError: null,
+        },
+      }));
+    } catch (error) {
+      if (debugConfigurationRequestVersion !== requestVersion) return;
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          configurations: [],
+          configurationPath,
+          configurationError:
+            error instanceof Error ? error.message : String(error),
+        },
+      }));
+    }
+  },
+  async createDebugConfiguration() {
+    const root = get().root;
+    if (!root) return;
+    const directory = `${root}/.logos`;
+    const configurationPath = `${directory}/launch.json`;
+    if (!(await window.logos.fs.exists(directory))) {
+      await window.logos.fs.createDir(directory);
+    }
+    if (!(await window.logos.fs.exists(configurationPath))) {
+      await window.logos.fs.createFile(
+        configurationPath,
+        DEFAULT_DEBUG_CONFIGURATION,
+      );
+    }
+    await get().loadDebugConfigurations();
+    get().openFile(configurationPath);
+  },
+  async startDebug(configuration) {
+    const state = get();
+    const selected = configuration ?? state.debug.configurations[0];
+    if (!selected) {
+      await get().createDebugConfiguration();
+      return;
+    }
+    const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+    const sessionId = crypto.randomUUID();
+    debugVariablePages.clear();
+    const resolved = resolveDebugConfiguration(selected, {
+      workspaceFolder: state.root ?? ".",
+      file: active?.kind === "file" ? active.path : undefined,
+    });
+    const pending: DebugSessionInfo = {
+      id: sessionId,
+      name: resolved.name,
+      debugType: resolved.type,
+      request: resolved.request,
+      status: "initializing",
+      capabilities: {},
+    };
+    set((current) => ({
+      sidebarView: "debug",
+      sidebarVisible: true,
+      debug: {
+        ...current.debug,
+        sessions: { ...current.debug.sessions, [sessionId]: pending },
+        activeSessionId: sessionId,
+        threads: [],
+        selectedThreadId: null,
+        stackFrames: [],
+        selectedFrameId: null,
+        scopes: [],
+        variables: {},
+        stoppedReason: null,
+        pausedSessionId: null,
+        pauseGeneration: current.debug.pauseGeneration + 1,
+        console: [
+          ...current.debug.console,
+          consoleEntry("console", `Starting ${resolved.name}…\n`),
+        ],
+      },
+    }));
+    try {
+      await window.logos.debug.start({
+        sessionId,
+        configuration: resolved,
+        initialBreakpoints: dapBreakpoints(
+          Object.fromEntries(
+            Object.entries(get().debug.breakpoints).filter(([sourcePath]) =>
+              pathIsInWorkspace(sourcePath, state.root),
+            ),
+          ),
+        ),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set((current) => {
+        const output = `${message}\n`;
+        return {
+          panelVisible: true,
+          panelTab: "debug",
+          debug: {
+            ...current.debug,
+            sessions: {
+              ...current.debug.sessions,
+              [sessionId]: {
+                ...(current.debug.sessions[sessionId] ?? pending),
+                status: "error",
+                message,
+              },
+            },
+            console:
+              current.debug.console.at(-1)?.output === output
+                ? current.debug.console
+                : [...current.debug.console, consoleEntry("error", output)],
+          },
+        };
+      });
+    }
+  },
+  async stopDebug() {
+    const debug = get().debug;
+    let sessionId = debug.activeSessionId;
+    const visited = new Set<string>();
+    while (sessionId && !visited.has(sessionId)) {
+      visited.add(sessionId);
+      const parentSessionId = debug.sessions[sessionId]?.parentSessionId;
+      if (!parentSessionId) break;
+      sessionId = parentSessionId;
+    }
+    if (sessionId) {
+      const terminateDebuggee = debug.sessions[sessionId]?.request === "launch";
+      await window.logos.debug.stop(sessionId, terminateDebuggee);
+    }
+  },
+  async debugContinue() {
+    const debug = get().debug;
+    if (!debug.activeSessionId || debug.selectedThreadId == null) return;
+    try {
+      await window.logos.debug.request(debug.activeSessionId, "continue", {
+        threadId: debug.selectedThreadId,
+      });
+    } catch (error) {
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
+  },
+  async debugPause() {
+    const debug = get().debug;
+    if (!debug.activeSessionId) return;
+    try {
+      let threadId = debug.selectedThreadId ?? debug.threads[0]?.id;
+      if (threadId == null) {
+        const response = await window.logos.debug.request<{
+          threads?: DapThread[];
+        }>(debug.activeSessionId, "threads");
+        const threads = response.body?.threads ?? [];
+        if (get().debug.activeSessionId !== debug.activeSessionId) return;
+        threadId = threads[0]?.id;
+        set((state) => ({
+          debug: { ...state.debug, threads },
+        }));
+      }
+      if (threadId == null) return;
+      await window.logos.debug.request(debug.activeSessionId, "pause", {
+        threadId,
+      });
+    } catch (error) {
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
+  },
+  async debugStep(command) {
+    const debug = get().debug;
+    if (!debug.activeSessionId || debug.selectedThreadId == null) return;
+    const session = debug.sessions[debug.activeSessionId];
+    try {
+      await window.logos.debug.request(debug.activeSessionId, command, {
+        threadId: debug.selectedThreadId,
+        ...(session?.capabilities.supportsSteppingGranularity
+          ? { granularity: "statement" }
+          : {}),
+      });
+    } catch (error) {
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
+  },
+  async toggleBreakpoint(sourcePath, line) {
+    const requestKey = sourcePath;
+    const requestVersion =
+      (debugBreakpointRequestVersions.get(requestKey) ?? 0) + 1;
+    debugBreakpointRequestVersions.set(requestKey, requestVersion);
+    const current = get().debug.breakpoints[sourcePath] ?? [];
+    const existing = current.find((breakpoint) => breakpoint.line === line);
+    const next = existing
+      ? current.filter((breakpoint) => breakpoint.id !== existing.id)
+      : [
+          ...current,
+          {
+            id: crypto.randomUUID(),
+            line,
+          } satisfies DebugBreakpointState,
+        ].sort((a, b) => a.line - b.line);
+    set((state) => ({
+      debug: {
+        ...state.debug,
+        breakpoints: { ...state.debug.breakpoints, [sourcePath]: next },
+      },
+    }));
+    persistBreakpoints(get().debug.breakpoints);
+
+    const debug = get().debug;
+    const session = debug.activeSessionId
+      ? debug.sessions[debug.activeSessionId]
+      : undefined;
+    if (
+      !debug.activeSessionId ||
+      !session ||
+      session.status === "terminated" ||
+      session.status === "error"
+    ) return;
+    const requestedBreakpoints = next.filter(
+      (breakpoint) => !breakpoint.adapterCreated,
+    );
+    try {
+      const protocolBreakpoints = await window.logos.debug.setBreakpoints(
+        debug.activeSessionId,
+        sourcePath,
+        dapSourceBreakpoints(next),
+      );
+      if (debugBreakpointRequestVersions.get(requestKey) !== requestVersion) {
+        return;
+      }
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          breakpoints: {
+            ...state.debug.breakpoints,
+            [sourcePath]: (
+              state.debug.breakpoints[sourcePath] ?? []
+            ).map((breakpoint) => {
+              const index = requestedBreakpoints.findIndex(
+                (item) => item.id === breakpoint.id,
+              );
+              if (index < 0) return breakpoint;
+              return {
+                ...breakpoint,
+                sessionData: {
+                  ...breakpoint.sessionData,
+                  [debug.activeSessionId!]: protocolBreakpoints[index] ?? {
+                    verified: false,
+                  },
+                },
+              };
+            }),
+          },
+        },
+      }));
+    } catch (error) {
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
+  },
+  async selectDebugThread(threadId) {
+    const debug = get().debug;
+    const sessionId = debug.activeSessionId;
+    if (!sessionId || debug.pausedSessionId !== sessionId) return;
+    const generation = debug.pauseGeneration;
+    const requestId = nextDebugThreadRequestId++;
+    activeDebugThreadRequestId = requestId;
+    set((state) => ({
+      debug: {
+        ...state.debug,
+        selectedThreadId: threadId,
+        stackFrames: [],
+        selectedFrameId: null,
+        scopes: [],
+        variables: {},
+      },
+    }));
+    try {
+      const response = await window.logos.debug.request<{
+        stackFrames?: DapStackFrame[];
+      }>(sessionId, "stackTrace", { threadId });
+      const stackFrames = response.body?.stackFrames ?? [];
+      if (
+        activeDebugThreadRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation) ||
+        get().debug.selectedThreadId !== threadId
+      ) {
+        return;
+      }
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          stackFrames,
+          selectedFrameId: stackFrames[0]?.id ?? null,
+          scopes: [],
+          variables: {},
+        },
+      }));
+      if (stackFrames[0]) await get().selectDebugFrame(stackFrames[0].id);
+    } catch (error) {
+      if (
+        activeDebugThreadRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation)
+      ) {
+        return;
+      }
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
+  },
+  async selectDebugFrame(frameId) {
+    const debug = get().debug;
+    const sessionId = debug.activeSessionId;
+    if (!sessionId || debug.pausedSessionId !== sessionId) return;
+    const generation = debug.pauseGeneration;
+    const requestId = nextDebugFrameRequestId++;
+    activeDebugFrameRequestId = requestId;
+    const frame = debug.stackFrames.find((item) => item.id === frameId);
+    if (!frame) return;
+    set((state) => ({
+      debug: {
+        ...state.debug,
+        selectedFrameId: frameId,
+        scopes: [],
+        variables: {},
+      },
+    }));
+    if (frame.source?.sourceReference) {
+      const source = frame.source;
+      void window.logos.debug
+        .request<{ content?: string; mimeType?: string }>(sessionId, "source", {
+          source,
+          sourceReference: source.sourceReference,
+        })
+        .then((response) => {
+          if (
+            activeDebugFrameRequestId !== requestId ||
+            !isCurrentDebugPause(get().debug, sessionId, generation) ||
+            get().debug.selectedFrameId !== frameId
+          ) {
+            return;
+          }
+          const id = `debug-source:${sessionId}:${source.sourceReference}`;
+          const name =
+            source.name ||
+            (source.path ? basename(source.path) : undefined) ||
+            `Source ${source.sourceReference}`;
+          const tab: EditorTab = {
+            id,
+            kind: "debug-source",
+            name,
+            path: id,
+            language: languageFromPath(name),
+            content: response.body?.content ?? "",
+            debugSessionId: sessionId,
+            debugPosition: {
+              line: Math.max(frame.line, 1),
+              column: Math.max(frame.column, 1),
+            },
+          };
+          set((state) => ({
+            tabs: [...state.tabs.filter((item) => item.id !== id), tab],
+            activeTabId: id,
+          }));
+        })
+        .catch(() => undefined);
+    } else if (frame.source?.path) {
+      get().openFile(frame.source.path);
+    }
+    try {
+      const response = await window.logos.debug.request<{ scopes?: DapScope[] }>(
+        sessionId,
+        "scopes",
+        { frameId },
+      );
+      const scopes = response.body?.scopes ?? [];
+      if (
+        activeDebugFrameRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation) ||
+        get().debug.selectedFrameId !== frameId
+      ) {
+        return;
+      }
+      set((state) => ({
+        debug: { ...state.debug, scopes },
+      }));
+      await Promise.all(
+        scopes
+          .filter((scope) => !scope.expensive)
+          .map((scope) => get().loadDebugVariables(scope.variablesReference)),
+      );
+    } catch (error) {
+      if (
+        activeDebugFrameRequestId !== requestId ||
+        !isCurrentDebugPause(get().debug, sessionId, generation)
+      ) {
+        return;
+      }
+      set((state) => ({ debug: appendDebugError(state.debug, error) }));
+    }
+  },
+  async loadDebugVariables(reference) {
+    if (!reference) return;
+    const debug = get().debug;
+    const sessionId = debug.activeSessionId;
+    if (!sessionId || debug.pausedSessionId !== sessionId) return;
+    const generation = debug.pauseGeneration;
+    const frameId = debug.selectedFrameId;
+    const page = debugVariablePages.get(reference);
+    const container = page
+      ? undefined
+      : [
+          ...debug.scopes,
+          ...Object.values(debug.variables).flat(),
+        ].find((item) => item.variablesReference === reference);
+    const chunks: DapVariable[] = [];
+    const requests: Array<Record<string, unknown>> = [];
+    const addPageLevel = (
+      filter: "indexed" | "named",
+      first: number,
+      total: number,
+    ) => {
+      let chunkSize = 100;
+      while (Math.ceil(total / chunkSize) > 100) chunkSize *= 100;
+      for (let offset = 0; offset < total; offset += chunkSize) {
+        const count = Math.min(chunkSize, total - offset);
+        const start = first + offset;
+        const pageReference = nextDebugVariablePageReference--;
+        debugVariablePages.set(pageReference, {
+          reference: page?.reference ?? reference,
+          filter,
+          start,
+          count,
+        });
+        chunks.push({
+          name:
+            filter === "indexed"
+              ? `[${start}..${start + count - 1}]`
+              : `named[${start}..${start + count - 1}]`,
+          value: "",
+          variablesReference: pageReference,
+          ...(filter === "indexed"
+            ? { indexedVariables: count }
+            : { namedVariables: count }),
+          presentationHint: { kind: "virtual" },
+        });
+      }
+    };
+    if (page) {
+      if (page.count > 100) {
+        addPageLevel(page.filter, page.start, page.count);
+      } else {
+        requests.push({
+          variablesReference: page.reference,
+          filter: page.filter,
+          start: page.start,
+          count: page.count,
+        });
+      }
+    } else if (
+      container &&
+      (container.indexedVariables != null || container.namedVariables != null)
+    ) {
+      if (container.namedVariables === undefined) {
+        requests.push({ variablesReference: reference, filter: "named" });
+      } else if (container.namedVariables > 100) {
+        addPageLevel("named", 0, container.namedVariables);
+      } else if (container.namedVariables > 0) {
+        requests.push({ variablesReference: reference, filter: "named" });
+      }
+      if ((container.indexedVariables ?? 0) > 100) {
+        addPageLevel("indexed", 0, container.indexedVariables!);
+      } else if ((container.indexedVariables ?? 0) > 0) {
+        requests.push({ variablesReference: reference, filter: "indexed" });
+      }
+    } else {
+      requests.push({ variablesReference: reference });
+    }
+    let responses: Array<{ body?: { variables?: DapVariable[] } }>;
+    try {
+      responses = await Promise.all(
+        requests.map((args) =>
+          window.logos.debug.request<{ variables?: DapVariable[] }>(
+            sessionId,
+            "variables",
+            args,
+          ),
+        ),
+      );
+    } catch (error) {
+      if (isCurrentDebugPause(get().debug, sessionId, generation)) {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            console: [
+              ...state.debug.console,
+              consoleEntry(
+                "error",
+                `${error instanceof Error ? error.message : String(error)}\n`,
+              ),
+            ].slice(-2_000),
+          },
+        }));
+      }
+      return;
+    }
+    if (
+      !isCurrentDebugPause(get().debug, sessionId, generation) ||
+      get().debug.selectedFrameId !== frameId
+    ) {
+      return;
+    }
+    set((state) => ({
+      debug: {
+        ...state.debug,
+        variables: {
+          ...state.debug.variables,
+          [reference]: [
+            ...responses.flatMap((response) => response.body?.variables ?? []),
+            ...chunks,
+          ],
+        },
+      },
+    }));
+  },
+  async evaluateDebug(expression) {
+    const value = expression.trim();
+    if (!value) return;
+    const debug = get().debug;
+    if (!debug.activeSessionId) return;
+    set((state) => ({
+      debug: {
+        ...state.debug,
+        console: [
+          ...state.debug.console,
+          consoleEntry("input", `> ${value}\n`),
+        ].slice(-2_000),
+      },
+    }));
+    try {
+      const response = await window.logos.debug.request<DapEvaluateResult>(
+        debug.activeSessionId,
+        "evaluate",
+        {
+          expression: value,
+          context: "repl",
+          ...(debug.selectedFrameId == null
+            ? {}
+            : { frameId: debug.selectedFrameId }),
+        },
+      );
+      const result = response.body;
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          console: [
+            ...state.debug.console,
+            consoleEntry("result", `${result?.result ?? ""}\n`, {
+              variablesReference: result?.variablesReference,
+            }),
+          ].slice(-2_000),
+        },
+      }));
+    } catch (error) {
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          console: [
+            ...state.debug.console,
+            consoleEntry(
+              "error",
+              `${error instanceof Error ? error.message : String(error)}\n`,
+            ),
+          ].slice(-2_000),
+        },
+      }));
+    }
+  },
+  clearDebugConsole() {
+    set((state) => ({
+      debug: { ...state.debug, console: [] },
+    }));
+  },
+  applyDebugEvent(event) {
+    if (event.kind === "session") {
+      set((state) => {
+        const ended =
+          event.session.status === "terminated" ||
+          event.session.status === "error";
+        const errorOutput = event.session.message
+          ? `${event.session.message}\n`
+          : null;
+        const console =
+          event.session.status === "error" &&
+          errorOutput &&
+          state.debug.console.at(-1)?.output !== errorOutput
+            ? [
+                ...state.debug.console,
+                consoleEntry("error", errorOutput),
+              ].slice(-2_000)
+            : state.debug.console;
+        const sessions: Record<string, DebugSessionInfo> = {
+          ...state.debug.sessions,
+          [event.session.id]: event.session,
+        };
+        const removable = Object.values(sessions).filter(
+          (session) =>
+            session.id !== event.session.id &&
+            session.id !== state.debug.activeSessionId &&
+            (session.status === "terminated" || session.status === "error"),
+        );
+        while (Object.keys(sessions).length > 50 && removable.length) {
+          const stale = removable.shift();
+          if (stale) delete sessions[stale.id];
+        }
+        const allSessionsEnded = Object.values(sessions).every(
+          (session) =>
+            session.status === "terminated" || session.status === "error",
+        );
+        const breakpoints = Object.fromEntries(
+          Object.entries(state.debug.breakpoints).map(
+            ([sourcePath, sourceBreakpoints]) => [
+              sourcePath,
+              sourceBreakpoints
+                .filter(
+                  (breakpoint) =>
+                    !(
+                      ended &&
+                      breakpoint.adapterCreated &&
+                      (allSessionsEnded ||
+                        breakpoint.sessionData?.[event.session.id])
+                    ),
+                )
+                .map((breakpoint) => {
+                  if (allSessionsEnded) {
+                    const { sessionData: _sessionData, ...persistent } =
+                      breakpoint;
+                    return persistent;
+                  }
+                  if (!ended || !breakpoint.sessionData?.[event.session.id]) {
+                    return breakpoint;
+                  }
+                  const sessionData = { ...breakpoint.sessionData };
+                  delete sessionData[event.session.id];
+                  return {
+                    ...breakpoint,
+                    sessionData: Object.keys(sessionData).length
+                      ? sessionData
+                      : undefined,
+                  };
+                }),
+            ],
+          ),
+        );
+        const fallbackSession = Object.values(sessions).find(
+          (session) =>
+            session.status !== "terminated" && session.status !== "error",
+        );
+        const activeSessionId = ended
+          ? state.debug.activeSessionId === event.session.id
+            ? (fallbackSession?.id ?? null)
+            : state.debug.activeSessionId
+          : (state.debug.activeSessionId ?? event.session.id);
+        const clearPause =
+          ended && state.debug.pausedSessionId === event.session.id;
+        return {
+          ...(ended
+            ? { tabs: clearDebugSourcePositions(state.tabs, event.session.id) }
+            : {}),
+          debug: {
+            ...state.debug,
+            sessions,
+            activeSessionId,
+            breakpoints,
+            console,
+            ...(clearPause
+              ? {
+                  threads: [],
+                  selectedThreadId: null,
+                  stackFrames: [],
+                  selectedFrameId: null,
+                  scopes: [],
+                  variables: {},
+                  stoppedReason: null,
+                  pausedSessionId: null,
+                  pauseGeneration: state.debug.pauseGeneration + 1,
+                }
+              : {}),
+          },
+        };
+      });
+      return;
+    }
+    if (event.kind === "adapter-output") {
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          console: [
+            ...state.debug.console,
+            consoleEntry(event.category, event.output),
+          ].slice(-2_000),
+        },
+      }));
+      return;
+    }
+    if (event.kind === "terminal") {
+      set((state) => {
+        if (state.terminals.some((terminal) => terminal.id === event.terminal.id)) {
+          return state;
+        }
+        const terminal: TerminalInstance = {
+          id: event.terminal.id,
+          name:
+            event.title ||
+            `${basename(event.terminal.shell)} ${state.terminals.length + 1}`,
+          pid: event.terminal.pid,
+        };
+        return {
+          terminals: [...state.terminals, terminal],
+          activeTerminalId: terminal.id,
+          panelVisible: true,
+          panelTab: "terminal",
+        };
+      });
+      return;
+    }
+    if (event.kind === "breakpoints") {
+      set((state) => ({
+        debug: {
+          ...state.debug,
+          breakpoints: {
+            ...state.debug.breakpoints,
+            [event.sourcePath]: (
+              state.debug.breakpoints[event.sourcePath] ?? []
+            ).map((breakpoint, fallbackIndex) => {
+              const requestedIndex = event.requestedBreakpoints.findIndex(
+                (requested) =>
+                  requested.line === breakpoint.line &&
+                  requested.column === breakpoint.column,
+              );
+              const index = requestedIndex >= 0 ? requestedIndex : fallbackIndex;
+              if (requestedIndex < 0 && event.requestedBreakpoints.length) {
+                return breakpoint;
+              }
+              return {
+                ...breakpoint,
+                sessionData: {
+                  ...breakpoint.sessionData,
+                  [event.sessionId]: event.breakpoints[index] ?? {
+                    verified: false,
+                  },
+                },
+              };
+            }),
+          },
+        },
+      }));
+      return;
+    }
+
+    const dapEvent = event.event;
+    if (dapEvent.event === "output") {
+      const body = dapEvent.body as DapOutputEventBody | undefined;
+      if (body?.output && body.category !== "telemetry") {
+        set((state) => ({
+          debug: {
+            ...state.debug,
+            console: [
+              ...state.debug.console,
+              consoleEntry(body.category ?? "console", body.output, {
+                source: body.source,
+                line: body.line,
+                column: body.column,
+                variablesReference: body.variablesReference,
+              }),
+            ].slice(-2_000),
+          },
+        }));
+      }
+    } else if (dapEvent.event === "stopped") {
+      const body = dapEvent.body as DapStoppedEventBody | undefined;
+      const currentDebug = get().debug;
+      if (
+        body?.preserveFocusHint &&
+        currentDebug.activeSessionId &&
+        currentDebug.activeSessionId !== event.sessionId
+      ) {
+        return;
+      }
+      debugVariablePages.clear();
+      set((state) => ({
+        ...(body?.preserveFocusHint
+          ? {}
+          : { panelVisible: true, panelTab: "debug" as const }),
+        debug: {
+          ...state.debug,
+          activeSessionId: event.sessionId,
+          pausedSessionId: event.sessionId,
+          pauseGeneration: state.debug.pauseGeneration + 1,
+          threads: [],
+          selectedThreadId: null,
+          stackFrames: [],
+          selectedFrameId: null,
+          scopes: [],
+          variables: {},
+          stoppedReason: body?.description ?? body?.reason ?? "stopped",
+        },
+        tabs: clearDebugSourcePositions(state.tabs, event.sessionId),
+      }));
+      const generation = get().debug.pauseGeneration;
+      void window.logos.debug
+        .request<{ threads?: DapThread[] }>(event.sessionId, "threads")
+        .then(async (response) => {
+          const threads = response.body?.threads ?? [];
+          if (!isCurrentDebugPause(get().debug, event.sessionId, generation)) {
+            return;
+          }
+          set((state) => ({
+            debug: {
+              ...state.debug,
+              threads,
+              selectedThreadId:
+                body?.threadId ?? threads[0]?.id ?? state.debug.selectedThreadId,
+            },
+          }));
+          const threadId = body?.threadId ?? threads[0]?.id;
+          if (threadId != null) await get().selectDebugThread(threadId);
+        })
+        .catch((error) => {
+          if (!isCurrentDebugPause(get().debug, event.sessionId, generation)) {
+            return;
+          }
+          set((state) => ({ debug: appendDebugError(state.debug, error) }));
+        });
+    } else if (dapEvent.event === "continued") {
+      const body = dapEvent.body as DapContinuedEventBody | undefined;
+      set((state) => {
+        if (state.debug.pausedSessionId !== event.sessionId) return state;
+        const allThreadsContinued = body?.allThreadsContinued !== false;
+        if (
+          !allThreadsContinued &&
+          body?.threadId !== state.debug.selectedThreadId
+        ) {
+          return state;
+        }
+        activeDebugThreadRequestId = nextDebugThreadRequestId++;
+        activeDebugFrameRequestId = nextDebugFrameRequestId++;
+        debugVariablePages.clear();
+        return {
+          tabs: clearDebugSourcePositions(state.tabs, event.sessionId),
+          debug: {
+            ...state.debug,
+            ...(allThreadsContinued
+              ? { threads: [], pausedSessionId: null }
+              : {}),
+            selectedThreadId: null,
+            stackFrames: [],
+            selectedFrameId: null,
+            scopes: [],
+            variables: {},
+            stoppedReason: allThreadsContinued
+              ? null
+              : state.debug.stoppedReason,
+            pauseGeneration: state.debug.pauseGeneration + 1,
+          },
+        };
+      });
+    } else if (dapEvent.event === "thread") {
+      const session = get().debug.sessions[event.sessionId];
+      if (session?.status === "stopped") {
+        const generation = get().debug.pauseGeneration;
+        void window.logos.debug
+          .request<{ threads?: DapThread[] }>(event.sessionId, "threads")
+          .then((response) =>
+            isCurrentDebugPause(get().debug, event.sessionId, generation)
+              ? set((state) => ({
+                  debug: {
+                    ...state.debug,
+                    threads: response.body?.threads ?? [],
+                  },
+                }))
+              : undefined,
+          )
+          .catch(() => undefined);
+      }
+    } else if (dapEvent.event === "breakpoint") {
+      const body = dapEvent.body as
+        | { reason?: string; breakpoint?: DapBreakpoint }
+        | undefined;
+      const protocolBreakpoint = body?.breakpoint;
+      if (!protocolBreakpoint) return;
+      set((state) => {
+        const breakpoints = Object.fromEntries(
+          Object.entries(state.debug.breakpoints).map(
+            ([sourcePath, sourceBreakpoints]) => [sourcePath, [...sourceBreakpoints]],
+          ),
+        );
+        let matchedPath: string | undefined;
+        let matchedIndex = -1;
+        for (const [sourcePath, sourceBreakpoints] of Object.entries(breakpoints)) {
+          const index = sourceBreakpoints.findIndex((breakpoint) => {
+            const sessionData = breakpoint.sessionData?.[event.sessionId];
+            if (protocolBreakpoint.id != null) {
+              return sessionData?.id === protocolBreakpoint.id;
+            }
+            return (
+              protocolBreakpoint.source?.path === sourcePath &&
+              protocolBreakpoint.line != null &&
+              (sessionData?.line === protocolBreakpoint.line ||
+                breakpoint.line === protocolBreakpoint.line)
+            );
+          });
+          if (index >= 0) {
+            matchedPath = sourcePath;
+            matchedIndex = index;
+            break;
+          }
+        }
+
+        if (body?.reason === "new") {
+          const sourcePath = protocolBreakpoint.source?.path;
+          if (!sourcePath || protocolBreakpoint.line == null || matchedPath) {
+            return state;
+          }
+          breakpoints[sourcePath] = [
+            ...(breakpoints[sourcePath] ?? []),
+            {
+              id: crypto.randomUUID(),
+              line: protocolBreakpoint.line,
+              sessionData: { [event.sessionId]: protocolBreakpoint },
+              adapterCreated: true,
+            },
+          ];
+        } else if (body?.reason === "removed") {
+          if (!matchedPath || matchedIndex < 0) return state;
+          const breakpoint = breakpoints[matchedPath][matchedIndex];
+          if (breakpoint.adapterCreated) {
+            breakpoints[matchedPath].splice(matchedIndex, 1);
+          } else {
+            const sessionData = { ...breakpoint.sessionData };
+            delete sessionData[event.sessionId];
+            breakpoints[matchedPath][matchedIndex] = {
+              ...breakpoint,
+              sessionData:
+                Object.keys(sessionData).length > 0 ? sessionData : undefined,
+            };
+          }
+        } else if (body?.reason === "changed") {
+          if (!matchedPath || matchedIndex < 0) return state;
+          const breakpoint = breakpoints[matchedPath][matchedIndex];
+          breakpoints[matchedPath][matchedIndex] = {
+            ...breakpoint,
+            sessionData: {
+              ...breakpoint.sessionData,
+              [event.sessionId]: protocolBreakpoint,
+            },
+          };
+        } else {
+          return state;
+        }
+        persistBreakpoints(breakpoints);
+        return { debug: { ...state.debug, breakpoints } };
+      });
+    }
   },
 
   newAgentSession(name) {
