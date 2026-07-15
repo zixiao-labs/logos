@@ -3,6 +3,7 @@ import type {
   AgentAuthRequest,
   AgentAuthResult,
   AgentAuthContext,
+  AgentCredentialStatus,
   AgentEvent,
   AgentModelInfo,
   AgentPermissionResponse,
@@ -11,6 +12,8 @@ import type {
   AgentSetConfigRequest,
   AgentSlashCommand,
   AgentStartRequest,
+  AcpAgentConfig,
+  AcpRegistryAgent,
   AppVersions,
   DirListing,
   FileStat,
@@ -137,6 +140,12 @@ export interface LogosAPI {
     listProviders(sessionId: string): Promise<AgentProviderInfo[]>;
     setProvider(sessionId: string, config: AgentProviderConfig): Promise<void>;
     disableProvider(sessionId: string, providerId: string): Promise<void>;
+    authStatus(): Promise<AgentCredentialStatus>;
+    loginChatGPT(): Promise<AgentCredentialStatus>;
+    setOpenAIKey(apiKey: string): Promise<AgentCredentialStatus>;
+    logoutOpenAI(): Promise<void>;
+    listRegistry(forceRefresh?: boolean): Promise<AcpRegistryAgent[]>;
+    resolveRegistryAgent(id: string): Promise<AcpAgentConfig>;
     onEvent(cb: (e: AgentEvent) => void): Unsubscribe;
   };
   lsp: {

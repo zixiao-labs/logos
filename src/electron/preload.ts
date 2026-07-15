@@ -221,6 +221,14 @@ const api: LogosAPI = {
       ipcRenderer.invoke(CH.agentSetProvider, sessionId, config),
     disableProvider: (sessionId, providerId) =>
       ipcRenderer.invoke(CH.agentDisableProvider, sessionId, providerId),
+    authStatus: () => ipcRenderer.invoke(CH.agentAuthStatus),
+    loginChatGPT: () => ipcRenderer.invoke(CH.agentLoginChatGPT),
+    setOpenAIKey: (apiKey) => ipcRenderer.invoke(CH.agentSetOpenAIKey, apiKey),
+    logoutOpenAI: () => ipcRenderer.invoke(CH.agentLogoutOpenAI),
+    listRegistry: (forceRefresh) =>
+      ipcRenderer.invoke(CH.agentRegistryList, forceRefresh),
+    resolveRegistryAgent: (id) =>
+      ipcRenderer.invoke(CH.agentRegistryResolve, id),
     onEvent: (cb) => on<AgentEvent>(CH.agentEvent, cb),
   },
   lsp: {

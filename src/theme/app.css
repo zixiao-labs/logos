@@ -1159,6 +1159,131 @@ textarea.field {
   color: var(--accent);
   font-family: var(--mono-font);
 }
+.agent-debug {
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface-secondary));
+  overflow: hidden;
+}
+.agent-debug-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.agent-debug-head > :last-child {
+  margin-left: auto;
+}
+.agent-debug-body {
+  max-height: 300px;
+  overflow: auto;
+  border-top: 1px solid var(--separator);
+}
+.agent-debug-entry {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--separator);
+}
+.agent-debug-entry > div {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  font: 10px var(--mono-font);
+}
+.agent-debug-entry strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+.agent-debug-entry pre {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font: 10px/1.45 var(--mono-font);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent-runtime-contract {
+  border: 1px solid color-mix(in srgb, var(--success) 32%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--success) 4%, var(--surface-secondary));
+  overflow: hidden;
+}
+.agent-runtime-contract-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+.agent-runtime-contract-head > :last-child {
+  margin-left: auto;
+}
+.agent-runtime-contract-body {
+  display: flex;
+  max-height: min(520px, 60vh);
+  overflow: auto;
+  flex-direction: column;
+  gap: 14px;
+  padding: 10px;
+  border-top: 1px solid var(--separator);
+}
+.agent-runtime-contract-body h4 {
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.agent-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-tool-row {
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+.agent-tool-row > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.agent-tool-row code {
+  color: var(--accent);
+  font: 10.5px var(--mono-font);
+}
+.agent-tool-row strong {
+  color: var(--foreground);
+  font-size: 10.5px;
+}
+.agent-tool-row p,
+.agent-tool-row small {
+  display: block;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.agent-tool-row small {
+  opacity: 0.75;
+}
+.agent-runtime-contract-body pre {
+  margin: 0;
+  padding: 9px;
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font: 10px/1.5 var(--mono-font);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .agent-result {
   font-size: 11px;
   color: var(--muted);
@@ -1630,6 +1755,20 @@ textarea.field {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.4;
+}
+.provider-login-actions,
+.provider-key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.provider-key-row .field {
+  flex: 1;
+  min-width: 160px;
+}
+.provider-login .provider-auth-error {
+  color: var(--danger);
 }
 .external-change {
   display: inline-flex;

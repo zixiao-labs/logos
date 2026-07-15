@@ -6,16 +6,26 @@ import {
   useState,
 } from "react";
 import { Button, Chip, Disclosure, Switch } from "@heroui/react";
-import { useStore, type AgentItem, type AgentThread } from "../state/store";
+import {
+  useStore,
+  type AgentItem,
+  type AgentThread,
+  type AgentTraceEntry,
+} from "../state/store";
 import { useT } from "../i18n";
 import { listWorkspaceFiles } from "../lib/workspaceFiles";
 import type {
   AgentEffortLevel,
   AgentModelInfo,
+  AgentPermissionMode,
   AgentPermissionOption,
   AgentPlanEntry,
   AgentQuestion,
 } from "../shared/types";
+import {
+  buildLogosAgentSystemPrompt,
+  LOGOS_AGENT_TOOLS,
+} from "../shared/logos-agent";
 import { Icon } from "./Icon";
 
 const ALL_EFFORT: AgentEffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
@@ -45,6 +55,21 @@ const STATIC_MODELS: AgentModelInfo[] = [
     description: "Fastest",
   },
 ];
+
+const LOGOS_MODELS: AgentModelInfo[] = [
+  { value: "gpt-5.5", displayName: "GPT-5.5", description: "Most capable" },
+  { value: "gpt-5.4", displayName: "GPT-5.4", description: "Balanced" },
+  { value: "gpt-5.4-mini", displayName: "GPT-5.4 mini", description: "Fast" },
+  {
+    value: "gpt-5.3-codex-spark",
+    displayName: "GPT-5.3 Codex Spark",
+    description: "Fast coding agent",
+  },
+].map((model) => ({
+  ...model,
+  supportsEffort: true,
+  supportedEffortLevels: ["low", "medium", "high", "xhigh"] as AgentEffortLevel[],
+}));
 
 export function AgentPanel({
   onClose,
@@ -250,6 +275,13 @@ function AgentConversation({ session }: { session: AgentThread }) {
             element.scrollHeight - element.scrollTop - element.clientHeight < 72;
         }}
       >
+        {session.runtimeId === "logos" && (
+          <LogosRuntimeContract
+            defaultExpanded={session.items.length === 0}
+            mode={(session.modeId as AgentPermissionMode | undefined) ?? "default"}
+            workspace={root ?? "."}
+          />
+        )}
         {session.items.length === 0 && !session.pendingAsk && (
           <div className="agent-empty">
             <h3>{t("agent.emptyTitle")}</h3>
@@ -257,6 +289,7 @@ function AgentConversation({ session }: { session: AgentThread }) {
           </div>
         )}
         {session.plan.length > 0 && <PlanCard entries={session.plan} />}
+        {session.trace.length > 0 && <AgentDebug trace={session.trace} />}
         {session.items
           .filter(
             (item) =>
@@ -365,6 +398,7 @@ function AgentControls({ session }: { session: AgentThread }) {
   const setAgentConfig = useStore((s) => s.setAgentConfig);
   const toggleAgentFollow = useStore((s) => s.toggleAgentFollow);
   const liveModels = useStore((s) => s.agentModels);
+  const registry = useStore((s) => s.agentRegistry);
 
   const models =
     session.runtimeId === "claude"
@@ -373,8 +407,16 @@ function AgentControls({ session }: { session: AgentThread }) {
         : liveModels.length
           ? liveModels
           : STATIC_MODELS
-      : session.models;
-  const model = session.currentModelId ?? settings["agent.model"];
+      : session.runtimeId === "logos"
+        ? session.models.length
+          ? session.models
+          : LOGOS_MODELS
+        : session.models;
+  const model =
+    session.currentModelId ??
+    (session.runtimeId === "logos"
+      ? settings["agent.logosModel"]
+      : settings["agent.model"]);
   const selected = models.find((m) => m.value === model);
   // Default (no model) => all effort levels; a specific model => its own.
   const effortLevels = model
@@ -392,23 +434,39 @@ function AgentControls({ session }: { session: AgentThread }) {
         disabled={Boolean(session.sdkSessionId) || session.items.length > 0}
         onChange={(event) => setAgentRuntime(session.id, event.target.value)}
       >
+        <option value="logos">Logos</option>
         <option value="claude">Claude</option>
-        {settings["agent.acpServers"].map((server) => (
-          <option key={server.id} value={server.id}>
-            {server.name} (ACP)
-          </option>
-        ))}
+        <optgroup label="Configured ACP">
+          {settings["agent.acpServers"].map((server) => (
+            <option key={server.id} value={server.id}>
+              {server.name}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="ACP Registry">
+          {registry.map((agent) => (
+            <option
+              key={agent.id}
+              value={`registry:${agent.id}`}
+              disabled={!agent.available}
+            >
+              {agent.name} {agent.version}
+            </option>
+          ))}
+        </optgroup>
       </select>
 
-      {(session.runtimeId === "claude" || models.length > 0) && (
+      {(session.runtimeId === "claude" || session.runtimeId === "logos" || models.length > 0) && (
         <select
           className="agent-mini"
           title={t("agent.model")}
           value={model}
           onChange={(event) =>
-            session.runtimeId === "claude" && !session.sdkSessionId
+            !session.sdkSessionId && session.runtimeId === "claude"
               ? void setSetting("agent.model", event.target.value)
-              : void setAgentModel(session.id, event.target.value)
+              : !session.sdkSessionId && session.runtimeId === "logos"
+                ? void setSetting("agent.logosModel", event.target.value)
+                : void setAgentModel(session.id, event.target.value)
           }
         >
           <option value="">{t("agent.modelDefault")}</option>
@@ -420,7 +478,7 @@ function AgentControls({ session }: { session: AgentThread }) {
         </select>
       )}
 
-      {(session.modes.length > 0 || session.runtimeId === "claude") && (
+      {(session.modes.length > 0 || session.runtimeId === "claude" || session.runtimeId === "logos") && (
         <select
           className={`agent-mini ${session.modeId === "plan" ? "plan" : ""}`}
           title={t("agent.mode")}
@@ -481,7 +539,8 @@ function AgentControls({ session }: { session: AgentThread }) {
         ),
       )}
 
-      {session.runtimeId === "claude" && effortLevels.length > 0 && (
+      {(session.runtimeId === "claude" || session.runtimeId === "logos") &&
+        effortLevels.length > 0 && (
         <select
           className="agent-mini"
           title={t("agent.effort")}
@@ -606,6 +665,99 @@ function AuthCard({ thread }: { thread: AgentThread }) {
       ))}
     </div>
   );
+}
+
+function AgentDebug({ trace }: { trace: AgentTraceEntry[] }) {
+  const recent = trace.slice(-50).reverse();
+  return (
+    <Disclosure className="agent-debug">
+      <Disclosure.Heading>
+        <Disclosure.Trigger className="agent-debug-head">
+          <Icon name="debug" size={13} />
+          <span>Agent Debug</span>
+          <Chip size="sm" variant="soft">{trace.length}</Chip>
+          <Disclosure.Indicator />
+        </Disclosure.Trigger>
+      </Disclosure.Heading>
+      <Disclosure.Content>
+        <Disclosure.Body className="agent-debug-body">
+          {recent.map((entry) => (
+            <div className="agent-debug-entry" key={entry.id}>
+              <div>
+                <time>{new Date(entry.time).toLocaleTimeString()}</time>
+                <strong>{entry.subtype}</strong>
+              </div>
+              <pre>{stringifyDebugData(entry.data)}</pre>
+            </div>
+          ))}
+        </Disclosure.Body>
+      </Disclosure.Content>
+    </Disclosure>
+  );
+}
+
+function LogosRuntimeContract({
+  defaultExpanded,
+  mode,
+  workspace,
+}: {
+  defaultExpanded: boolean;
+  mode: AgentPermissionMode;
+  workspace: string;
+}) {
+  const t = useT();
+  const prompt = buildLogosAgentSystemPrompt({ workspace, mode });
+  return (
+    <Disclosure className="agent-runtime-contract" defaultExpanded={defaultExpanded}>
+      <Disclosure.Heading>
+        <Disclosure.Trigger className="agent-runtime-contract-head">
+          <Icon name="agent" size={13} />
+          <span>{t("agent.runtimeContract")}</span>
+          <Chip size="sm" variant="soft">
+            {t("agent.toolCount").replace("{count}", String(LOGOS_AGENT_TOOLS.length))}
+          </Chip>
+          <Disclosure.Indicator />
+        </Disclosure.Trigger>
+      </Disclosure.Heading>
+      <Disclosure.Content>
+        <Disclosure.Body className="agent-runtime-contract-body">
+          <section>
+            <h4>{t("agent.toolList")}</h4>
+            <div className="agent-tool-list">
+              {LOGOS_AGENT_TOOLS.map((tool) => (
+                <div className="agent-tool-row" key={tool.name}>
+                  <div>
+                    <code>{tool.name}</code>
+                    <strong>{tool.title}</strong>
+                    {tool.mutating && (
+                      <Chip color="warning" size="sm" variant="soft">
+                        {t("agent.approval")}
+                      </Chip>
+                    )}
+                  </div>
+                  <p>{tool.description}</p>
+                  <small>{tool.constraints}</small>
+                </div>
+              ))}
+            </div>
+          </section>
+          <section>
+            <h4>{t("agent.systemPrompt")}</h4>
+            <pre>{prompt}</pre>
+          </section>
+        </Disclosure.Body>
+      </Disclosure.Content>
+    </Disclosure>
+  );
+}
+
+function stringifyDebugData(data: unknown): string {
+  if (typeof data === "string") return data;
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
 }
 
 function AgentItemView({

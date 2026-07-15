@@ -44,6 +44,25 @@ const importAcp = new Function(
   "return import('@agentclientprotocol/sdk')",
 ) as () => Promise<AcpSdk>;
 
+const ACP_SETUP_TIMEOUT_MS = 30_000;
+
+async function withSetupTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${operation} timed out after 30 seconds`)),
+          ACP_SETUP_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface AcpAgentHooks {
   emit(event: AgentEvent): void;
   requestPermission(
@@ -62,7 +81,10 @@ export interface AcpAgentHooks {
   closed(sessionId: string): void;
 }
 
-function augmentedEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+function augmentedEnv(
+  extra: Record<string, string> = {},
+  sanitizeInherited = false,
+): NodeJS.ProcessEnv {
   const separator = process.platform === "win32" ? ";" : ":";
   const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string })
     .resourcesPath;
@@ -78,8 +100,25 @@ function augmentedEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
           "/bin",
         ];
   if (resourcesPath) candidates.unshift(path.join(resourcesPath, "bin"));
+  const inherited = sanitizeInherited
+    ? Object.fromEntries(
+        [
+          "HOME",
+          "USERPROFILE",
+          "TMPDIR",
+          "TEMP",
+          "TMP",
+          "LANG",
+          "LC_ALL",
+          "SHELL",
+          "COMSPEC",
+          "SYSTEMROOT",
+          "WINDIR",
+        ].flatMap((key) => (process.env[key] ? [[key, process.env[key]!]] : [])),
+      )
+    : process.env;
   return {
-    ...process.env,
+    ...inherited,
     ...extra,
     PATH: [...candidates, extra.PATH ?? process.env.PATH ?? ""]
       .filter(Boolean)
@@ -127,7 +166,7 @@ export class AcpAgentRuntime {
     this.capabilities = initialized.agentCapabilities ?? {};
     this.authMethods = normalizeAuthMethods(
       initialized.authMethods ?? [],
-      request.runtime?.type === "acp" ? request.runtime.server.command : "",
+      request.runtime?.type === "acp" ? request.runtime.server : null,
     );
   }
 
@@ -140,9 +179,20 @@ export class AcpAgentRuntime {
     }
     const sdk = await importAcp();
     const server = request.runtime.server;
+    hooks.emit({
+      kind: "system",
+      sessionId: request.sessionId,
+      subtype: "acp-launch",
+      data: {
+        command: server.command,
+        args: server.args,
+        cwd: request.cwd,
+        envKeys: Object.keys(server.env),
+      },
+    });
     const child = spawn(server.command, server.args, {
       cwd: request.cwd,
-      env: augmentedEnv(server.env),
+      env: augmentedEnv(server.env, server.id.startsWith("registry:")),
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -160,17 +210,26 @@ export class AcpAgentRuntime {
         Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
       );
       const connection = new sdk.ClientSideConnection(() => client, stream);
-      const initialized = await connection.initialize({
-        protocolVersion: sdk.PROTOCOL_VERSION,
-        clientInfo: { name: "Logos", title: "Logos IDE", version: "1.3.0" },
-        clientCapabilities: {
-          _meta: { "terminal-auth": true },
-          fs: { readTextFile: true, writeTextFile: true },
-          terminal: true,
-          auth: { terminal: true },
-          elicitation: { form: {}, url: {} },
-          positionEncodings: ["utf-16"],
-        },
+      const initialized = await withSetupTimeout(
+        connection.initialize({
+          protocolVersion: sdk.PROTOCOL_VERSION,
+          clientInfo: { name: "Logos", title: "Logos IDE", version: "1.3.0" },
+          clientCapabilities: {
+            _meta: { "terminal-auth": true },
+            fs: { readTextFile: true, writeTextFile: true },
+            terminal: true,
+            auth: { terminal: true },
+            elicitation: { form: {}, url: {} },
+            positionEncodings: ["utf-16"],
+          },
+        }),
+        "ACP initialization",
+      );
+      hooks.emit({
+        kind: "system",
+        sessionId: request.sessionId,
+        subtype: "acp-initialize",
+        data: initialized,
       });
       const runtime = new AcpAgentRuntime(
         request,
@@ -233,11 +292,23 @@ export class AcpAgentRuntime {
     }
     const started = Date.now();
     this.currentMessageId = crypto.randomUUID();
+    this.hooks.emit({
+      kind: "system",
+      sessionId: this.request.sessionId,
+      subtype: "acp-prompt",
+      data: { acpSessionId: this.acpSessionId, text },
+    });
     try {
       const result = await this.connection.prompt({
         sessionId: this.acpSessionId,
         messageId: crypto.randomUUID(),
         prompt: [{ type: "text", text }],
+      });
+      this.hooks.emit({
+        kind: "system",
+        sessionId: this.request.sessionId,
+        subtype: "acp-prompt-result",
+        data: result,
       });
       this.hooks.emit({
         kind: "result",
@@ -367,22 +438,37 @@ export class AcpAgentRuntime {
     let setup: SessionSetup;
     const common = { cwd: this.request.cwd, mcpServers: [] };
     if (this.request.resume && this.capabilities.sessionCapabilities?.resume) {
-      const resumed: ResumeSessionResponse = await this.connection.resumeSession({
-        ...common,
-        sessionId: this.request.resume,
-      });
+      const resumed: ResumeSessionResponse = await withSetupTimeout(
+        this.connection.resumeSession({
+          ...common,
+          sessionId: this.request.resume,
+        }),
+        "ACP session resume",
+      );
       setup = { ...resumed, sessionId: this.request.resume };
     } else if (this.request.resume && this.capabilities.loadSession) {
-      const loaded = await this.connection.loadSession({
-        ...common,
-        sessionId: this.request.resume,
-      });
+      const loaded = await withSetupTimeout(
+        this.connection.loadSession({
+          ...common,
+          sessionId: this.request.resume,
+        }),
+        "ACP session load",
+      );
       setup = { ...loaded, sessionId: this.request.resume };
     } else {
-      setup = await this.connection.newSession(common);
+      setup = await withSetupTimeout(
+        this.connection.newSession(common),
+        "ACP session creation",
+      );
     }
     this.setup = setup;
     this.acpSessionId = setup.sessionId;
+    this.hooks.emit({
+      kind: "system",
+      sessionId: this.request.sessionId,
+      subtype: "acp-session-ready",
+      data: setup,
+    });
     this.emitReady();
   }
 
@@ -413,6 +499,12 @@ export class AcpAgentRuntime {
   async handleUpdate(notification: SessionNotification): Promise<void> {
     const update = notification.update;
     const localSessionId = this.request.sessionId;
+    this.hooks.emit({
+      kind: "system",
+      sessionId: localSessionId,
+      subtype: "acp-session-update",
+      data: update,
+    });
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
         if (update.content.type === "text") {
@@ -545,7 +637,11 @@ export class AcpAgentRuntime {
     );
     const child = spawn(input.command, input.args ?? [], {
       cwd,
-      env: augmentedEnv(env),
+      env: augmentedEnv(
+        env,
+        this.request.runtime?.type === "acp" &&
+          this.request.runtime.server.id.startsWith("registry:"),
+      ),
       stdio: ["pipe", "pipe", "pipe"],
     });
     const terminalId = crypto.randomUUID();
@@ -775,7 +871,7 @@ async function handleElicitation(
 
 function normalizeAuthMethods(
   methods: AuthMethod[],
-  serverCommand: string,
+  server: import("../../shared/types").AcpAgentConfig | null,
 ): AgentAuthMethod[] {
   return methods.map((method) => {
     const type = "type" in method ? method.type : "agent";
@@ -789,15 +885,21 @@ function normalizeAuthMethods(
         type === "terminal"
           ? (method as Extract<AuthMethod, { type: "terminal" }>)
           : undefined;
+      const registryManaged = server?.id.startsWith("registry:") === true;
+      const authArgs = metaTerminal?.args ?? terminalMethod?.args ?? [];
       return {
         id: method.id,
         name: metaTerminal?.label ?? method.name,
         description: method.description ?? undefined,
         type: "terminal",
         terminal: {
-          command: metaTerminal?.command ?? serverCommand,
-          args:
-            metaTerminal?.args ?? terminalMethod?.args ?? [],
+          command:
+            registryManaged
+              ? server!.command
+              : metaTerminal?.command ?? server?.command ?? "",
+          args: registryManaged
+            ? [...(server!.authArgsPrefix ?? []), ...authArgs]
+            : authArgs,
           env:
             metaTerminal?.env ?? terminalMethod?.env,
         },

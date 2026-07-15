@@ -5,6 +5,7 @@ import { CH } from "../shared/channels";
 import type { WindowControl } from "../shared/types";
 import type { ServiceContext } from "./services/context";
 import { registerAgentService } from "./services/agent";
+import { registerAcpRegistryService } from "./services/acp-registry";
 import { registerDebugService } from "./services/debug";
 import { registerFsService } from "./services/fs";
 import { registerGitService } from "./services/git";
@@ -117,6 +118,7 @@ app.whenReady().then(() => {
     registerTerminalService(ctx),
     registerSettingsService(ctx),
     registerWorkspaceService(ctx, dialog),
+    registerAcpRegistryService(ctx),
     registerAgentService(ctx),
     registerLspService(ctx),
     registerDebugService(ctx),

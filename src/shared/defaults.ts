@@ -26,7 +26,9 @@ export const DEFAULT_SETTINGS: Settings = {
   "agent.allowedTools": [],
   "agent.disallowedTools": [],
   "agent.loadProjectSettings": true,
-  "agent.defaultRuntime": "claude",
+  "agent.defaultRuntime": "logos",
+  "agent.logosModel": "gpt-5.4",
+  "agent.openaiBaseUrl": "https://api.openai.com/v1",
   "agent.acpServers": [
     {
       id: "opencode",

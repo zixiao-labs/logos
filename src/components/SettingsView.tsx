@@ -176,12 +176,19 @@ export function SettingsView() {
   const setSetting = useStore((s) => s.setSetting);
   const setManySettings = useStore((s) => s.setManySettings);
   const resetSettings = useStore((s) => s.resetSettings);
-  const newTerminal = useStore((s) => s.newTerminal);
-  const root = useStore((s) => s.root);
+  const registry = useStore((s) => s.agentRegistry);
+  const credentialStatus = useStore((s) => s.agentCredentialStatus);
+  const loginChatGPT = useStore((s) => s.loginChatGPT);
+  const setOpenAIKey = useStore((s) => s.setOpenAIKey);
+  const logoutOpenAI = useStore((s) => s.logoutOpenAI);
+  const loadAgentRegistry = useStore((s) => s.loadAgentRegistry);
   const [mode, setMode] = useState<"gui" | "json">("gui");
   const [json, setJson] = useState("");
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [path, setPath] = useState("");
+  const [openAIKey, setOpenAIKeyValue] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     window.logos.settings.getPath().then(setPath);
@@ -201,6 +208,18 @@ export function SettingsView() {
       void setManySettings(parsed);
     } catch (e) {
       setJsonError(e instanceof Error ? e.message : "Invalid JSON");
+    }
+  }
+
+  async function runAuth(action: () => Promise<void>) {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await action();
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
     }
   }
 
@@ -336,10 +355,16 @@ export function SettingsView() {
               value={settings["agent.defaultRuntime"]}
               onChange={(event) => set("agent.defaultRuntime", event.target.value)}
             >
+              <option value="logos">Logos</option>
               <option value="claude">Claude</option>
               {settings["agent.acpServers"].map((server) => (
                 <option key={server.id} value={server.id}>
                   {server.name} (ACP)
+                </option>
+              ))}
+              {registry.filter((agent) => agent.available).map((agent) => (
+                <option key={agent.id} value={`registry:${agent.id}`}>
+                  {agent.name} {agent.version} (Registry)
                 </option>
               ))}
             </select>
@@ -353,6 +378,8 @@ export function SettingsView() {
                   "agent.acpServers": servers,
                   ...(
                     currentRuntime !== "claude" &&
+                    currentRuntime !== "logos" &&
+                    !currentRuntime.startsWith("registry:") &&
                     !servers.some((server) => server.id === currentRuntime)
                       ? { "agent.defaultRuntime": "claude" }
                       : {}
@@ -361,23 +388,89 @@ export function SettingsView() {
               }}
             />
           </Row>
-          <Row name={t("settings.modelProviders")} settingKey="opencode auth login">
+          <Row name={t("settings.acpRegistry")} settingKey="agentclientprotocol.com/registry">
             <div className="provider-login">
               <Button
                 size="sm"
                 variant="secondary"
-                onPress={() =>
-                  void newTerminal({
-                    cwd: root ?? undefined,
-                    executable: "opencode",
-                    args: ["auth", "login"],
-                  })
-                }
+                onPress={() => void loadAgentRegistry(true)}
               >
-                {t("settings.configureProviders")}
+                {t("settings.refreshRegistry")}
               </Button>
-              <span>{t("settings.chatgptSubscriptionHint")}</span>
+              <span>{t("settings.registryCount").replace("{count}", String(registry.length))}</span>
             </div>
+          </Row>
+          <Row name={t("settings.modelProviders")} settingKey="safeStorage:openai">
+            <div className="provider-login">
+              <div className="provider-login-actions">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  isDisabled={authBusy}
+                  onPress={() => void runAuth(loginChatGPT)}
+                >
+                  {t("settings.connectChatGPT")}
+                </Button>
+                {credentialStatus.type !== "none" && (
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    isDisabled={authBusy}
+                    onPress={() => void runAuth(logoutOpenAI)}
+                  >
+                    {t("settings.disconnect")}
+                  </Button>
+                )}
+              </div>
+              <span>
+                {credentialStatus.type === "none"
+                  ? t("settings.chatgptSubscriptionHint")
+                  : `${t("settings.connectedAs")} ${credentialStatus.label ?? credentialStatus.type}`}
+              </span>
+              <div className="provider-key-row">
+                <input
+                  className="field"
+                  type="password"
+                  value={openAIKey}
+                  placeholder="sk-..."
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event) => setOpenAIKeyValue(event.target.value)}
+                />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  isDisabled={authBusy || !openAIKey.trim()}
+                  onPress={() =>
+                    void runAuth(async () => {
+                      await setOpenAIKey(openAIKey);
+                      setOpenAIKeyValue("");
+                    })
+                  }
+                >
+                  {t("settings.useApiKey")}
+                </Button>
+              </div>
+              {authError && <span className="provider-auth-error">{authError}</span>}
+            </div>
+          </Row>
+          <Row name={t("settings.logosModel")} settingKey="agent.logosModel">
+            <input
+              className="field"
+              value={settings["agent.logosModel"]}
+              placeholder="gpt-5.4"
+              spellCheck={false}
+              onChange={(event) => set("agent.logosModel", event.target.value)}
+            />
+          </Row>
+          <Row name={t("settings.openaiBaseUrl")} settingKey="agent.openaiBaseUrl">
+            <input
+              className="field"
+              value={settings["agent.openaiBaseUrl"]}
+              placeholder="https://api.openai.com/v1"
+              spellCheck={false}
+              onChange={(event) => set("agent.openaiBaseUrl", event.target.value)}
+            />
           </Row>
           <Row name={t("settings.agentPermission")} settingKey="agent.permissionMode">
             <select

@@ -28,6 +28,8 @@ import type {
   SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
 import { AcpAgentRuntime } from "./acp-agent";
+import { LogosAgentRuntime } from "./logos-agent";
+import { OpenAIAuthStore } from "./openai-auth";
 
 /**
  * `@anthropic-ai/claude-agent-sdk` is ESM-only. The Electron main bundle is
@@ -164,12 +166,17 @@ interface AcpSession {
   runtime: AcpAgentRuntime;
 }
 
-type Session = ClaudeSession | AcpSession;
+interface LogosSession {
+  kind: "logos";
+  runtime: LogosAgentRuntime;
+}
+
+type Session = ClaudeSession | AcpSession | LogosSession;
 
 /** A `canUseTool` call awaiting the user's response from the renderer. */
 interface PendingRequest {
   sessionId: string;
-  source: "claude" | "acp-permission" | "acp-ask";
+  source: "claude" | "logos-permission" | "acp-permission" | "acp-ask";
   resolve: (r: never) => void;
   /** Present when the request originated from the AskUserQuestion tool. */
   questions?: AgentQuestion[];
@@ -196,6 +203,7 @@ export function registerAgentService(ctx: ServiceContext): () => void {
   const { ipcMain } = ctx;
   const sessions = new Map<string, Session>();
   const pendingPerms = new Map<string, PendingRequest>();
+  const openAIAuth = new OpenAIAuthStore(ctx.userDataDir);
   let permCounter = 0;
 
   const emit = (e: AgentEvent) => ctx.send(CH.agentEvent, e);
@@ -208,6 +216,8 @@ export function registerAgentService(ctx: ServiceContext): () => void {
         pending.resolve({ cancelled: true } as never);
       } else if (pending.source === "acp-ask") {
         pending.resolve({ action: "cancel", answers: {} } as never);
+      } else if (pending.source === "logos-permission") {
+        pending.resolve(false as never);
       } else {
         pending.resolve({
           behavior: "deny",
@@ -594,13 +604,58 @@ export function registerAgentService(ctx: ServiceContext): () => void {
     },
   };
 
+  const logosHooks = {
+    emit,
+    requestPermission(sessionId: string, toolName: string, input: unknown) {
+      const requestId = `req-${++permCounter}`;
+      return new Promise<boolean>((resolve) => {
+        pendingPerms.set(requestId, {
+          sessionId,
+          source: "logos-permission",
+          resolve: resolve as (r: never) => void,
+        });
+        emit({
+          kind: "permission",
+          sessionId,
+          requestId,
+          toolName,
+          input,
+        });
+      });
+    },
+    closed(sessionId: string) {
+      cancelPending(sessionId);
+      sessions.delete(sessionId);
+    },
+  };
+
   ipcMain.handle(CH.agentStart, async (_e, req: AgentStartRequest) => {
     try {
       let session = sessions.get(req.sessionId);
+      if (
+        session?.kind === "logos" &&
+        !(await session.runtime.matchesWorkspace(req.cwd))
+      ) {
+        emit({
+          kind: "error",
+          sessionId: req.sessionId,
+          message: "This agent thread belongs to a different workspace. Create a new thread to continue.",
+        });
+        return;
+      }
       if (!session) {
         if (req.runtime?.type === "acp") {
           const runtime = await AcpAgentRuntime.create(req, acpHooks);
           session = { kind: "acp", runtime };
+          sessions.set(req.sessionId, session);
+        } else if (req.runtime?.type === "logos") {
+          const runtime = await LogosAgentRuntime.create(
+            req,
+            logosHooks,
+            openAIAuth,
+            `${ctx.userDataDir}/agent-sessions`,
+          );
+          session = { kind: "logos", runtime };
           sessions.set(req.sessionId, session);
         } else {
           session = await startClaudeSession(req);
@@ -637,6 +692,8 @@ export function registerAgentService(ctx: ServiceContext): () => void {
     if (session.kind === "claude") {
       session.input.close();
       await session.query.interrupt().catch(() => undefined);
+    } else if (session.kind === "logos") {
+      await session.runtime.dispose(true);
     } else {
       await session.runtime.dispose();
     }
@@ -659,6 +716,8 @@ export function registerAgentService(ctx: ServiceContext): () => void {
             ? { cancelled: true }
             : { optionId: res.optionId ?? fallback?.id }) as never,
         );
+      } else if (pending.source === "logos-permission") {
+        pending.resolve((res.behavior === "allow" && !res.cancelled) as never);
       } else if (res.behavior === "allow") {
         pending.resolve({ behavior: "allow" } as never);
       } else {
@@ -717,8 +776,16 @@ export function registerAgentService(ctx: ServiceContext): () => void {
 
   ipcMain.handle(CH.agentAuthenticate, async (_e, input: AgentAuthRequest) => {
     const session = sessions.get(input.sessionId);
-    if (session?.kind !== "acp") return {};
-    return session.runtime.authenticate(input);
+    if (session?.kind === "acp") return session.runtime.authenticate(input);
+    if (session?.kind === "logos") {
+      if (input.methodId !== "chatgpt") {
+        throw new Error("Add the OpenAI API key in Settings, then retry.");
+      }
+      await openAIAuth.loginChatGPT();
+      await notifyLogosCredentialsChanged();
+      return {};
+    }
+    return {};
   });
 
   ipcMain.handle(CH.agentListProviders, async (_e, sessionId: string) => {
@@ -741,6 +808,28 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       if (session?.kind === "acp") await session.runtime.disableProvider(providerId);
     },
   );
+
+  const notifyLogosCredentialsChanged = async () => {
+    for (const session of sessions.values()) {
+      if (session.kind === "logos") await session.runtime.credentialsChanged();
+    }
+  };
+
+  ipcMain.handle(CH.agentAuthStatus, () => openAIAuth.status());
+  ipcMain.handle(CH.agentLoginChatGPT, async () => {
+    const status = await openAIAuth.loginChatGPT();
+    await notifyLogosCredentialsChanged();
+    return status;
+  });
+  ipcMain.handle(CH.agentSetOpenAIKey, async (_e, apiKey: string) => {
+    const status = await openAIAuth.setApiKey(apiKey);
+    await notifyLogosCredentialsChanged();
+    return status;
+  });
+  ipcMain.handle(CH.agentLogoutOpenAI, async () => {
+    await openAIAuth.logout();
+    await notifyLogosCredentialsChanged();
+  });
 
   // D1/D4: probe the SDK for the model + slash-command lists. Control requests
   // require streaming mode, so we spin a short-lived streaming query, read the

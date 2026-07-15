@@ -80,6 +80,12 @@ export const CH = {
   agentListProviders: "agent:listProviders",
   agentSetProvider: "agent:setProvider",
   agentDisableProvider: "agent:disableProvider",
+  agentAuthStatus: "agent:authStatus",
+  agentLoginChatGPT: "agent:loginChatGPT",
+  agentSetOpenAIKey: "agent:setOpenAIKey",
+  agentLogoutOpenAI: "agent:logoutOpenAI",
+  agentRegistryList: "agent:registryList",
+  agentRegistryResolve: "agent:registryResolve",
   agentEvent: "agent:event", // push
 
   // language servers

@@ -146,6 +146,10 @@ export interface Settings {
   "agent.loadProjectSettings": boolean;
   /** Runtime used for newly-created threads. `claude` is the built-in runtime. */
   "agent.defaultRuntime": string;
+  /** Model used by the Logos-owned OpenAI Responses runtime. */
+  "agent.logosModel": string;
+  /** Optional OpenAI-compatible API base URL. Credentials remain in safeStorage. */
+  "agent.openaiBaseUrl": string;
   /** Third-party agents launched over Agent Client Protocol stdio. */
   "agent.acpServers": AcpAgentConfig[];
   "lsp.autoDownload": boolean;
@@ -237,11 +241,36 @@ export interface AcpAgentConfig {
   command: string;
   args: string[];
   env: Record<string, string>;
+  /** Registry package-runner argv that must also prefix terminal auth commands. */
+  authArgsPrefix?: string[];
 }
 
 export type AgentRuntimeConfig =
+  | { type: "logos" }
   | { type: "claude" }
   | { type: "acp"; server: AcpAgentConfig };
+
+export interface AgentCredentialStatus {
+  type: "none" | "api-key" | "chatgpt";
+  label?: string;
+  expiresAt?: number;
+}
+
+export type AcpRegistryDistributionKind = "binary" | "npx" | "uvx";
+
+/** A launchable entry projected from the canonical ACP Registry. */
+export interface AcpRegistryAgent {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  repository?: string;
+  website?: string;
+  icon?: string;
+  distributionKinds: AcpRegistryDistributionKind[];
+  available: boolean;
+  unavailableReason?: string;
+}
 
 export interface AgentPlanEntry {
   content: string;

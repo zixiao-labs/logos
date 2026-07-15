@@ -3,6 +3,8 @@ import { DEFAULT_SETTINGS } from "../shared/defaults";
 import type {
   AgentAuthContext,
   AgentAuthMethod,
+  AgentAuthResult,
+  AgentCredentialStatus,
   AgentConfigOption,
   AgentEvent,
   AgentModelInfo,
@@ -12,6 +14,7 @@ import type {
   AgentToolDiff,
   AgentToolLocation,
   AgentThinkingConfig,
+  AcpRegistryAgent,
   GitStatus,
   GitLogEntry,
   LanguageCode,
@@ -156,6 +159,7 @@ export interface AgentThread {
   status: "idle" | "running" | "waiting";
   runtimeId: string;
   runtimeName?: string;
+  workspaceRoot?: string;
   parentId?: string;
   createdAt: number;
   updatedAt: number;
@@ -169,6 +173,7 @@ export interface AgentThread {
   authMethods: AgentAuthMethod[];
   commands: AgentSlashCommand[];
   canConfigureProviders: boolean;
+  trace: AgentTraceEntry[];
   /** SDK session id captured from the result event; used to resume (F2). */
   sdkSessionId?: string;
   pendingAsk?: { requestId: string; questions: AgentQuestion[] };
@@ -182,6 +187,13 @@ export interface AgentThread {
       kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
     }>;
   };
+}
+
+export interface AgentTraceEntry {
+  id: string;
+  time: number;
+  subtype: string;
+  data: unknown;
 }
 
 /** Kept as a source-compatible alias while the UI migrates to Thread naming. */
@@ -261,6 +273,8 @@ interface LogosState {
   agentModels: AgentModelInfo[];
   /** Cached slash-commands from the SDK (D4). */
   agentCommands: AgentSlashCommand[];
+  agentRegistry: AcpRegistryAgent[];
+  agentCredentialStatus: AgentCredentialStatus;
 
   paletteOpen: boolean;
 
@@ -313,6 +327,11 @@ interface LogosState {
   clearLspWorkDone(serverId: string, token: string | number): void;
   loadAgentModels(): Promise<void>;
   loadAgentCommands(): Promise<void>;
+  loadAgentRegistry(forceRefresh?: boolean): Promise<void>;
+  refreshAgentAuth(): Promise<void>;
+  loginChatGPT(): Promise<void>;
+  setOpenAIKey(apiKey: string): Promise<void>;
+  logoutOpenAI(): Promise<void>;
 
   loadDebugConfigurations(): Promise<void>;
   createDebugConfiguration(): Promise<void>;
@@ -380,6 +399,13 @@ function stringifyAgentValue(value: unknown): string {
   }
 }
 
+function agentTraceData(value: unknown): string {
+  const serialized = stringifyAgentValue(value);
+  return serialized.length > 32_768
+    ? `${serialized.slice(0, 32_768)}\n...[trace truncated]`
+    : serialized;
+}
+
 /** Build the credential/cwd context used to probe SDK models/commands. */
 function agentAuthCtx(state: {
   root: string | null;
@@ -423,6 +449,7 @@ function loadPersistedAgent(): {
         sdkSessionId: a.sdkSessionId,
         runtimeId: a.runtimeId ?? "claude",
         runtimeName: a.runtimeName,
+        workspaceRoot: a.workspaceRoot,
         parentId: a.parentId,
         createdAt: a.createdAt ?? Date.now(),
         updatedAt: a.updatedAt ?? Date.now(),
@@ -436,6 +463,7 @@ function loadPersistedAgent(): {
         authMethods: a.authMethods ?? [],
         commands: a.commands ?? [],
         canConfigureProviders: a.canConfigureProviders ?? false,
+        trace: [],
         status: "idle",
       }),
     );
@@ -464,6 +492,7 @@ function persistAgent(
             sdkSessionId: a.sdkSessionId,
             runtimeId: a.runtimeId,
             runtimeName: a.runtimeName,
+            workspaceRoot: a.workspaceRoot,
             parentId: a.parentId,
             createdAt: a.createdAt,
             updatedAt: a.updatedAt,
@@ -704,6 +733,8 @@ export const useStore = create<LogosState>((set, get) => ({
   activeAgentId: persistedAgent.activeAgentId,
   agentModels: [],
   agentCommands: [],
+  agentRegistry: [],
+  agentCredentialStatus: { type: "none" },
 
   paletteOpen: false,
 
@@ -753,6 +784,8 @@ export const useStore = create<LogosState>((set, get) => ({
 
     // Always have at least one agent session ready (the Cursor layout shows it).
     if (get().agentSessions.length === 0) get().newAgentSession("Agent 1");
+    void get().loadAgentRegistry();
+    void get().refreshAgentAuth();
     if (root) void get().refreshGit();
     void get().loadDebugConfigurations();
   },
@@ -1039,6 +1072,28 @@ export const useStore = create<LogosState>((set, get) => ({
       .listCommands(agentAuthCtx(get()))
       .catch(() => []);
     set({ agentCommands: commands });
+  },
+  async loadAgentRegistry(forceRefresh) {
+    const agents = await window.logos.agent
+      .listRegistry(forceRefresh)
+      .catch(() => []);
+    if (agents.length) set({ agentRegistry: agents });
+  },
+  async refreshAgentAuth() {
+    const status = await window.logos.agent.authStatus();
+    set({ agentCredentialStatus: status });
+  },
+  async loginChatGPT() {
+    const status = await window.logos.agent.loginChatGPT();
+    set({ agentCredentialStatus: status });
+  },
+  async setOpenAIKey(apiKey) {
+    const status = await window.logos.agent.setOpenAIKey(apiKey);
+    set({ agentCredentialStatus: status });
+  },
+  async logoutOpenAI() {
+    await window.logos.agent.logoutOpenAI();
+    set({ agentCredentialStatus: { type: "none" } });
   },
 
   async loadDebugConfigurations() {
@@ -2062,13 +2117,14 @@ export const useStore = create<LogosState>((set, get) => ({
       items: [],
       status: "idle",
       runtimeId: selectedRuntime,
+      workspaceRoot: undefined,
       parentId,
       createdAt: now,
       updatedAt: now,
       followMode: true,
       plan: [],
       modeId:
-        selectedRuntime === "claude"
+        selectedRuntime === "claude" || selectedRuntime === "logos"
           ? get().settings["agent.permissionMode"]
           : undefined,
       modes: [],
@@ -2077,6 +2133,7 @@ export const useStore = create<LogosState>((set, get) => ({
       authMethods: [],
       commands: [],
       canConfigureProviders: false,
+      trace: [],
     };
     set((s) => ({
       agentSessions: [...s.agentSessions, session],
@@ -2118,9 +2175,10 @@ export const useStore = create<LogosState>((set, get) => ({
               ...thread,
               runtimeId,
               runtimeName: undefined,
+              workspaceRoot: undefined,
               sdkSessionId: undefined,
               modeId:
-                runtimeId === "claude"
+                runtimeId === "claude" || runtimeId === "logos"
                   ? state.settings["agent.permissionMode"]
                   : undefined,
               modes: [],
@@ -2130,6 +2188,7 @@ export const useStore = create<LogosState>((set, get) => ({
               authMethods: [],
               commands: [],
               canConfigureProviders: false,
+              trace: [],
               updatedAt: Date.now(),
             }
           : thread,
@@ -2189,10 +2248,35 @@ export const useStore = create<LogosState>((set, get) => ({
             : thread,
         ),
       }));
-    const result = await window.logos.agent.authenticate({
-      sessionId: id,
-      methodId,
-    });
+    let result: AgentAuthResult;
+    try {
+      result = await window.logos.agent.authenticate({
+        sessionId: id,
+        methodId,
+      });
+      await get().refreshAgentAuth();
+    } catch (error) {
+      set((state) => ({
+        agentSessions: state.agentSessions.map((thread) =>
+          thread.id === id
+            ? {
+                ...thread,
+                status: "waiting",
+                items: [
+                  ...thread.items,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "error" as const,
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+      return;
+    }
     if (!result.terminal) {
       markRunning();
       return;
@@ -2226,12 +2310,34 @@ export const useStore = create<LogosState>((set, get) => ({
     const s = state.settings;
     // sdkSessionId survives restarts (F2): resume the CLI session if present.
     const session = state.agentSessions.find((a) => a.id === id);
+    if (session?.workspaceRoot && session.workspaceRoot !== root) {
+      set((current) => ({
+        agentSessions: current.agentSessions.map((thread) =>
+          thread.id === id
+            ? {
+                ...thread,
+                items: [
+                  ...thread.items,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "error" as const,
+                    message: "This thread belongs to a different workspace. Create a new thread to continue.",
+                  },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+      return;
+    }
     set((st) => ({
       agentSessions: st.agentSessions.map((a) =>
         a.id === id
           ? {
               ...a,
-               status: "running",
+              status: "running",
+              workspaceRoot: a.workspaceRoot ?? root,
               pendingAsk: undefined,
               pendingPermission: undefined,
               items: [
@@ -2245,10 +2351,24 @@ export const useStore = create<LogosState>((set, get) => ({
     }));
     const allowed = s["agent.allowedTools"];
     const disallowed = s["agent.disallowedTools"];
-    const acpServer = s["agent.acpServers"].find(
+    let acpServer = s["agent.acpServers"].find(
       (server) => server.id === session?.runtimeId,
     );
-    if (session?.runtimeId && session.runtimeId !== "claude" && !acpServer) {
+    let runtimeResolutionError: string | undefined;
+    if (session?.runtimeId.startsWith("registry:")) {
+      acpServer = await window.logos.agent
+        .resolveRegistryAgent(session.runtimeId.slice("registry:".length))
+        .catch((error) => {
+          runtimeResolutionError = error instanceof Error ? error.message : String(error);
+          return undefined;
+        });
+    }
+    if (
+      session?.runtimeId &&
+      session.runtimeId !== "claude" &&
+      session.runtimeId !== "logos" &&
+      !acpServer
+    ) {
       set((current) => ({
         agentSessions: current.agentSessions.map((thread) =>
           thread.id === id
@@ -2260,7 +2380,9 @@ export const useStore = create<LogosState>((set, get) => ({
                   {
                     id: crypto.randomUUID(),
                     kind: "error",
-                    message: `ACP runtime "${thread.runtimeId}" is not configured`,
+                    message:
+                      runtimeResolutionError ??
+                      `ACP runtime "${thread.runtimeId}" is not configured`,
                   },
                 ],
                 updatedAt: Date.now(),
@@ -2271,17 +2393,22 @@ export const useStore = create<LogosState>((set, get) => ({
       return;
     }
     const runtime =
-      session?.runtimeId && session.runtimeId !== "claude" && acpServer
-        ? ({ type: "acp", server: acpServer } as const)
-        : ({ type: "claude" } as const);
+      session?.runtimeId === "logos"
+        ? ({ type: "logos" } as const)
+        : session?.runtimeId && session.runtimeId !== "claude" && acpServer
+          ? ({ type: "acp", server: acpServer } as const)
+          : ({ type: "claude" } as const);
     await window.logos.agent.start({
       sessionId: id!,
       prompt: text,
       cwd: root,
       // `|| undefined` everywhere => "empty means no override", mirroring model.
-      model: session?.currentModelId || s["agent.model"] || undefined,
+      model:
+        session?.currentModelId ||
+        (runtime.type === "logos" ? s["agent.logosModel"] : s["agent.model"]) ||
+        undefined,
       permissionMode:
-        runtime.type === "claude"
+        runtime.type === "claude" || runtime.type === "logos"
           ? ((session?.modeId as Settings["agent.permissionMode"]) ??
             s["agent.permissionMode"])
           : undefined,
@@ -2293,9 +2420,13 @@ export const useStore = create<LogosState>((set, get) => ({
       settingSources: s["agent.loadProjectSettings"]
         ? ["user", "project"]
         : undefined,
-      apiKey: s["agent.apiKey"] || undefined,
-      authToken: s["agent.authToken"] || undefined,
-      baseUrl: s["agent.baseUrl"] || undefined,
+      apiKey: runtime.type === "claude" ? s["agent.apiKey"] || undefined : undefined,
+      authToken:
+        runtime.type === "claude" ? s["agent.authToken"] || undefined : undefined,
+      baseUrl:
+        runtime.type === "logos"
+          ? s["agent.openaiBaseUrl"]
+          : s["agent.baseUrl"] || undefined,
       runtime,
     });
   },
@@ -2372,6 +2503,20 @@ export const useStore = create<LogosState>((set, get) => ({
           return -1;
         };
         switch (e.kind) {
+          case "system":
+            return {
+              ...a,
+              trace: [
+                ...a.trace,
+                {
+                  id: crypto.randomUUID(),
+                  time: Date.now(),
+                  subtype: e.subtype,
+                  data: agentTraceData(e.data),
+                },
+              ].slice(-250),
+              updatedAt: Date.now(),
+            };
           case "text-delta": {
             let idx = findAssistant(e.messageId);
             if (idx === -1) {
@@ -2522,6 +2667,7 @@ export const useStore = create<LogosState>((set, get) => ({
               authMethods: e.authMethods.length ? e.authMethods : a.authMethods,
               commands: e.commands.length ? e.commands : a.commands,
               canConfigureProviders: e.canConfigureProviders,
+              status: a.status === "waiting" ? "running" : a.status,
               updatedAt: Date.now(),
             };
           case "mode":
