@@ -101,10 +101,19 @@ export function registerFsService(ctx: ServiceContext): () => void {
           if (existing) clearTimeout(existing);
           pending.set(
             key,
-            setTimeout(() => {
+            setTimeout(async () => {
               pending.delete(key);
+              const exists = await fs
+                .access(full)
+                .then(() => true)
+                .catch(() => false);
               ctx.send(CH.fsWatchEvent, {
-                type: eventType === "rename" ? "rename" : "change",
+                type:
+                  eventType === "change"
+                    ? "change"
+                    : exists
+                      ? "create"
+                      : "delete",
                 path: full,
               });
             }, 80),

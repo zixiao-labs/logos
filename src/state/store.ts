@@ -2,10 +2,15 @@ import { create } from "zustand";
 import { DEFAULT_SETTINGS } from "../shared/defaults";
 import type {
   AgentAuthContext,
+  AgentAuthMethod,
+  AgentConfigOption,
   AgentEvent,
   AgentModelInfo,
+  AgentPlanEntry,
   AgentQuestion,
   AgentSlashCommand,
+  AgentToolDiff,
+  AgentToolLocation,
   AgentThinkingConfig,
   GitStatus,
   GitLogEntry,
@@ -15,6 +20,7 @@ import type {
   LspProgress,
   LspWorkDoneProgress,
   Settings,
+  TerminalCreateOptions,
   ThemeMode,
 } from "../shared/types";
 import { basename, languageFromPath } from "../lib/language";
@@ -49,6 +55,7 @@ import type {
 
 export type TabKind =
   | "file"
+  | "diff"
   | "debug-source"
   | "preview"
   | "settings"
@@ -63,10 +70,12 @@ export interface EditorTab {
   path?: string;
   language?: string;
   dirty?: boolean;
+  externalChange?: "changed" | "deleted";
   url?: string;
   content?: string;
   debugPosition?: { line: number; column: number };
   debugSessionId?: string;
+  diff?: { path: string; staged: boolean };
 }
 
 export type SidebarView =
@@ -106,7 +115,13 @@ export interface TerminalInstance {
 
 export type AgentItem =
   | { id: string; kind: "user"; text: string }
-  | { id: string; kind: "assistant"; text: string; thinking: string }
+  | {
+      id: string;
+      kind: "assistant";
+      text: string;
+      thinking: string;
+      parentToolUseId?: string;
+    }
   | {
       id: string;
       kind: "tool";
@@ -115,20 +130,62 @@ export type AgentItem =
       input: unknown;
       isError?: boolean;
       result?: string;
+      parentToolUseId?: string;
+      status?: "pending" | "in_progress" | "completed" | "failed";
+      toolKind?: string;
+      locations?: AgentToolLocation[];
+      diffs?: AgentToolDiff[];
+    }
+  | {
+      id: string;
+      kind: "subagent";
+      taskId: string;
+      toolUseId?: string;
+      agentType?: string;
+      description: string;
+      status: "pending" | "running" | "completed" | "failed" | "stopped";
+      summary?: string;
     }
   | { id: string; kind: "result"; costUsd: number | null; durationMs: number }
   | { id: string; kind: "error"; message: string };
 
-export interface AgentSession {
+export interface AgentThread {
   id: string;
   name: string;
   items: AgentItem[];
-  status: "idle" | "running";
+  status: "idle" | "running" | "waiting";
+  runtimeId: string;
+  runtimeName?: string;
+  parentId?: string;
+  createdAt: number;
+  updatedAt: number;
+  followMode: boolean;
+  plan: AgentPlanEntry[];
+  modeId?: string;
+  modes: Array<{ id: string; name: string; description?: string }>;
+  currentModelId?: string;
+  models: AgentModelInfo[];
+  configOptions: AgentConfigOption[];
+  authMethods: AgentAuthMethod[];
+  commands: AgentSlashCommand[];
+  canConfigureProviders: boolean;
   /** SDK session id captured from the result event; used to resume (F2). */
   sdkSessionId?: string;
   pendingAsk?: { requestId: string; questions: AgentQuestion[] };
-  pendingPermission?: { requestId: string; toolName: string; input: unknown };
+  pendingPermission?: {
+    requestId: string;
+    toolName: string;
+    input: unknown;
+    options?: Array<{
+      id: string;
+      name: string;
+      kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+    }>;
+  };
 }
+
+/** Kept as a source-compatible alias while the UI migrates to Thread naming. */
+export type AgentSession = AgentThread;
 
 export interface Diagnostic {
   message: string;
@@ -198,7 +255,7 @@ interface LogosState {
 
   debug: DebugViewState;
 
-  agentSessions: AgentSession[];
+  agentSessions: AgentThread[];
   activeAgentId: string | null;
   /** Cached model list from the SDK (D1). Empty until loaded / if unavailable. */
   agentModels: AgentModelInfo[];
@@ -220,6 +277,7 @@ interface LogosState {
   setRoot(path: string): Promise<void>;
 
   openFile(path: string): void;
+  openGitDiff(path: string, staged: boolean): void;
   openSpecial(kind: "settings" | "extensions" | "welcome"): void;
   openPreview(path: string): void;
   openWebview(url: string, name: string): void;
@@ -237,7 +295,7 @@ interface LogosState {
   setSecondaryWidth(w: number): void;
   setPanelHeight(h: number): void;
 
-  newTerminal(): Promise<void>;
+  newTerminal(options?: TerminalCreateOptions): Promise<void>;
   closeTerminal(id: string): void;
   setActiveTerminal(id: string): void;
 
@@ -271,19 +329,27 @@ interface LogosState {
   clearDebugConsole(): void;
   applyDebugEvent(event: DebugSessionEvent): void;
 
-  newAgentSession(name?: string): string;
+  newAgentSession(name?: string, parentId?: string, runtimeId?: string): string;
   removeAgentSession(id: string): void;
   setActiveAgent(id: string): void;
+  setAgentRuntime(id: string, runtimeId: string): void;
+  setAgentMode(id: string, modeId: string): Promise<void>;
+  setAgentModel(id: string, modelId: string): Promise<void>;
+  setAgentConfig(id: string, configId: string, value: string | boolean): Promise<void>;
+  toggleAgentFollow(id: string): void;
+  authenticateAgent(id: string, methodId: string): Promise<void>;
   sendAgentPrompt(text: string): Promise<void>;
   interruptAgent(): Promise<void>;
   answerAsk(
     requestId: string,
-    answers: Record<string, string | string[]>,
+    answers: Record<string, string | string[] | number | boolean>,
     response?: string,
+    action?: "accept" | "decline" | "cancel",
   ): Promise<void>;
   respondPermission(
     requestId: string,
     behavior: "allow" | "deny",
+    optionId?: string,
   ): Promise<void>;
   applyAgentEvent(e: AgentEvent): void;
 
@@ -305,6 +371,15 @@ function thinkingConfig(
   return undefined; // "adaptive" => defer to the model/SDK default
 }
 
+function stringifyAgentValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 /** Build the credential/cwd context used to probe SDK models/commands. */
 function agentAuthCtx(state: {
   root: string | null;
@@ -324,25 +399,43 @@ function agentAuthCtx(state: {
 // id survive a restart, so `resume` can rejoin the CLI session. Transient state
 // (running status, pending permission/ask) is never restored — the main-process
 // side of those is gone after a restart.
-const AGENT_PERSIST_KEY = "logos.agent.v1";
+const AGENT_PERSIST_KEY = "logos.agent.threads.v2";
+const LEGACY_AGENT_PERSIST_KEY = "logos.agent.v1";
 
 function loadPersistedAgent(): {
-  agentSessions: AgentSession[];
+  agentSessions: AgentThread[];
   activeAgentId: string | null;
 } {
   try {
-    const raw = localStorage.getItem(AGENT_PERSIST_KEY);
+    const raw =
+      localStorage.getItem(AGENT_PERSIST_KEY) ??
+      localStorage.getItem(LEGACY_AGENT_PERSIST_KEY);
     if (!raw) return { agentSessions: [], activeAgentId: null };
     const parsed = JSON.parse(raw) as {
-      agentSessions?: AgentSession[];
+      agentSessions?: Array<Partial<AgentThread> & Pick<AgentThread, "id" | "name">>;
       activeAgentId?: string | null;
     };
     const agentSessions = (parsed.agentSessions ?? []).map(
-      (a): AgentSession => ({
+      (a): AgentThread => ({
         id: a.id,
         name: a.name,
         items: a.items ?? [],
         sdkSessionId: a.sdkSessionId,
+        runtimeId: a.runtimeId ?? "claude",
+        runtimeName: a.runtimeName,
+        parentId: a.parentId,
+        createdAt: a.createdAt ?? Date.now(),
+        updatedAt: a.updatedAt ?? Date.now(),
+        followMode: a.followMode ?? true,
+        plan: a.plan ?? [],
+        modeId: a.modeId,
+        modes: a.modes ?? [],
+        currentModelId: a.currentModelId,
+        models: a.models ?? [],
+        configOptions: a.configOptions ?? [],
+        authMethods: a.authMethods ?? [],
+        commands: a.commands ?? [],
+        canConfigureProviders: a.canConfigureProviders ?? false,
         status: "idle",
       }),
     );
@@ -357,7 +450,7 @@ function loadPersistedAgent(): {
 }
 
 function persistAgent(
-  agentSessions: AgentSession[],
+  agentSessions: AgentThread[],
   activeAgentId: string | null,
 ): void {
   try {
@@ -367,8 +460,23 @@ function persistAgent(
         agentSessions: agentSessions.map((a) => ({
           id: a.id,
           name: a.name,
-          items: a.items,
-          sdkSessionId: a.sdkSessionId,
+            items: a.items,
+            sdkSessionId: a.sdkSessionId,
+            runtimeId: a.runtimeId,
+            runtimeName: a.runtimeName,
+            parentId: a.parentId,
+            createdAt: a.createdAt,
+            updatedAt: a.updatedAt,
+            followMode: a.followMode,
+            plan: a.plan,
+            modeId: a.modeId,
+            modes: a.modes,
+            currentModelId: a.currentModelId,
+            models: a.models,
+            configOptions: a.configOptions,
+            authMethods: a.authMethods,
+            commands: a.commands,
+            canConfigureProviders: a.canConfigureProviders,
         })),
         activeAgentId,
       }),
@@ -709,6 +817,25 @@ export const useStore = create<LogosState>((set, get) => ({
       activeTabId: id,
     }));
   },
+  openGitDiff(path, staged) {
+    const root = get().root;
+    if (!root) return;
+    const id = `diff:${staged ? "index" : "worktree"}:${path}`;
+    const tab: EditorTab = {
+      id,
+      kind: "diff",
+      name: `${basename(path)} (${staged ? "Index" : "Working Tree"})`,
+      path: `${root}/${path}`,
+      language: languageFromPath(path),
+      diff: { path, staged },
+    };
+    set((state) => ({
+      tabs: state.tabs.some((item) => item.id === id)
+        ? state.tabs
+        : [...state.tabs.filter((item) => item.kind !== "welcome"), tab],
+      activeTabId: id,
+    }));
+  },
   openSpecial(kind) {
     const id = kind;
     const names: Record<string, string> = {
@@ -801,13 +928,14 @@ export const useStore = create<LogosState>((set, get) => ({
     set({ panelHeight: Math.max(120, Math.min(720, h)) });
   },
 
-  async newTerminal() {
+  async newTerminal(options = {}) {
     const created = await window.logos.terminal.create({
       cwd: get().root ?? undefined,
+      ...options,
     });
     const inst: TerminalInstance = {
       id: created.id,
-      name: `${basename(created.shell)} ${get().terminals.length + 1}`,
+      name: `${options.executable ? basename(options.executable) : basename(created.shell)} ${get().terminals.length + 1}`,
       pid: created.pid,
     };
     set((s) => ({
@@ -1920,13 +2048,35 @@ export const useStore = create<LogosState>((set, get) => ({
     }
   },
 
-  newAgentSession(name) {
+  newAgentSession(name, parentId, runtimeId) {
     const id = crypto.randomUUID();
-    const session: AgentSession = {
+    const now = Date.now();
+    const selectedRuntime = runtimeId ?? get().settings["agent.defaultRuntime"];
+    const session: AgentThread = {
       id,
-      name: name ?? `Agent ${get().agentSessions.length + 1}`,
+      name:
+        name ??
+        (parentId
+          ? `Subthread ${get().agentSessions.filter((item) => item.parentId === parentId).length + 1}`
+          : `Thread ${get().agentSessions.filter((item) => !item.parentId).length + 1}`),
       items: [],
       status: "idle",
+      runtimeId: selectedRuntime,
+      parentId,
+      createdAt: now,
+      updatedAt: now,
+      followMode: true,
+      plan: [],
+      modeId:
+        selectedRuntime === "claude"
+          ? get().settings["agent.permissionMode"]
+          : undefined,
+      modes: [],
+      models: [],
+      configOptions: [],
+      authMethods: [],
+      commands: [],
+      canConfigureProviders: false,
     };
     set((s) => ({
       agentSessions: [...s.agentSessions, session],
@@ -1935,11 +2085,23 @@ export const useStore = create<LogosState>((set, get) => ({
     return id;
   },
   removeAgentSession(id) {
-    void window.logos.agent.interrupt(id);
+    const state = get();
+    const removed = new Set([id]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const thread of state.agentSessions) {
+        if (thread.parentId && removed.has(thread.parentId) && !removed.has(thread.id)) {
+          removed.add(thread.id);
+          changed = true;
+        }
+      }
+    }
+    for (const threadId of removed) void window.logos.agent.close(threadId);
     set((s) => {
-      const agentSessions = s.agentSessions.filter((a) => a.id !== id);
+      const agentSessions = s.agentSessions.filter((a) => !removed.has(a.id));
       const activeAgentId =
-        s.activeAgentId === id
+        s.activeAgentId != null && removed.has(s.activeAgentId)
           ? (agentSessions[agentSessions.length - 1]?.id ?? null)
           : s.activeAgentId;
       return { agentSessions, activeAgentId };
@@ -1948,10 +2110,118 @@ export const useStore = create<LogosState>((set, get) => ({
   setActiveAgent(id) {
     set({ activeAgentId: id });
   },
+  setAgentRuntime(id, runtimeId) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id
+          ? {
+              ...thread,
+              runtimeId,
+              runtimeName: undefined,
+              sdkSessionId: undefined,
+              modeId:
+                runtimeId === "claude"
+                  ? state.settings["agent.permissionMode"]
+                  : undefined,
+              modes: [],
+              models: [],
+              currentModelId: undefined,
+              configOptions: [],
+              authMethods: [],
+              commands: [],
+              canConfigureProviders: false,
+              updatedAt: Date.now(),
+            }
+          : thread,
+      ),
+    }));
+  },
+  async setAgentMode(id, modeId) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id ? { ...thread, modeId, updatedAt: Date.now() } : thread,
+      ),
+    }));
+    await window.logos.agent.setMode(id, modeId).catch(() => undefined);
+  },
+  async setAgentModel(id, modelId) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id
+          ? { ...thread, currentModelId: modelId, updatedAt: Date.now() }
+          : thread,
+      ),
+    }));
+    await window.logos.agent.setModel(id, modelId).catch(() => undefined);
+  },
+  async setAgentConfig(id, configId, value) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) => {
+        if (thread.id !== id) return thread;
+        return {
+          ...thread,
+          configOptions: thread.configOptions.map((option) =>
+            option.id === configId
+              ? { ...option, currentValue: value } as AgentConfigOption
+              : option,
+          ),
+          updatedAt: Date.now(),
+        };
+      }),
+    }));
+    await window.logos.agent.setConfig({ sessionId: id, configId, value });
+  },
+  toggleAgentFollow(id) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id
+          ? { ...thread, followMode: !thread.followMode, updatedAt: Date.now() }
+          : thread,
+      ),
+    }));
+  },
+  async authenticateAgent(id, methodId) {
+    const markRunning = () =>
+      set((state) => ({
+        agentSessions: state.agentSessions.map((thread) =>
+          thread.id === id
+            ? { ...thread, status: "running", updatedAt: Date.now() }
+            : thread,
+        ),
+      }));
+    const result = await window.logos.agent.authenticate({
+      sessionId: id,
+      methodId,
+    });
+    if (!result.terminal) {
+      markRunning();
+      return;
+    }
+    const created = await window.logos.terminal.create(result.terminal);
+    const terminal: TerminalInstance = {
+      id: created.id,
+      name: `Auth: ${basename(created.shell)}`,
+      pid: created.pid,
+    };
+    set((state) => ({
+      terminals: [...state.terminals, terminal],
+      activeTerminalId: terminal.id,
+      panelVisible: true,
+      panelTab: "terminal",
+    }));
+    const off = window.logos.terminal.onExit(created.id, (code) => {
+      off();
+      if (code !== 0) return;
+      void window.logos.agent
+        .authenticate({ sessionId: id, methodId, completed: true })
+        .then(markRunning);
+    });
+  },
   async sendAgentPrompt(text) {
-    const state = get();
+    let state = get();
     let id = state.activeAgentId;
     if (!id) id = get().newAgentSession();
+    state = get();
     const root = state.root ?? ".";
     const s = state.settings;
     // sdkSessionId survives restarts (F2): resume the CLI session if present.
@@ -1961,26 +2231,60 @@ export const useStore = create<LogosState>((set, get) => ({
         a.id === id
           ? {
               ...a,
-              status: "running",
+               status: "running",
               pendingAsk: undefined,
               pendingPermission: undefined,
               items: [
                 ...a.items,
                 { id: crypto.randomUUID(), kind: "user", text },
               ],
+              updatedAt: Date.now(),
             }
           : a,
       ),
     }));
     const allowed = s["agent.allowedTools"];
     const disallowed = s["agent.disallowedTools"];
+    const acpServer = s["agent.acpServers"].find(
+      (server) => server.id === session?.runtimeId,
+    );
+    if (session?.runtimeId && session.runtimeId !== "claude" && !acpServer) {
+      set((current) => ({
+        agentSessions: current.agentSessions.map((thread) =>
+          thread.id === id
+            ? {
+                ...thread,
+                status: "idle",
+                items: [
+                  ...thread.items,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "error",
+                    message: `ACP runtime "${thread.runtimeId}" is not configured`,
+                  },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+      return;
+    }
+    const runtime =
+      session?.runtimeId && session.runtimeId !== "claude" && acpServer
+        ? ({ type: "acp", server: acpServer } as const)
+        : ({ type: "claude" } as const);
     await window.logos.agent.start({
       sessionId: id!,
       prompt: text,
       cwd: root,
       // `|| undefined` everywhere => "empty means no override", mirroring model.
-      model: s["agent.model"] || undefined,
-      permissionMode: s["agent.permissionMode"],
+      model: session?.currentModelId || s["agent.model"] || undefined,
+      permissionMode:
+        runtime.type === "claude"
+          ? ((session?.modeId as Settings["agent.permissionMode"]) ??
+            s["agent.permissionMode"])
+          : undefined,
       resume: session?.sdkSessionId,
       effort: s["agent.effort"] || undefined,
       thinking: thinkingConfig(s["agent.thinking"], s["agent.thinkingBudget"]),
@@ -1992,35 +2296,72 @@ export const useStore = create<LogosState>((set, get) => ({
       apiKey: s["agent.apiKey"] || undefined,
       authToken: s["agent.authToken"] || undefined,
       baseUrl: s["agent.baseUrl"] || undefined,
+      runtime,
     });
   },
   async interruptAgent() {
     const id = get().activeAgentId;
-    if (id) await window.logos.agent.interrupt(id);
+    if (id) {
+      await window.logos.agent.interrupt(id);
+    }
   },
-  async answerAsk(requestId, answers, response) {
-    await window.logos.agent.respondAsk({ requestId, answers, response });
+  async answerAsk(requestId, answers, response, action) {
+    await window.logos.agent.respondAsk({ requestId, answers, response, action });
     set((s) => ({
       agentSessions: s.agentSessions.map((a) =>
         a.pendingAsk?.requestId === requestId
-          ? { ...a, pendingAsk: undefined }
+          ? {
+              ...a,
+              pendingAsk: undefined,
+              status: "running",
+              updatedAt: Date.now(),
+            }
           : a,
       ),
     }));
   },
-  async respondPermission(requestId, behavior) {
-    await window.logos.agent.respondPermission({ requestId, behavior });
+  async respondPermission(requestId, behavior, optionId) {
+    await window.logos.agent.respondPermission({ requestId, behavior, optionId });
     set((s) => ({
       agentSessions: s.agentSessions.map((a) =>
         a.pendingPermission?.requestId === requestId
-          ? { ...a, pendingPermission: undefined }
+          ? {
+              ...a,
+              pendingPermission: undefined,
+              status: "running",
+              updatedAt: Date.now(),
+            }
           : a,
       ),
     }));
   },
   applyAgentEvent(e) {
+    if (e.kind === "follow") {
+      const state = get();
+      const thread = state.agentSessions.find((item) => item.id === e.sessionId);
+      if (thread?.followMode) {
+        const absolute = /^(?:[A-Za-z]:[\\/]|\/)/.test(e.location.path)
+          ? e.location.path
+          : state.root
+            ? `${state.root}/${e.location.path}`
+            : e.location.path;
+        get().openFile(absolute);
+        if (e.location.line != null) {
+          window.dispatchEvent(
+            new CustomEvent("logos:lsp-navigate", {
+              detail: {
+                path: absolute,
+                target: { lineNumber: Math.max(e.location.line, 1), column: 1 },
+                takeFocus: false,
+              },
+            }),
+          );
+        }
+      }
+      return;
+    }
     set((s) => {
-      const sessions = s.agentSessions.map((a): AgentSession => {
+      const sessions = s.agentSessions.map((a): AgentThread => {
         if (a.id !== e.sessionId) return a;
         const items = [...a.items];
         const findAssistant = (mid: string) => {
@@ -2039,12 +2380,13 @@ export const useStore = create<LogosState>((set, get) => ({
                 kind: "assistant",
                 text: "",
                 thinking: "",
+                parentToolUseId: e.parentToolUseId,
               });
               idx = items.length - 1;
             }
             const it = items[idx] as Extract<AgentItem, { kind: "assistant" }>;
             items[idx] = { ...it, text: it.text + e.delta };
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
           case "text": {
             const idx = findAssistant(e.messageId);
@@ -2054,6 +2396,7 @@ export const useStore = create<LogosState>((set, get) => ({
                 kind: "assistant",
                 text: e.text,
                 thinking: "",
+                parentToolUseId: e.parentToolUseId,
               });
             } else {
               const it = items[idx] as Extract<
@@ -2062,7 +2405,7 @@ export const useStore = create<LogosState>((set, get) => ({
               >;
               items[idx] = { ...it, text: e.text };
             }
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
           case "thinking": {
             let idx = findAssistant(e.messageId);
@@ -2072,12 +2415,13 @@ export const useStore = create<LogosState>((set, get) => ({
                 kind: "assistant",
                 text: "",
                 thinking: "",
+                parentToolUseId: e.parentToolUseId,
               });
               idx = items.length - 1;
             }
             const it = items[idx] as Extract<AgentItem, { kind: "assistant" }>;
             items[idx] = { ...it, thinking: it.thinking + e.delta };
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
           case "tool-use":
             items.push({
@@ -2086,18 +2430,117 @@ export const useStore = create<LogosState>((set, get) => ({
               toolUseId: e.toolUseId,
               name: e.name,
               input: e.input,
+              parentToolUseId: e.parentToolUseId,
+              status: e.status,
+              toolKind: e.toolKind,
+              locations: e.locations,
+              diffs: e.diffs,
             });
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           case "tool-result": {
             const idx = items.findIndex(
               (it) => it.kind === "tool" && it.toolUseId === e.toolUseId,
             );
             if (idx !== -1) {
               const it = items[idx] as Extract<AgentItem, { kind: "tool" }>;
-              items[idx] = { ...it, isError: e.isError, result: e.content };
+              items[idx] = {
+                ...it,
+                isError: e.isError,
+                result: e.content,
+                status: e.isError ? "failed" : "completed",
+                locations: e.locations ?? it.locations,
+                diffs: e.diffs ?? it.diffs,
+              };
             }
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
+          case "tool-update": {
+            const idx = items.findIndex(
+              (item) => item.kind === "tool" && item.toolUseId === e.toolUseId,
+            );
+            if (idx === -1) {
+              items.push({
+                id: e.toolUseId,
+                kind: "tool",
+                toolUseId: e.toolUseId,
+                name: e.title ?? "Tool",
+                input: e.input,
+                result: e.output == null ? undefined : stringifyAgentValue(e.output),
+                status: e.status,
+                locations: e.locations,
+                diffs: e.diffs,
+                isError: e.status === "failed",
+              });
+            } else {
+              const item = items[idx] as Extract<AgentItem, { kind: "tool" }>;
+              items[idx] = {
+                ...item,
+                name: e.title ?? item.name,
+                input: e.input ?? item.input,
+                result:
+                  e.output == null ? item.result : stringifyAgentValue(e.output),
+                status: e.status ?? item.status,
+                locations: e.locations ?? item.locations,
+                diffs: e.diffs ?? item.diffs,
+                isError: e.status === "failed" || item.isError,
+              };
+            }
+            return { ...a, items, updatedAt: Date.now() };
+          }
+          case "subagent": {
+            const idx = items.findIndex(
+              (item) => item.kind === "subagent" && item.taskId === e.taskId,
+            );
+            const next: Extract<AgentItem, { kind: "subagent" }> = {
+              id: `subagent:${e.taskId}`,
+              kind: "subagent",
+              taskId: e.taskId,
+              toolUseId: e.toolUseId,
+              agentType: e.agentType,
+              description: e.description,
+              status: e.status,
+              summary: e.summary,
+            };
+            if (idx === -1) items.push(next);
+            else items[idx] = { ...items[idx], ...next } as AgentItem;
+            return { ...a, items, updatedAt: Date.now() };
+          }
+          case "plan":
+            return { ...a, plan: e.entries, updatedAt: Date.now() };
+          case "runtime-ready":
+            return {
+              ...a,
+              runtimeName: e.runtimeName,
+              sdkSessionId: e.sdkSessionId || a.sdkSessionId,
+              modes: e.modes.length ? e.modes : a.modes,
+              modeId: e.currentModeId ?? a.modeId,
+              models: e.models.length ? e.models : a.models,
+              currentModelId: e.currentModelId ?? a.currentModelId,
+              configOptions: e.configOptions.length
+                ? e.configOptions
+                : a.configOptions,
+              authMethods: e.authMethods.length ? e.authMethods : a.authMethods,
+              commands: e.commands.length ? e.commands : a.commands,
+              canConfigureProviders: e.canConfigureProviders,
+              updatedAt: Date.now(),
+            };
+          case "mode":
+            return { ...a, modeId: e.modeId, updatedAt: Date.now() };
+          case "config":
+            return { ...a, configOptions: e.options, updatedAt: Date.now() };
+          case "session-info":
+            return {
+              ...a,
+              name: e.title || a.name,
+              updatedAt: Date.now(),
+            };
+          case "auth-required":
+            return {
+              ...a,
+              status: "waiting",
+              authMethods: e.methods,
+              updatedAt: Date.now(),
+            };
           case "result":
             items.push({
               id: crypto.randomUUID(),
@@ -2111,6 +2554,9 @@ export const useStore = create<LogosState>((set, get) => ({
               items,
               status: "idle",
               sdkSessionId: e.sdkSessionId ?? a.sdkSessionId,
+              pendingAsk: undefined,
+              pendingPermission: undefined,
+              updatedAt: Date.now(),
             };
           case "error":
             items.push({
@@ -2118,7 +2564,14 @@ export const useStore = create<LogosState>((set, get) => ({
               kind: "error",
               message: e.message,
             });
-            return { ...a, items, status: "idle" };
+            return {
+              ...a,
+              items,
+              status: "idle",
+              pendingAsk: undefined,
+              pendingPermission: undefined,
+              updatedAt: Date.now(),
+            };
           case "permission":
             return {
               ...a,
@@ -2126,12 +2579,17 @@ export const useStore = create<LogosState>((set, get) => ({
                 requestId: e.requestId,
                 toolName: e.toolName,
                 input: e.input,
+                options: e.options,
               },
+              status: "waiting",
+              updatedAt: Date.now(),
             };
           case "ask":
             return {
               ...a,
               pendingAsk: { requestId: e.requestId, questions: e.questions },
+              status: "waiting",
+              updatedAt: Date.now(),
             };
           default:
             return a;

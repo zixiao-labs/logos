@@ -16,7 +16,7 @@ export function GitPanel() {
   const gitPull = useStore((s) => s.gitPull);
   const gitPush = useStore((s) => s.gitPush);
   const gitSync = useStore((s) => s.gitSync);
-  const openFile = useStore((s) => s.openFile);
+  const openGitDiff = useStore((s) => s.openGitDiff);
   const [message, setMessage] = useState("");
 
   async function run(fn: () => Promise<unknown>) {
@@ -24,8 +24,9 @@ export function GitPanel() {
     await refreshGit();
   }
 
-  const staged = git?.changes.filter((c) => c.staged) ?? [];
-  const unstaged = git?.changes.filter((c) => !c.staged) ?? [];
+  const staged = git?.changes.filter((change) => change.index !== " ") ?? [];
+  const unstaged =
+    git?.changes.filter((change) => change.working !== " ") ?? [];
 
   // F4: commit must not silently no-op. Disable when there's nothing to commit,
   // and stage-all-then-commit when changes exist but nothing is staged yet.
@@ -119,13 +120,15 @@ export function GitPanel() {
   const FileRow = ({
     change,
     actions,
+    staged,
   }: {
     change: GitFileChange;
+    staged: boolean;
     actions: { icon: import("./Icon").IconName; title: string; onClick: () => void }[];
   }) => {
-    const status = change.working !== " " ? change.working : change.index;
+    const status = staged ? change.index : change.working;
     return (
-      <div className="tree-row" onClick={() => openFile(`${root}/${change.path}`)}>
+      <div className="tree-row" onClick={() => openGitDiff(change.path, staged)}>
         <span className="tree-icon">
           <Icon name="file" size={14} />
         </span>
@@ -297,6 +300,7 @@ export function GitPanel() {
               <FileRow
                 key={c.path}
                 change={c}
+                staged
                 actions={[
                   {
                     icon: "close",
@@ -334,6 +338,7 @@ export function GitPanel() {
               <FileRow
                 key={c.path}
                 change={c}
+                staged={false}
                 actions={[
                   {
                     icon: "discard",

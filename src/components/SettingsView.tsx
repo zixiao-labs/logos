@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
+import { Button, Card } from "@heroui/react";
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
-import type { Settings } from "../shared/types";
+import type { AcpAgentConfig, Settings } from "../shared/types";
 
 function Switch({
   on,
@@ -71,12 +72,112 @@ function Row({ name, settingKey, children }: RowProps) {
   );
 }
 
+function AcpServersEditor({
+  servers,
+  onChange,
+}: {
+  servers: AcpAgentConfig[];
+  onChange: (servers: AcpAgentConfig[]) => void;
+}) {
+  const update = (id: string, patch: Partial<AcpAgentConfig>) =>
+    onChange(servers.map((server) => (server.id === id ? { ...server, ...patch } : server)));
+
+  return (
+    <div className="acp-server-list">
+      {servers.map((server) => (
+        <Card key={server.id} className="acp-server-card" variant="secondary">
+          <Card.Header>
+            <Card.Title>{server.name || server.id}</Card.Title>
+            <Button
+              isIconOnly
+              aria-label="Remove ACP server"
+              size="sm"
+              variant="danger"
+              onPress={() => onChange(servers.filter((item) => item.id !== server.id))}
+            >
+              ×
+            </Button>
+          </Card.Header>
+          <Card.Content className="acp-server-fields">
+            <input
+              className="field"
+              aria-label="Agent id"
+              placeholder="id"
+              value={server.id}
+              onChange={(event) => update(server.id, { id: event.target.value })}
+            />
+            <input
+              className="field"
+              aria-label="Agent name"
+              placeholder="Display name"
+              value={server.name}
+              onChange={(event) => update(server.id, { name: event.target.value })}
+            />
+            <input
+              className="field"
+              aria-label="Agent command"
+              placeholder="opencode"
+              value={server.command}
+              onChange={(event) => update(server.id, { command: event.target.value })}
+            />
+            <input
+              className="field"
+              aria-label="Agent arguments"
+              placeholder="acp"
+              value={server.args.join(" ")}
+              onChange={(event) =>
+                update(server.id, {
+                  args: event.target.value.split(/\s+/).filter(Boolean),
+                })
+              }
+            />
+            <textarea
+              className="field acp-env"
+              aria-label="Agent environment"
+              placeholder='{"OPENAI_API_KEY":"..."}'
+              defaultValue={JSON.stringify(server.env, null, 2)}
+              onBlur={(event) => {
+                try {
+                  const env = JSON.parse(event.target.value) as Record<string, string>;
+                  update(server.id, { env });
+                } catch {
+                  event.target.value = JSON.stringify(server.env, null, 2);
+                }
+              }}
+            />
+          </Card.Content>
+        </Card>
+      ))}
+      <Button
+        size="sm"
+        variant="secondary"
+        onPress={() =>
+          onChange([
+            ...servers,
+            {
+              id: `agent-${servers.length + 1}`,
+              name: "ACP Agent",
+              command: "",
+              args: [],
+              env: {},
+            },
+          ])
+        }
+      >
+        Add ACP agent
+      </Button>
+    </div>
+  );
+}
+
 export function SettingsView() {
   const t = useT();
   const settings = useStore((s) => s.settings);
   const setSetting = useStore((s) => s.setSetting);
   const setManySettings = useStore((s) => s.setManySettings);
   const resetSettings = useStore((s) => s.resetSettings);
+  const newTerminal = useStore((s) => s.newTerminal);
+  const root = useStore((s) => s.root);
   const [mode, setMode] = useState<"gui" | "json">("gui");
   const [json, setJson] = useState("");
   const [jsonError, setJsonError] = useState<string | null>(null);
@@ -228,6 +329,55 @@ export function SettingsView() {
               value={settings["terminal.fontSize"]}
               onChange={(e) => set("terminal.fontSize", Number(e.target.value))}
             />
+          </Row>
+          <Row name={t("settings.agentRuntime")} settingKey="agent.defaultRuntime">
+            <select
+              className="select"
+              value={settings["agent.defaultRuntime"]}
+              onChange={(event) => set("agent.defaultRuntime", event.target.value)}
+            >
+              <option value="claude">Claude</option>
+              {settings["agent.acpServers"].map((server) => (
+                <option key={server.id} value={server.id}>
+                  {server.name} (ACP)
+                </option>
+              ))}
+            </select>
+          </Row>
+          <Row name={t("settings.acpAgents")} settingKey="agent.acpServers">
+            <AcpServersEditor
+              servers={settings["agent.acpServers"]}
+              onChange={(servers) => {
+                const currentRuntime = settings["agent.defaultRuntime"];
+                void setManySettings({
+                  "agent.acpServers": servers,
+                  ...(
+                    currentRuntime !== "claude" &&
+                    !servers.some((server) => server.id === currentRuntime)
+                      ? { "agent.defaultRuntime": "claude" }
+                      : {}
+                  ),
+                });
+              }}
+            />
+          </Row>
+          <Row name={t("settings.modelProviders")} settingKey="opencode auth login">
+            <div className="provider-login">
+              <Button
+                size="sm"
+                variant="secondary"
+                onPress={() =>
+                  void newTerminal({
+                    cwd: root ?? undefined,
+                    executable: "opencode",
+                    args: ["auth", "login"],
+                  })
+                }
+              >
+                {t("settings.configureProviders")}
+              </Button>
+              <span>{t("settings.chatgptSubscriptionHint")}</span>
+            </div>
           </Row>
           <Row name={t("settings.agentPermission")} settingKey="agent.permissionMode">
             <select

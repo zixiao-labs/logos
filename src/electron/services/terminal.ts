@@ -1,4 +1,5 @@
 import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import type { IPty } from "node-pty";
 import { CH } from "../../shared/channels";
@@ -14,6 +15,25 @@ function defaultShell(): string {
   if (process.platform === "win32")
     return process.env.COMSPEC || "powershell.exe";
   return process.env.SHELL || "/bin/zsh";
+}
+
+function augmentPath(env: Record<string, string>): void {
+  const separator = process.platform === "win32" ? ";" : ":";
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string })
+    .resourcesPath;
+  const candidates =
+    process.platform === "win32"
+      ? []
+      : [
+          path.join(os.homedir(), ".opencode", "bin"),
+          path.join(os.homedir(), ".local", "bin"),
+          "/opt/homebrew/bin",
+          "/usr/local/bin",
+          "/usr/bin",
+          "/bin",
+        ];
+  if (resourcesPath) candidates.unshift(path.join(resourcesPath, "bin"));
+  env.PATH = [...candidates, env.PATH ?? ""].filter(Boolean).join(separator);
 }
 
 export function registerTerminalService(
@@ -32,6 +52,7 @@ export function registerTerminalService(
       if (value == null) delete env[key];
       else env[key] = value;
     }
+    augmentPath(env);
     env.TERM = "xterm-256color";
     const proc = pty.spawn(shell, opts.args ?? [], {
       name: "xterm-256color",

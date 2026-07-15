@@ -26,5 +26,15 @@ export const DEFAULT_SETTINGS: Settings = {
   "agent.allowedTools": [],
   "agent.disallowedTools": [],
   "agent.loadProjectSettings": true,
+  "agent.defaultRuntime": "claude",
+  "agent.acpServers": [
+    {
+      id: "opencode",
+      name: "OpenCode",
+      command: "opencode",
+      args: ["acp"],
+      env: {},
+    },
+  ],
   "lsp.autoDownload": true,
 };

@@ -1,11 +1,16 @@
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import { Icon } from "./Icon";
-import { closeTabSafely, MonacoEditor } from "./MonacoEditor";
+import {
+  closeTabSafely,
+  MonacoEditor,
+  reloadFileFromDisk,
+} from "./MonacoEditor";
 import { SettingsView } from "./SettingsView";
 import { ExtensionsView } from "./ExtensionsView";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { Welcome } from "./Welcome";
+import { GitDiffEditor } from "./GitDiffEditor";
 
 export function EditorArea() {
   const t = useT();
@@ -53,6 +58,8 @@ export function EditorArea() {
                       ? "preview"
                       : tab.kind === "webview"
                         ? "globe"
+                        : tab.kind === "diff"
+                          ? "git"
                         : "file"
               }
               size={14}
@@ -80,6 +87,17 @@ export function EditorArea() {
             </span>
           ))}
           <div style={{ flex: 1 }} />
+          {active.externalChange && active.path && (
+            <button
+              className="external-change"
+              title={t(`editor.external.${active.externalChange}`)}
+              disabled={active.externalChange === "deleted"}
+              onClick={() => void reloadFileFromDisk(active.path!)}
+            >
+              <Icon name="warning" size={12} />
+              {t(`editor.external.${active.externalChange}`)}
+            </button>
+          )}
           {active.language === "markdown" && active.path && (
             <button
               className="icon-btn"
@@ -105,6 +123,13 @@ export function EditorArea() {
           />
           )}
         {active?.kind === "welcome" && <Welcome />}
+        {active?.kind === "diff" && active.diff && (
+          <GitDiffEditor
+            path={active.diff.path}
+            staged={active.diff.staged}
+            language={active.language ?? "plaintext"}
+          />
+        )}
         {active?.kind === "settings" && <SettingsView />}
         {active?.kind === "extensions" && <ExtensionsView />}
         {active?.kind === "preview" && active.path && (

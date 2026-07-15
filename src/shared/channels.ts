@@ -42,6 +42,7 @@ export const CH = {
   gitCheckout: "git:checkout",
   gitCreateBranch: "git:createBranch",
   gitDiff: "git:diff",
+  gitFileDiff: "git:fileDiff",
   gitLog: "git:log",
   gitInit: "git:init",
   gitFetch: "git:fetch",
@@ -67,10 +68,18 @@ export const CH = {
   // agent
   agentStart: "agent:start",
   agentInterrupt: "agent:interrupt",
+  agentClose: "agent:close",
   agentRespondPermission: "agent:respondPermission",
   agentRespondAsk: "agent:respondAsk",
   agentListModels: "agent:listModels",
   agentListCommands: "agent:listCommands",
+  agentSetMode: "agent:setMode",
+  agentSetModel: "agent:setModel",
+  agentSetConfig: "agent:setConfig",
+  agentAuthenticate: "agent:authenticate",
+  agentListProviders: "agent:listProviders",
+  agentSetProvider: "agent:setProvider",
+  agentDisableProvider: "agent:disableProvider",
   agentEvent: "agent:event", // push
 
   // language servers

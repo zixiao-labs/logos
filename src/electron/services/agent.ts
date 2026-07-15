@@ -5,10 +5,14 @@ import { sep } from "node:path";
 import { CH } from "../../shared/channels";
 import type {
   AgentAskResponse,
+  AgentAuthRequest,
   AgentAuthContext,
   AgentEvent,
   AgentModelInfo,
+  AgentPermissionOption,
   AgentPermissionResponse,
+  AgentProviderConfig,
+  AgentSetConfigRequest,
   AgentQuestion,
   AgentSlashCommand,
   AgentStartRequest,
@@ -23,6 +27,7 @@ import type {
   SDKUserMessage,
   SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
+import { AcpAgentRuntime } from "./acp-agent";
 
 /**
  * `@anthropic-ai/claude-agent-sdk` is ESM-only. The Electron main bundle is
@@ -146,18 +151,29 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   }
 }
 
-interface Session {
+interface ClaudeSession {
+  kind: "claude";
   input: InputQueue;
   query: Query;
-  /** id of the assistant message currently streaming, for delta grouping. */
-  currentMessageId: string | null;
+  /** Current assistant message per root/subagent stream. */
+  currentMessageIds: Map<string, string>;
 }
+
+interface AcpSession {
+  kind: "acp";
+  runtime: AcpAgentRuntime;
+}
+
+type Session = ClaudeSession | AcpSession;
 
 /** A `canUseTool` call awaiting the user's response from the renderer. */
 interface PendingRequest {
-  resolve: (r: PermissionResult) => void;
+  sessionId: string;
+  source: "claude" | "acp-permission" | "acp-ask";
+  resolve: (r: never) => void;
   /** Present when the request originated from the AskUserQuestion tool. */
   questions?: AgentQuestion[];
+  options?: AgentPermissionOption[];
 }
 
 function stringifyContent(content: unknown): string {
@@ -184,39 +200,126 @@ export function registerAgentService(ctx: ServiceContext): () => void {
 
   const emit = (e: AgentEvent) => ctx.send(CH.agentEvent, e);
 
-  function routeMessage(msg: SDKMessage, sessionId: string, session: Session) {
+  function cancelPending(sessionId: string): void {
+    for (const [requestId, pending] of pendingPerms) {
+      if (pending.sessionId !== sessionId) continue;
+      pendingPerms.delete(requestId);
+      if (pending.source === "acp-permission") {
+        pending.resolve({ cancelled: true } as never);
+      } else if (pending.source === "acp-ask") {
+        pending.resolve({ action: "cancel", answers: {} } as never);
+      } else {
+        pending.resolve({
+          behavior: "deny",
+          message: "Cancelled by user",
+        } as never);
+      }
+    }
+  }
+
+  function routeMessage(
+    msg: SDKMessage,
+    sessionId: string,
+    session: ClaudeSession,
+  ) {
     switch (msg.type) {
-      case "system":
+      case "system": {
+        const system = msg as unknown as Record<string, unknown>;
+        const subtype = String(system.subtype ?? "system");
+        if (
+          subtype === "task_started" ||
+          subtype === "task_progress" ||
+          subtype === "task_updated" ||
+          subtype === "task_notification"
+        ) {
+          const patch = (system.patch ?? {}) as Record<string, unknown>;
+          const rawStatus = String(
+            patch.status ?? system.status ?? (subtype === "task_started" ? "running" : "running"),
+          );
+          const status =
+            rawStatus === "completed"
+              ? "completed"
+              : rawStatus === "failed"
+                ? "failed"
+                : rawStatus === "stopped" || rawStatus === "killed"
+                  ? "stopped"
+                  : rawStatus === "pending"
+                    ? "pending"
+                    : "running";
+          emit({
+            kind: "subagent",
+            sessionId,
+            taskId: String(system.task_id ?? system.tool_use_id ?? crypto.randomUUID()),
+            toolUseId: system.tool_use_id ? String(system.tool_use_id) : undefined,
+            agentType: system.subagent_type ? String(system.subagent_type) : undefined,
+            description: String(
+              patch.description ??
+                system.description ??
+                system.summary ??
+                "Subagent task",
+            ),
+            status,
+            summary: system.summary ? String(system.summary) : undefined,
+          });
+        }
         emit({
           kind: "system",
           sessionId,
-          subtype: (msg as { subtype: string }).subtype,
+          subtype,
           data: msg,
         });
         break;
+      }
       case "stream_event": {
-        const ev = (msg as unknown as { event: Record<string, unknown> }).event;
+        const partial = msg as unknown as {
+          event: Record<string, unknown>;
+          parent_tool_use_id?: string | null;
+        };
+        const ev = partial.event;
+        const parentToolUseId = partial.parent_tool_use_id ?? undefined;
+        const streamKey = parentToolUseId ?? "root";
         if (ev.type === "message_start") {
           const m = ev.message as { id?: string } | undefined;
-          session.currentMessageId = m?.id ?? null;
+          session.currentMessageIds.set(
+            streamKey,
+            m?.id ?? crypto.randomUUID(),
+          );
         } else if (ev.type === "content_block_delta") {
           const delta = ev.delta as {
             type?: string;
             text?: string;
             thinking?: string;
           };
-          const messageId = session.currentMessageId ?? "stream";
+          const messageId =
+            session.currentMessageIds.get(streamKey) ?? crypto.randomUUID();
+          session.currentMessageIds.set(streamKey, messageId);
           if (delta.type === "text_delta" && delta.text) {
-            emit({ kind: "text-delta", sessionId, messageId, delta: delta.text });
+            emit({
+              kind: "text-delta",
+              sessionId,
+              messageId,
+              delta: delta.text,
+              parentToolUseId,
+            });
           } else if (delta.type === "thinking_delta" && delta.thinking) {
-            emit({ kind: "thinking", sessionId, messageId, delta: delta.thinking });
+            emit({
+              kind: "thinking",
+              sessionId,
+              messageId,
+              delta: delta.thinking,
+              parentToolUseId,
+            });
           }
         }
         break;
       }
       case "assistant": {
-        const m = (msg as unknown as { message: { id: string; content: unknown[] } })
-          .message;
+        const assistant = msg as unknown as {
+          message: { id: string; content: unknown[] };
+          parent_tool_use_id?: string | null;
+        };
+        const m = assistant.message;
+        const parentToolUseId = assistant.parent_tool_use_id ?? undefined;
         for (const block of m.content as Array<Record<string, unknown>>) {
           if (block.type === "text") {
             emit({
@@ -224,21 +327,57 @@ export function registerAgentService(ctx: ServiceContext): () => void {
               sessionId,
               messageId: m.id,
               text: String(block.text ?? ""),
+              parentToolUseId,
             });
           } else if (block.type === "tool_use") {
+            const input = block.input;
+            const locations = toolLocations(input);
             emit({
               kind: "tool-use",
               sessionId,
               toolUseId: String(block.id),
               name: String(block.name),
-              input: block.input,
+              input,
+              parentToolUseId,
+              status: "in_progress",
+              locations,
             });
+            if (locations[0]) {
+              emit({ kind: "follow", sessionId, location: locations[0] });
+            }
+            const name = String(block.name).toLowerCase();
+            if (name === "todowrite" || name === "update_plan") {
+              const todos = (input as { todos?: Array<Record<string, unknown>> })
+                ?.todos;
+              if (Array.isArray(todos)) {
+                emit({
+                  kind: "plan",
+                  sessionId,
+                  entries: todos.map((todo) => ({
+                    content: String(todo.content ?? todo.activeForm ?? "Task"),
+                    status:
+                      todo.status === "in_progress" || todo.status === "completed"
+                        ? todo.status
+                        : "pending",
+                    priority:
+                      todo.priority === "high" || todo.priority === "low"
+                        ? todo.priority
+                        : "medium",
+                  })),
+                });
+              }
+            }
           }
         }
         break;
       }
       case "user": {
-        const m = (msg as unknown as { message: { content: unknown } }).message;
+        const user = msg as unknown as {
+          message: { content: unknown };
+          parent_tool_use_id?: string | null;
+        };
+        const m = user.message;
+        const parentToolUseId = user.parent_tool_use_id ?? undefined;
         const content = m.content;
         if (Array.isArray(content)) {
           for (const block of content as Array<Record<string, unknown>>) {
@@ -249,6 +388,7 @@ export function registerAgentService(ctx: ServiceContext): () => void {
                 toolUseId: String(block.tool_use_id),
                 isError: Boolean(block.is_error),
                 content: stringifyContent(block.content),
+                parentToolUseId,
               });
             }
           }
@@ -280,7 +420,7 @@ export function registerAgentService(ctx: ServiceContext): () => void {
     }
   }
 
-  async function startSession(req: AgentStartRequest): Promise<Session> {
+  async function startClaudeSession(req: AgentStartRequest): Promise<ClaudeSession> {
     const sdk = await importEsm("@anthropic-ai/claude-agent-sdk");
     const input = new InputQueue();
     const env = authEnv(req);
@@ -289,6 +429,8 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       model: req.model || undefined,
       permissionMode: req.permissionMode ?? "default",
       includePartialMessages: true,
+      forwardSubagentText: true,
+      agentProgressSummaries: true,
       // Packaged builds must spawn the unpacked CLI binary, not the asar path
       // the SDK would resolve itself (which yields `spawn ENOTDIR`). undefined
       // in dev, where the SDK's own resolution already works.
@@ -318,11 +460,20 @@ export function registerAgentService(ctx: ServiceContext): () => void {
           if (toolName === "AskUserQuestion") {
             const questions =
               (toolInput as { questions?: AgentQuestion[] }).questions ?? [];
-            pendingPerms.set(requestId, { resolve, questions });
+            pendingPerms.set(requestId, {
+              sessionId: req.sessionId,
+              source: "claude",
+              resolve: resolve as (r: never) => void,
+              questions,
+            });
             emit({ kind: "ask", sessionId: req.sessionId, requestId, questions });
             return;
           }
-          pendingPerms.set(requestId, { resolve });
+          pendingPerms.set(requestId, {
+            sessionId: req.sessionId,
+            source: "claude",
+            resolve: resolve as (r: never) => void,
+          });
           emit({
             kind: "permission",
             sessionId: req.sessionId,
@@ -335,7 +486,12 @@ export function registerAgentService(ctx: ServiceContext): () => void {
     };
 
     const query = sdk.query({ prompt: input, options });
-    const session: Session = { input, query, currentMessageId: null };
+    const session: ClaudeSession = {
+      kind: "claude",
+      input,
+      query,
+      currentMessageIds: new Map(),
+    };
     sessions.set(req.sessionId, session);
 
     // Consume the message stream for the lifetime of the session.
@@ -353,14 +509,105 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       }
     })();
 
+    void Promise.all([query.supportedModels(), query.supportedCommands()])
+      .then(([models, commands]) =>
+        emit({
+          kind: "runtime-ready",
+          sessionId: req.sessionId,
+          runtimeName: "Claude",
+          sdkSessionId: req.resume ?? "",
+          modes: [
+            { id: "default", name: "Build" },
+            { id: "plan", name: "Plan" },
+            { id: "acceptEdits", name: "Accept edits" },
+          ],
+          currentModeId: req.permissionMode ?? "default",
+          models: models.map((model) => ({
+            value: model.value,
+            displayName: model.displayName,
+            description: model.description,
+            supportsEffort: model.supportsEffort,
+            supportedEffortLevels: model.supportedEffortLevels,
+            supportsAdaptiveThinking: model.supportsAdaptiveThinking,
+          })),
+          currentModelId: req.model,
+          configOptions: [],
+          commands: commands.map((command) => ({
+            name: command.name,
+            description: command.description,
+            argumentHint: command.argumentHint,
+            aliases: command.aliases,
+          })),
+          authMethods: [],
+          canConfigureProviders: false,
+        }),
+      )
+      .catch(() => undefined);
+
     return session;
   }
+
+  const acpHooks = {
+    emit,
+    requestPermission(
+      sessionId: string,
+      toolName: string,
+      input: unknown,
+      options: AgentPermissionOption[],
+    ) {
+      const requestId = `req-${++permCounter}`;
+      return new Promise<{ optionId?: string; cancelled?: boolean }>((resolve) => {
+        pendingPerms.set(requestId, {
+          sessionId,
+          source: "acp-permission",
+          resolve: resolve as (r: never) => void,
+          options,
+        });
+        emit({
+          kind: "permission",
+          sessionId,
+          requestId,
+          toolName,
+          input,
+          options,
+        });
+      });
+    },
+    requestAsk(sessionId: string, questions: AgentQuestion[]) {
+      const requestId = `req-${++permCounter}`;
+      return new Promise<{
+        action: "accept" | "cancel";
+        answers: Record<string, string | string[] | number | boolean>;
+      }>((resolve) => {
+        pendingPerms.set(requestId, {
+          sessionId,
+          source: "acp-ask",
+          resolve: resolve as (r: never) => void,
+          questions,
+        });
+        emit({ kind: "ask", sessionId, requestId, questions });
+      });
+    },
+    closed(sessionId: string) {
+      cancelPending(sessionId);
+      sessions.delete(sessionId);
+    },
+  };
 
   ipcMain.handle(CH.agentStart, async (_e, req: AgentStartRequest) => {
     try {
       let session = sessions.get(req.sessionId);
-      if (!session) session = await startSession(req);
-      session.input.push(req.prompt);
+      if (!session) {
+        if (req.runtime?.type === "acp") {
+          const runtime = await AcpAgentRuntime.create(req, acpHooks);
+          session = { kind: "acp", runtime };
+          sessions.set(req.sessionId, session);
+        } else {
+          session = await startClaudeSession(req);
+        }
+      }
+      if (session.kind === "claude") session.input.push(req.prompt);
+      else void session.runtime.prompt(req.prompt);
     } catch (err) {
       emit({
         kind: "error",
@@ -373,10 +620,25 @@ export function registerAgentService(ctx: ServiceContext): () => void {
   ipcMain.handle(CH.agentInterrupt, async (_e, sessionId: string) => {
     const session = sessions.get(sessionId);
     if (!session) return;
+    cancelPending(sessionId);
     try {
-      await session.query.interrupt();
+      if (session.kind === "claude") await session.query.interrupt();
+      else await session.runtime.interrupt();
     } catch {
       /* not interruptible in current state */
+    }
+  });
+
+  ipcMain.handle(CH.agentClose, async (_e, sessionId: string) => {
+    const session = sessions.get(sessionId);
+    sessions.delete(sessionId);
+    cancelPending(sessionId);
+    if (!session) return;
+    if (session.kind === "claude") {
+      session.input.close();
+      await session.query.interrupt().catch(() => undefined);
+    } else {
+      await session.runtime.dispose();
     }
   });
 
@@ -386,12 +648,25 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       const pending = pendingPerms.get(res.requestId);
       if (!pending) return;
       pendingPerms.delete(res.requestId);
-      if (res.behavior === "allow") pending.resolve({ behavior: "allow" });
-      else
+      if (pending.source === "acp-permission") {
+        const fallback = pending.options?.find((option) =>
+          res.behavior === "allow"
+            ? option.kind.startsWith("allow")
+            : option.kind.startsWith("reject"),
+        );
+        pending.resolve(
+          (res.cancelled
+            ? { cancelled: true }
+            : { optionId: res.optionId ?? fallback?.id }) as never,
+        );
+      } else if (res.behavior === "allow") {
+        pending.resolve({ behavior: "allow" } as never);
+      } else {
         pending.resolve({
           behavior: "deny",
           message: res.message ?? "Denied by user",
-        });
+        } as never);
+      }
     },
   );
 
@@ -400,11 +675,72 @@ export function registerAgentService(ctx: ServiceContext): () => void {
     if (!pending) return;
     pendingPerms.delete(res.requestId);
     // The original questions array MUST be echoed back alongside the answers.
+    if (pending.source === "acp-ask") {
+      pending.resolve(
+        {
+          action: res.action === "cancel" || res.action === "decline" ? "cancel" : "accept",
+          answers: res.answers,
+        } as never,
+      );
+      return;
+    }
     const updatedInput = res.response
       ? { questions: pending.questions ?? [], response: res.response }
       : { questions: pending.questions ?? [], answers: res.answers };
-    pending.resolve({ behavior: "allow", updatedInput });
+    pending.resolve({ behavior: "allow", updatedInput } as never);
   });
+
+  ipcMain.handle(CH.agentSetMode, async (_e, sessionId: string, modeId: string) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    if (session.kind === "claude") {
+      await session.query.setPermissionMode(
+        modeId as "default" | "acceptEdits" | "bypassPermissions" | "plan",
+      );
+      emit({ kind: "mode", sessionId, modeId });
+    } else {
+      await session.runtime.setMode(modeId);
+    }
+  });
+
+  ipcMain.handle(CH.agentSetModel, async (_e, sessionId: string, modelId: string) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    if (session.kind === "claude") await session.query.setModel(modelId || undefined);
+    else await session.runtime.setModel(modelId);
+  });
+
+  ipcMain.handle(CH.agentSetConfig, async (_e, input: AgentSetConfigRequest) => {
+    const session = sessions.get(input.sessionId);
+    if (session?.kind === "acp") await session.runtime.setConfig(input);
+  });
+
+  ipcMain.handle(CH.agentAuthenticate, async (_e, input: AgentAuthRequest) => {
+    const session = sessions.get(input.sessionId);
+    if (session?.kind !== "acp") return {};
+    return session.runtime.authenticate(input);
+  });
+
+  ipcMain.handle(CH.agentListProviders, async (_e, sessionId: string) => {
+    const session = sessions.get(sessionId);
+    return session?.kind === "acp" ? session.runtime.listProviders() : [];
+  });
+
+  ipcMain.handle(
+    CH.agentSetProvider,
+    async (_e, sessionId: string, config: AgentProviderConfig) => {
+      const session = sessions.get(sessionId);
+      if (session?.kind === "acp") await session.runtime.setProvider(config);
+    },
+  );
+
+  ipcMain.handle(
+    CH.agentDisableProvider,
+    async (_e, sessionId: string, providerId: string) => {
+      const session = sessions.get(sessionId);
+      if (session?.kind === "acp") await session.runtime.disableProvider(providerId);
+    },
+  );
 
   // D1/D4: probe the SDK for the model + slash-command lists. Control requests
   // require streaming mode, so we spin a short-lived streaming query, read the
@@ -527,10 +863,28 @@ export function registerAgentService(ctx: ServiceContext): () => void {
 
   return () => {
     for (const s of sessions.values()) {
-      s.input.close();
-      s.query.interrupt?.().catch(() => undefined);
+      if (s.kind === "claude") {
+        s.input.close();
+        s.query.interrupt?.().catch(() => undefined);
+      } else {
+        void s.runtime.dispose();
+      }
     }
     sessions.clear();
     pendingPerms.clear();
   };
+}
+
+function toolLocations(input: unknown): Array<{ path: string; line?: number }> {
+  if (!input || typeof input !== "object") return [];
+  const value = input as Record<string, unknown>;
+  const candidate = value.file_path ?? value.path ?? value.filename;
+  if (typeof candidate !== "string") return [];
+  const line = value.line ?? value.line_number;
+  return [
+    {
+      path: candidate,
+      ...(typeof line === "number" ? { line } : {}),
+    },
+  ];
 }

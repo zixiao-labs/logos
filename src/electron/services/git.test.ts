@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { CH } from "../../shared/channels";
-import type { GitLogEntry, GitStatus } from "../../shared/types";
+import type { GitFileDiff, GitLogEntry, GitStatus } from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { registerGitService } from "./git";
@@ -124,10 +124,32 @@ describe("git service", () => {
     expect(await service.invoke<string>(CH.gitDiff, root, "note.txt", false)).toContain(
       "+second",
     );
+    expect(
+      await service.invoke<GitFileDiff>(CH.gitFileDiff, root, "note.txt", false),
+    ).toMatchObject({
+      original: "first\n",
+      modified: "second\n",
+      staged: false,
+    });
     await service.invoke(CH.gitStage, root, ["note.txt"]);
     expect(await service.invoke<string>(CH.gitDiff, root, "note.txt", true)).toContain(
       "+second",
     );
+    expect(
+      await service.invoke<GitFileDiff>(CH.gitFileDiff, root, "note.txt", true),
+    ).toMatchObject({
+      original: "first\n",
+      modified: "second\n",
+      staged: true,
+    });
+    await fs.writeFile(file, "third\n", "utf8");
+    expect(
+      await service.invoke<GitFileDiff>(CH.gitFileDiff, root, "note.txt", false),
+    ).toMatchObject({
+      original: "second\n",
+      modified: "third\n",
+    });
+    await fs.writeFile(file, "second\n", "utf8");
     await service.invoke(CH.gitCommit, root, "Second commit");
     await service.invoke(CH.gitUndoLastCommit, root);
     expect((await service.invoke<GitLogEntry>(CH.gitHead, root)).message).toBe(
@@ -154,5 +176,33 @@ describe("git service", () => {
     expect(await service.invoke<string>(CH.gitSync, root)).toMatch(
       /^Sync failed \(pull\):/,
     );
+  });
+
+  it("builds Monaco content pairs for untracked files and staged renames", async () => {
+    await service.invoke(CH.gitInit, root);
+    await exec("git", ["-C", root, "config", "user.name", "Logos Tests"]);
+    await exec("git", ["-C", root, "config", "user.email", "tests@logos.local"]);
+    await fs.writeFile(path.join(root, "old.txt"), "renamed content\n", "utf8");
+    await service.invoke(CH.gitStage, root, ["old.txt"]);
+    await service.invoke(CH.gitCommit, root, "Initial");
+
+    await exec("git", ["-C", root, "mv", "old.txt", "new.txt"]);
+    expect(
+      await service.invoke<GitFileDiff>(CH.gitFileDiff, root, "new.txt", true),
+    ).toMatchObject({
+      original: "renamed content\n",
+      modified: "renamed content\n",
+      staged: true,
+    });
+
+    await fs.writeFile(path.join(root, "untracked.txt"), "new file\n", "utf8");
+    expect(
+      await service.invoke<GitFileDiff>(
+        CH.gitFileDiff,
+        root,
+        "untracked.txt",
+        false,
+      ),
+    ).toMatchObject({ original: "", modified: "new file\n", staged: false });
   });
 });

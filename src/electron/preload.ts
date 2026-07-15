@@ -3,6 +3,7 @@ import { CH } from "../shared/channels";
 import type { LogosAPI, Unsubscribe } from "../shared/api";
 import type {
   AgentAskResponse,
+  AgentAuthRequest,
   AgentEvent,
   AgentPermissionResponse,
   AgentStartRequest,
@@ -157,6 +158,8 @@ const api: LogosAPI = {
     createBranch: (root, name) =>
       ipcRenderer.invoke(CH.gitCreateBranch, root, name),
     diff: (root, p, staged) => ipcRenderer.invoke(CH.gitDiff, root, p, staged),
+    fileDiff: (root, p, staged) =>
+      ipcRenderer.invoke(CH.gitFileDiff, root, p, staged),
     log: (root, limit) => ipcRenderer.invoke(CH.gitLog, root, limit),
     init: (root) => ipcRenderer.invoke(CH.gitInit, root),
     fetch: (root) => ipcRenderer.invoke(CH.gitFetch, root),
@@ -198,12 +201,26 @@ const api: LogosAPI = {
   agent: {
     start: (req: AgentStartRequest) => ipcRenderer.invoke(CH.agentStart, req),
     interrupt: (sessionId) => ipcRenderer.invoke(CH.agentInterrupt, sessionId),
+    close: (sessionId) => ipcRenderer.invoke(CH.agentClose, sessionId),
     respondPermission: (res: AgentPermissionResponse) =>
       ipcRenderer.invoke(CH.agentRespondPermission, res),
     respondAsk: (res: AgentAskResponse) =>
       ipcRenderer.invoke(CH.agentRespondAsk, res),
     listModels: (ctx) => ipcRenderer.invoke(CH.agentListModels, ctx),
     listCommands: (ctx) => ipcRenderer.invoke(CH.agentListCommands, ctx),
+    setMode: (sessionId, modeId) =>
+      ipcRenderer.invoke(CH.agentSetMode, sessionId, modeId),
+    setModel: (sessionId, modelId) =>
+      ipcRenderer.invoke(CH.agentSetModel, sessionId, modelId),
+    setConfig: (request) => ipcRenderer.invoke(CH.agentSetConfig, request),
+    authenticate: (request: AgentAuthRequest) =>
+      ipcRenderer.invoke(CH.agentAuthenticate, request),
+    listProviders: (sessionId) =>
+      ipcRenderer.invoke(CH.agentListProviders, sessionId),
+    setProvider: (sessionId, config) =>
+      ipcRenderer.invoke(CH.agentSetProvider, sessionId, config),
+    disableProvider: (sessionId, providerId) =>
+      ipcRenderer.invoke(CH.agentDisableProvider, sessionId, providerId),
     onEvent: (cb) => on<AgentEvent>(CH.agentEvent, cb),
   },
   lsp: {

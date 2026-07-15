@@ -1,8 +1,11 @@
 import simpleGit, { type SimpleGit } from "simple-git";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { CH } from "../../shared/channels";
 import type {
   GitBranch,
   GitFileChange,
+  GitFileDiff,
   GitLogEntry,
   GitStatus,
 } from "../../shared/types";
@@ -38,6 +41,7 @@ async function status(root: string): Promise<GitStatus> {
     const working = f.working_dir || " ";
     return {
       path: f.path,
+      ...(f.from ? { originalPath: f.from } : {}),
       index,
       working,
       staged: index !== " " && f.index !== "?",
@@ -147,6 +151,39 @@ export function registerGitService(ctx: ServiceContext): () => void {
       staged
         ? git(root).diff(["--staged", "--", file])
         : git(root).diff(["--", file]),
+  );
+
+  ipcMain.handle(
+    CH.gitFileDiff,
+    async (
+      _e,
+      root: string,
+      file: string,
+      staged: boolean,
+    ): Promise<GitFileDiff> => {
+      const g = git(root);
+      const repositoryPath = file.replaceAll("\\", "/");
+      const statusEntry = (await g.status()).files.find(
+        (entry) => entry.path === file,
+      );
+      const originalRepositoryPath = (statusEntry?.from ?? file).replaceAll(
+        "\\",
+        "/",
+      );
+      const show = (revision: string) =>
+        g.raw(["show", `${revision}:${repositoryPath}`]).catch(() => "");
+      const showOriginal = (revision: string) =>
+        g.raw(["show", `${revision}:${originalRepositoryPath}`]).catch(() => "");
+      const original = staged
+        ? await showOriginal("HEAD")
+        : await g
+            .raw(["show", `:${repositoryPath}`])
+            .catch(() => showOriginal("HEAD"));
+      const modified = staged
+        ? await g.raw(["show", `:${repositoryPath}`]).catch(() => "")
+        : await fs.readFile(path.join(root, file), "utf8").catch(() => "");
+      return { path: file, staged, original, modified };
+    },
   );
 
   ipcMain.handle(

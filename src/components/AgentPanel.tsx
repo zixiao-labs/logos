@@ -1,10 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useStore, type AgentItem, type AgentSession } from "../state/store";
+import {
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Button, Chip, Disclosure, Switch } from "@heroui/react";
+import { useStore, type AgentItem, type AgentThread } from "../state/store";
 import { useT } from "../i18n";
 import { listWorkspaceFiles } from "../lib/workspaceFiles";
 import type {
   AgentEffortLevel,
   AgentModelInfo,
+  AgentPermissionOption,
+  AgentPlanEntry,
   AgentQuestion,
 } from "../shared/types";
 import { Icon } from "./Icon";
@@ -52,11 +61,47 @@ export function AgentPanel({
   const removeAgentSession = useStore((s) => s.removeAgentSession);
 
   const active = sessions.find((a) => a.id === activeAgentId) ?? sessions[0] ?? null;
+  const roots = sessions.filter((thread) => !thread.parentId);
+
+  const renderThread = (thread: AgentThread, depth = 0) => (
+    <div key={thread.id}>
+      <button
+        className={`agent-tab ${thread.id === active?.id ? "active" : ""}`}
+        style={{ paddingLeft: 8 + depth * 14 }}
+        onClick={() => setActiveAgent(thread.id)}
+      >
+        <Icon name={depth ? "branch" : "agent"} size={13} />
+        <span className="thread-name">{thread.name}</span>
+        {thread.status === "running" && <span className="dirty" />}
+        {thread.status === "waiting" && <span className="thread-waiting">?</span>}
+        <span
+          className="icon-btn"
+          style={{ width: 16, height: 16 }}
+          onClick={(event) => {
+            event.stopPropagation();
+            removeAgentSession(thread.id);
+          }}
+        >
+          <Icon name="close" size={11} />
+        </span>
+      </button>
+      {sessions
+        .filter((candidate) => candidate.parentId === thread.id)
+        .map((child) => renderThread(child, depth + 1))}
+    </div>
+  );
 
   return (
     <div className="agent">
       <div className="panel-header">
-        <span>{active?.name ?? t("agent.title")}</span>
+          <div className="thread-heading">
+            <span>{active?.name ?? t("agent.title")}</span>
+            {active && (
+              <Chip size="sm" variant="soft">
+                {active.runtimeName ?? active.runtimeId}
+              </Chip>
+            )}
+          </div>
         <div className="actions">
           <button
             className="icon-btn"
@@ -65,6 +110,15 @@ export function AgentPanel({
           >
             <Icon name="add" />
           </button>
+          {active && (
+            <button
+              className="icon-btn"
+              title={t("agent.newSubthread")}
+              onClick={() => newAgentSession(undefined, active.id, active.runtimeId)}
+            >
+              <Icon name="branch" />
+            </button>
+          )}
           {onClose && (
             <button className="icon-btn" onClick={onClose}>
               <Icon name="close" />
@@ -73,29 +127,9 @@ export function AgentPanel({
         </div>
       </div>
 
-      {!hideSessions && sessions.length > 1 && (
+      {!hideSessions && sessions.length > 0 && (
         <div className="agent-tabs">
-          {sessions.map((s) => (
-            <button
-              key={s.id}
-              className={`agent-tab ${s.id === active?.id ? "active" : ""}`}
-              onClick={() => setActiveAgent(s.id)}
-            >
-              <Icon name="agent" size={13} />
-              {s.name}
-              {s.status === "running" && <span className="dirty" />}
-              <span
-                className="icon-btn"
-                style={{ width: 16, height: 16 }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeAgentSession(s.id);
-                }}
-              >
-                <Icon name="close" size={11} />
-              </span>
-            </button>
-          ))}
+          {roots.map((thread) => renderThread(thread))}
         </div>
       )}
 
@@ -116,15 +150,16 @@ export function AgentPanel({
   );
 }
 
-function AgentConversation({ session }: { session: AgentSession }) {
+function AgentConversation({ session }: { session: AgentThread }) {
   const t = useT();
   const root = useStore((s) => s.root);
   const sendAgentPrompt = useStore((s) => s.sendAgentPrompt);
   const interruptAgent = useStore((s) => s.interruptAgent);
-  const agentCommands = useStore((s) => s.agentCommands);
+  const globalAgentCommands = useStore((s) => s.agentCommands);
   const loadAgentModels = useStore((s) => s.loadAgentModels);
   const loadAgentCommands = useStore((s) => s.loadAgentCommands);
   const logRef = useRef<HTMLDivElement>(null);
+  const timelineFollowing = useRef(true);
   const [text, setText] = useState("");
   const [files, setFiles] = useState<string[]>([]);
   const [mention, setMention] = useState<{ token: string } | null>(null);
@@ -136,13 +171,19 @@ function AgentConversation({ session }: { session: AgentSession }) {
 
   // D1/D4: probe the SDK for models + slash-commands once the panel is open.
   useEffect(() => {
-    void loadAgentModels();
-    void loadAgentCommands();
-  }, [loadAgentModels, loadAgentCommands]);
+    if (session.runtimeId === "claude") {
+      void loadAgentModels();
+      void loadAgentCommands();
+    }
+  }, [session.runtimeId, loadAgentModels, loadAgentCommands]);
 
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
-  }, [session.items, session.pendingAsk, session.pendingPermission]);
+    if (timelineFollowing.current) {
+      logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    }
+  }, [session.items, session.pendingAsk, session.pendingPermission, session.plan]);
+
+  const deferredText = useDeferredValue(text);
 
   const mentionMatches = useMemo(() => {
     if (!mention || !root) return [];
@@ -156,10 +197,15 @@ function AgentConversation({ session }: { session: AgentSession }) {
   const slashMatches = useMemo(() => {
     if (!slash) return [];
     const q = slash.token.toLowerCase();
-    return agentCommands
+    const commands = session.commands.length
+      ? session.commands
+      : session.runtimeId === "claude"
+        ? globalAgentCommands
+        : [];
+    return commands
       .filter((c) => c.name.toLowerCase().startsWith(q))
       .slice(0, 8);
-  }, [slash, agentCommands]);
+  }, [slash, globalAgentCommands, session.commands, session.runtimeId]);
 
   function onChange(value: string) {
     setText(value);
@@ -182,7 +228,7 @@ function AgentConversation({ session }: { session: AgentSession }) {
 
   function send() {
     const value = text.trim();
-    if (!value || session.status === "running") return;
+    if (!value || session.status !== "idle") return;
     void sendAgentPrompt(value);
     setText("");
     setMention(null);
@@ -195,21 +241,36 @@ function AgentConversation({ session }: { session: AgentSession }) {
 
   return (
     <>
-      <div className="agent-log" ref={logRef}>
+      <div
+        className="agent-log"
+        ref={logRef}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          timelineFollowing.current =
+            element.scrollHeight - element.scrollTop - element.clientHeight < 72;
+        }}
+      >
         {session.items.length === 0 && !session.pendingAsk && (
           <div className="agent-empty">
             <h3>{t("agent.emptyTitle")}</h3>
             <p>{t("agent.emptyBody")}</p>
           </div>
         )}
-        {session.items.map((item) => (
-          <AgentItemView key={item.id} item={item} />
+        {session.plan.length > 0 && <PlanCard entries={session.plan} />}
+        {session.items
+          .filter(
+            (item) =>
+              !("parentToolUseId" in item) || item.parentToolUseId == null,
+          )
+          .map((item) => (
+          <AgentItemView key={item.id} item={item} allItems={session.items} />
         ))}
         {session.pendingPermission && (
           <PermissionCard
             requestId={session.pendingPermission.requestId}
             toolName={session.pendingPermission.toolName}
             input={session.pendingPermission.input}
+            options={session.pendingPermission.options}
           />
         )}
         {session.pendingAsk && (
@@ -217,6 +278,12 @@ function AgentConversation({ session }: { session: AgentSession }) {
             requestId={session.pendingAsk.requestId}
             questions={session.pendingAsk.questions}
           />
+        )}
+        {session.status === "waiting" &&
+          !session.pendingAsk &&
+          !session.pendingPermission &&
+          session.authMethods.length > 0 && (
+          <AuthCard thread={session} />
         )}
         {session.status === "running" && !session.pendingAsk && (
           <div className="agent-result">{t("agent.running")}</div>
@@ -266,13 +333,17 @@ function AgentConversation({ session }: { session: AgentSession }) {
             }}
           />
           <div className="agent-input-row">
-            <AgentControls />
-            {session.status === "running" ? (
+            <AgentControls session={session} />
+            {session.status !== "idle" ? (
               <button className="send-btn stop" onClick={() => void interruptAgent()}>
                 <Icon name="stop" size={13} /> {t("agent.stop")}
               </button>
             ) : (
-              <button className="send-btn" onClick={send} disabled={!text.trim()}>
+              <button
+                className="send-btn"
+                onClick={send}
+                disabled={!deferredText.trim() || session.status !== "idle"}
+              >
                 <Icon name="send" size={13} /> {t("agent.send")}
               </button>
             )}
@@ -283,15 +354,27 @@ function AgentConversation({ session }: { session: AgentSession }) {
   );
 }
 
-/** D1–D3: compact model / effort / thinking / permission controls. */
-function AgentControls() {
+/** Runtime capabilities are projected into one compact Thread toolbar. */
+function AgentControls({ session }: { session: AgentThread }) {
   const t = useT();
   const settings = useStore((s) => s.settings);
   const setSetting = useStore((s) => s.setSetting);
+  const setAgentRuntime = useStore((s) => s.setAgentRuntime);
+  const setAgentMode = useStore((s) => s.setAgentMode);
+  const setAgentModel = useStore((s) => s.setAgentModel);
+  const setAgentConfig = useStore((s) => s.setAgentConfig);
+  const toggleAgentFollow = useStore((s) => s.toggleAgentFollow);
   const liveModels = useStore((s) => s.agentModels);
 
-  const models = liveModels.length ? liveModels : STATIC_MODELS;
-  const model = settings["agent.model"];
+  const models =
+    session.runtimeId === "claude"
+      ? session.models.length
+        ? session.models
+        : liveModels.length
+          ? liveModels
+          : STATIC_MODELS
+      : session.models;
+  const model = session.currentModelId ?? settings["agent.model"];
   const selected = models.find((m) => m.value === model);
   // Default (no model) => all effort levels; a specific model => its own.
   const effortLevels = model
@@ -303,20 +386,102 @@ function AgentControls() {
   return (
     <div className="agent-controls">
       <select
-        className="agent-mini"
-        title={t("agent.model")}
-        value={model}
-        onChange={(e) => void setSetting("agent.model", e.target.value)}
+        className="agent-mini runtime"
+        title={t("agent.runtime")}
+        value={session.runtimeId}
+        disabled={Boolean(session.sdkSessionId) || session.items.length > 0}
+        onChange={(event) => setAgentRuntime(session.id, event.target.value)}
       >
-        <option value="">{t("agent.modelDefault")}</option>
-        {models.map((m) => (
-          <option key={m.value} value={m.value}>
-            {m.displayName}
+        <option value="claude">Claude</option>
+        {settings["agent.acpServers"].map((server) => (
+          <option key={server.id} value={server.id}>
+            {server.name} (ACP)
           </option>
         ))}
       </select>
 
-      {effortLevels.length > 0 && (
+      {(session.runtimeId === "claude" || models.length > 0) && (
+        <select
+          className="agent-mini"
+          title={t("agent.model")}
+          value={model}
+          onChange={(event) =>
+            session.runtimeId === "claude" && !session.sdkSessionId
+              ? void setSetting("agent.model", event.target.value)
+              : void setAgentModel(session.id, event.target.value)
+          }
+        >
+          <option value="">{t("agent.modelDefault")}</option>
+          {models.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.displayName}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {(session.modes.length > 0 || session.runtimeId === "claude") && (
+        <select
+          className={`agent-mini ${session.modeId === "plan" ? "plan" : ""}`}
+          title={t("agent.mode")}
+          value={session.modeId ?? "default"}
+          onChange={(event) =>
+            void setAgentMode(session.id, event.target.value)
+          }
+        >
+          {(session.modes.length
+            ? session.modes
+            : [
+                { id: "default", name: t("agent.buildMode") },
+                { id: "plan", name: t("agent.planMode") },
+                { id: "acceptEdits", name: "Accept edits" },
+              ]
+          ).map((mode) => (
+            <option key={mode.id} value={mode.id}>
+              {mode.name}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {session.configOptions.map((option) =>
+        option.type === "select" ? (
+          <select
+            key={option.id}
+            className="agent-mini"
+            title={option.description ?? option.name}
+            value={option.currentValue}
+            onChange={(event) =>
+              void setAgentConfig(session.id, option.id, event.target.value)
+            }
+          >
+            {option.options.map((value) => (
+              <option key={value.value} value={value.value}>
+                {value.group ? `${value.group}: ` : ""}
+                {value.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <Switch
+            key={option.id}
+            aria-label={option.name}
+            isSelected={option.currentValue}
+            size="sm"
+            onChange={(value) =>
+              void setAgentConfig(session.id, option.id, value)
+            }
+          >
+            <Switch.Content>
+              <Switch.Control>
+                <Switch.Thumb />
+              </Switch.Control>
+            </Switch.Content>
+          </Switch>
+        ),
+      )}
+
+      {session.runtimeId === "claude" && effortLevels.length > 0 && (
         <select
           className="agent-mini"
           title={t("agent.effort")}
@@ -337,38 +502,36 @@ function AgentControls() {
         </select>
       )}
 
-      <select
-        className="agent-mini"
-        title={t("agent.thinking")}
-        value={settings["agent.thinking"]}
-        onChange={(e) =>
-          void setSetting(
-            "agent.thinking",
-            e.target.value as typeof settings["agent.thinking"],
-          )
-        }
-      >
-        <option value="adaptive">{t("agent.thinkingAdaptive")}</option>
-        <option value="enabled">{t("agent.thinkingOn")}</option>
-        <option value="disabled">{t("agent.thinkingOff")}</option>
-      </select>
+      {session.runtimeId === "claude" && (
+        <select
+          className="agent-mini"
+          title={t("agent.thinking")}
+          value={settings["agent.thinking"]}
+          onChange={(e) =>
+            void setSetting(
+              "agent.thinking",
+              e.target.value as typeof settings["agent.thinking"],
+            )
+          }
+        >
+          <option value="adaptive">{t("agent.thinkingAdaptive")}</option>
+          <option value="enabled">{t("agent.thinkingOn")}</option>
+          <option value="disabled">{t("agent.thinkingOff")}</option>
+        </select>
+      )}
 
-      <select
-        className="agent-mini"
-        title={t("settings.agentPermission")}
-        value={settings["agent.permissionMode"]}
-        onChange={(e) =>
-          void setSetting(
-            "agent.permissionMode",
-            e.target.value as typeof settings["agent.permissionMode"],
-          )
+      <Button
+        isIconOnly
+        aria-label={
+          session.followMode ? t("agent.followOn") : t("agent.followOff")
         }
+        className={`agent-follow ${session.followMode ? "active" : ""}`}
+        size="sm"
+        variant="ghost"
+        onPress={() => toggleAgentFollow(session.id)}
       >
-        <option value="default">{t("agent.permDefault")}</option>
-        <option value="acceptEdits">acceptEdits</option>
-        <option value="plan">plan</option>
-        <option value="bypassPermissions">bypass</option>
-      </select>
+        <Icon name="preview" size={12} />
+      </Button>
     </div>
   );
 }
@@ -380,7 +543,78 @@ function isAuthError(message: string): boolean {
   );
 }
 
-function AgentItemView({ item }: { item: AgentItem }) {
+function PlanCard({ entries }: { entries: AgentPlanEntry[] }) {
+  const completed = entries.filter((entry) => entry.status === "completed").length;
+  return (
+    <Disclosure defaultExpanded>
+      <Disclosure.Heading>
+        <Disclosure.Trigger className="plan-head">
+          <Icon name="check" size={13} />
+          <span>Plan</span>
+          <span className="plan-count">
+            {completed}/{entries.length}
+          </span>
+          <Disclosure.Indicator />
+        </Disclosure.Trigger>
+      </Disclosure.Heading>
+      <Disclosure.Content>
+        <Disclosure.Body className="plan-body">
+          {entries.map((entry, index) => (
+            <div key={`${index}:${entry.content}`} className={`plan-row ${entry.status}`}>
+              <span className="plan-mark">
+                {entry.status === "completed"
+                  ? "✓"
+                  : entry.status === "in_progress"
+                    ? "●"
+                    : "○"}
+              </span>
+              <span>{entry.content}</span>
+              {entry.priority === "high" && (
+                <Chip color="warning" size="sm" variant="soft">
+                  high
+                </Chip>
+              )}
+            </div>
+          ))}
+        </Disclosure.Body>
+      </Disclosure.Content>
+    </Disclosure>
+  );
+}
+
+function AuthCard({ thread }: { thread: AgentThread }) {
+  const t = useT();
+  const authenticateAgent = useStore((state) => state.authenticateAgent);
+  const openSpecial = useStore((state) => state.openSpecial);
+  return (
+    <div className="auth-card">
+      <div className="auth-title">{t("agent.authRequired")}</div>
+      {thread.authMethods.map((method) => (
+        <Button
+          key={method.id}
+          size="sm"
+          variant="secondary"
+          onPress={() =>
+            method.type === "env_var"
+              ? openSpecial("settings")
+              : void authenticateAgent(thread.id, method.id)
+          }
+        >
+          <Icon name={method.type === "terminal" ? "terminal" : "globe"} size={13} />
+          {method.name}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function AgentItemView({
+  item,
+  allItems,
+}: {
+  item: AgentItem;
+  allItems: AgentItem[];
+}) {
   const [open, setOpen] = useState(false);
   const openSpecial = useStore((s) => s.openSpecial);
   const t = useT();
@@ -389,7 +623,7 @@ function AgentItemView({ item }: { item: AgentItem }) {
       return <div className="msg user">{item.text}</div>;
     case "assistant":
       return (
-        <div>
+        <div className={item.parentToolUseId ? "nested-agent-message" : undefined}>
           {item.thinking && (
             <div className="msg thinking">{item.thinking}</div>
           )}
@@ -397,6 +631,11 @@ function AgentItemView({ item }: { item: AgentItem }) {
         </div>
       );
     case "tool":
+      const nested = allItems.filter(
+        (candidate) =>
+          "parentToolUseId" in candidate &&
+          candidate.parentToolUseId === item.toolUseId,
+      );
       return (
         <div className={`tool-call ${item.isError ? "error" : ""}`}>
           <div
@@ -406,6 +645,21 @@ function AgentItemView({ item }: { item: AgentItem }) {
           >
             <Icon name={item.isError ? "error" : "terminal"} size={13} />
             {item.name}
+            {item.status && (
+              <Chip
+                color={
+                  item.status === "failed"
+                    ? "danger"
+                    : item.status === "completed"
+                      ? "success"
+                      : "default"
+                }
+                size="sm"
+                variant="soft"
+              >
+                {item.status}
+              </Chip>
+            )}
             <span style={{ flex: 1 }} />
             <Icon name={open ? "chevron-down" : "chevron-right"} size={13} />
           </div>
@@ -418,8 +672,50 @@ function AgentItemView({ item }: { item: AgentItem }) {
                   {item.result.slice(0, 4000)}
                 </>
               )}
+              {item.diffs?.map((diff) => (
+                <div key={diff.path} className="agent-tool-diff">
+                  <strong>{diff.path}</strong>
+                  <span>
+                    -{diff.oldText.split("\n").length} +{diff.newText.split("\n").length}
+                  </span>
+                </div>
+              ))}
+              {nested.length > 0 && (
+                <div className="subagent-transcript">
+                  {nested.map((candidate) => (
+                    <AgentItemView
+                      key={candidate.id}
+                      item={candidate}
+                      allItems={allItems}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
+        </div>
+      );
+    case "subagent":
+      return (
+        <div className="subagent-card">
+          <Icon name="branch" size={13} />
+          <div className="subagent-copy">
+            <strong>{item.agentType ?? t("agent.subagent")}</strong>
+            <span>{item.summary ?? item.description}</span>
+          </div>
+          <Chip
+            color={
+              item.status === "failed"
+                ? "danger"
+                : item.status === "completed"
+                  ? "success"
+                  : "accent"
+            }
+            size="sm"
+            variant="soft"
+          >
+            {item.status}
+          </Chip>
         </div>
       );
     case "result":
@@ -455,10 +751,12 @@ function PermissionCard({
   requestId,
   toolName,
   input,
+  options,
 }: {
   requestId: string;
   toolName: string;
   input: unknown;
+  options?: AgentPermissionOption[];
 }) {
   const t = useT();
   const respondPermission = useStore((s) => s.respondPermission);
@@ -492,21 +790,42 @@ function PermissionCard({
         {String(summary).slice(0, 500)}
       </div>
       <div className="perm-actions">
-        <button
-          className="btn"
-          onClick={() => void respondPermission(requestId, "allow")}
-        >
-          {t("agent.allow")}
-        </button>
-        <button className="btn secondary" onClick={alwaysAllow}>
-          {t("agent.alwaysAllow")}
-        </button>
-        <button
-          className="btn ghost"
-          onClick={() => void respondPermission(requestId, "deny")}
-        >
-          {t("agent.deny")}
-        </button>
+        {options?.length ? (
+          options.map((option) => (
+            <Button
+              key={option.id}
+              size="sm"
+              variant={option.kind.startsWith("reject") ? "tertiary" : "secondary"}
+              onPress={() =>
+                void respondPermission(
+                  requestId,
+                  option.kind.startsWith("allow") ? "allow" : "deny",
+                  option.id,
+                )
+              }
+            >
+              {option.name}
+            </Button>
+          ))
+        ) : (
+          <>
+            <button
+              className="btn"
+              onClick={() => void respondPermission(requestId, "allow")}
+            >
+              {t("agent.allow")}
+            </button>
+            <button className="btn secondary" onClick={alwaysAllow}>
+              {t("agent.alwaysAllow")}
+            </button>
+            <button
+              className="btn ghost"
+              onClick={() => void respondPermission(requestId, "deny")}
+            >
+              {t("agent.deny")}
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -523,26 +842,37 @@ function AskCard({
   const t = useT();
   const answerAsk = useStore((s) => s.answerAsk);
   // answers[i] holds either a label, an array of labels (multiSelect), or free text.
-  const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
+  const [answers, setAnswers] = useState<
+    Record<number, string | string[] | number | boolean>
+  >(() =>
+    Object.fromEntries(
+      questions.flatMap((question, index) =>
+        question.defaultValue === undefined
+          ? []
+          : [[index, question.defaultValue]],
+      ),
+    ),
+  );
   const [other, setOther] = useState<Record<number, string>>({});
 
-  function selectOption(qi: number, label: string, multi: boolean) {
+  function selectOption(qi: number, value: string, multi: boolean) {
     setAnswers((prev) => {
-      if (!multi) return { ...prev, [qi]: label };
+      if (!multi) return { ...prev, [qi]: value };
       const cur = Array.isArray(prev[qi]) ? (prev[qi] as string[]) : [];
-      const next = cur.includes(label)
-        ? cur.filter((l) => l !== label)
-        : [...cur, label];
+      const next = cur.includes(value)
+        ? cur.filter((item) => item !== value)
+        : [...cur, value];
       return { ...prev, [qi]: next };
     });
   }
 
-  function isSelected(qi: number, label: string): boolean {
+  function isSelected(qi: number, value: string): boolean {
     const a = answers[qi];
-    return Array.isArray(a) ? a.includes(label) : a === label;
+    return Array.isArray(a) ? a.includes(value) : a === value;
   }
 
-  const complete = questions.every((_q, i) => {
+  const complete = questions.every((question, i) => {
+    if (!question.required || question.type === "url") return true;
     const a = answers[i];
     const hasOther = (other[i] ?? "").trim().length > 0;
     if (Array.isArray(a)) return a.length > 0 || hasOther;
@@ -550,16 +880,17 @@ function AskCard({
   });
 
   function submit() {
-    const map: Record<string, string | string[]> = {};
+    const map: Record<string, string | string[] | number | boolean> = {};
     questions.forEach((q, i) => {
       const otherText = (other[i] ?? "").trim();
       let value = answers[i];
+      if (!q.required && value == null && !otherText) return;
       if (Array.isArray(value)) {
         value = otherText ? [...value, otherText] : value;
-      } else if (otherText) {
+      } else if (otherText && q.options.length > 0) {
         value = otherText;
       }
-      map[q.question] = value ?? otherText;
+      if (value != null && value !== "") map[q.id ?? q.question] = value;
     });
     void answerAsk(requestId, map);
   }
@@ -570,27 +901,74 @@ function AskCard({
         <div key={qi} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div className="ask-header">{q.header}</div>
           <div className="ask-q">{q.question}</div>
+          {q.type === "url" && q.url && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onPress={() => {
+                void window.logos.app.openExternal(q.url!);
+                setAnswers((previous) => ({ ...previous, [qi]: q.url! }));
+              }}
+            >
+              <Icon name="globe" size={13} /> {t("agent.openBrowser")}
+            </Button>
+          )}
+          {q.type === "boolean" && (
+            <div className="ask-boolean">
+              {[true, false].map((value) => (
+                <button
+                  key={String(value)}
+                  className={`ask-opt ${answers[qi] === value ? "selected" : ""}`}
+                  onClick={() =>
+                    setAnswers((previous) => ({ ...previous, [qi]: value }))
+                  }
+                >
+                  {value ? t("agent.yes") : t("agent.no")}
+                </button>
+              ))}
+            </div>
+          )}
           {q.options.map((opt) => (
             <button
               key={opt.label}
-              className={`ask-opt ${isSelected(qi, opt.label) ? "selected" : ""}`}
-              onClick={() => selectOption(qi, opt.label, q.multiSelect)}
+              className={`ask-opt ${isSelected(qi, opt.value ?? opt.label) ? "selected" : ""}`}
+              onClick={() =>
+                selectOption(qi, opt.value ?? opt.label, q.multiSelect)
+              }
             >
               <span className="label">{opt.label}</span>
               <span className="desc">{opt.description}</span>
               {opt.preview && <div className="ask-preview">{opt.preview}</div>}
             </button>
           ))}
-          <input
-            className="field"
-            placeholder="Other…"
-            value={other[qi] ?? ""}
-            onChange={(e) => setOther((p) => ({ ...p, [qi]: e.target.value }))}
-          />
+          {q.type !== "url" && q.type !== "boolean" && q.allowCustom !== false && (
+            <input
+              className="field"
+              type={q.type === "number" ? "number" : "text"}
+              placeholder={q.options.length ? "Other…" : t("agent.answer")}
+              value={other[qi] ?? ""}
+              onChange={(event) => {
+                const value = event.target.value;
+                setOther((previous) => ({ ...previous, [qi]: value }));
+                if (!q.options.length) {
+                  setAnswers((previous) => ({
+                    ...previous,
+                    [qi]: q.type === "number" && value !== "" ? Number(value) : value,
+                  }));
+                }
+              }}
+            />
+          )}
         </div>
       ))}
       <button className="btn" disabled={!complete} onClick={submit}>
         {t("common.confirm")}
+      </button>
+      <button
+        className="btn ghost"
+        onClick={() => void answerAsk(requestId, {}, undefined, "cancel")}
+      >
+        {t("common.cancel")}
       </button>
     </div>
   );

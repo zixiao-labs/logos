@@ -18,6 +18,106 @@ import type { DebugBreakpointState } from "../shared/dap";
 const baselines = new Map<string, string>();
 const EMPTY_DEBUG_BREAKPOINTS: DebugBreakpointState[] = [];
 let themesDefined = false;
+let fileSyncSetup = false;
+
+/** Keep open Monaco models coherent with agent and external filesystem writes. */
+export function setupMonacoFileSync(): void {
+  if (fileSyncSetup) return;
+  fileSyncSetup = true;
+  window.logos.fs.onWatchEvent((event) => {
+    const model = monaco.editor.getModel(monaco.Uri.file(event.path));
+    if (!model) return;
+    const tabId = `file:${event.path}`;
+    if (event.type === "delete") {
+      useStore.setState((state) => ({
+        tabs: state.tabs.map((item) =>
+          item.id === tabId ? { ...item, externalChange: "deleted" } : item,
+        ),
+      }));
+      return;
+    }
+    void window.logos.fs
+      .readFile(event.path)
+      .then((content) => {
+        if (model.getValue() === content) {
+          baselines.set(event.path, content);
+          useStore.setState((state) => ({
+            tabs: state.tabs.map((item) =>
+              item.id === tabId
+                ? { ...item, dirty: false, externalChange: undefined }
+                : item,
+            ),
+          }));
+          return;
+        }
+        const current = useStore.getState().tabs.find((item) => item.id === tabId);
+        if (current?.dirty) {
+          useStore.setState((state) => ({
+            tabs: state.tabs.map((item) =>
+              item.id === tabId ? { ...item, externalChange: "changed" } : item,
+            ),
+          }));
+          return;
+        }
+        baselines.set(event.path, content);
+        model.setValue(content);
+        useStore.setState((state) => ({
+          tabs: state.tabs.map((item) =>
+            item.id === tabId
+              ? { ...item, dirty: false, externalChange: undefined }
+              : item,
+          ),
+        }));
+      })
+      .catch(() => undefined);
+  });
+}
+
+export async function reloadFileFromDisk(path: string): Promise<void> {
+  const content = await window.logos.fs.readFile(path);
+  const model = monaco.editor.getModel(monaco.Uri.file(path));
+  baselines.set(path, content);
+  model?.setValue(content);
+  useStore.setState((state) => ({
+    tabs: state.tabs.map((item) =>
+      item.id === `file:${path}`
+        ? { ...item, dirty: false, externalChange: undefined }
+        : item,
+    ),
+  }));
+}
+
+async function confirmExternalOverwrite(path: string): Promise<boolean> {
+  const externalChange = useStore
+    .getState()
+    .tabs.find((item) => item.id === `file:${path}`)?.externalChange;
+  if (!externalChange) return true;
+  const overwriteTitle = externalChange === "deleted" ? "Recreate" : "Overwrite";
+  const choice = await new Promise<{ title: string } | null>((resolve) => {
+    window.dispatchEvent(
+      new CustomEvent("logos:lsp-message-request", {
+        detail: {
+          type: 2,
+          message:
+            externalChange === "deleted"
+              ? `${path} was deleted outside Logos. Recreate it with your editor contents?`
+              : `${path} changed on disk. Overwrite the external changes?`,
+          actions: [
+            { title: overwriteTitle },
+            ...(externalChange === "changed" ? [{ title: "Reload" }] : []),
+            { title: "Cancel" },
+          ],
+          resolve,
+        },
+      }),
+    );
+  });
+  if (choice?.title === "Reload") {
+    await reloadFileFromDisk(path);
+    return false;
+  }
+  return choice?.title === overwriteTitle;
+}
 
 function defineThemes() {
   if (themesDefined) return;
@@ -345,11 +445,17 @@ async function saveCurrent(
   const model = editor.getModel();
   if (!model) return;
   const p = model.uri.fsPath;
+  if (!(await confirmExternalOverwrite(p))) return;
   await lspWillSaveDoc(p, model.getLanguageId());
   const content = model.getValue();
   await window.logos.fs.writeFile(p, content);
   baselines.set(p, content);
   setDirty(`file:${p}`, false);
+  useStore.setState((state) => ({
+    tabs: state.tabs.map((item) =>
+      item.id === `file:${p}` ? { ...item, externalChange: undefined } : item,
+    ),
+  }));
   // F1: tell the language server the document was saved (save-time linting).
   lspSaveDoc(p, model.getLanguageId(), content);
 }
@@ -455,11 +561,19 @@ export async function closeFileEditor(path: string, dirty: boolean) {
     if (!choice) return false;
     if (choice.title === "Save" && model) {
       try {
+        if (!(await confirmExternalOverwrite(path))) return false;
         await lspWillSaveDoc(path, model.getLanguageId());
         const content = model.getValue();
         await window.logos.fs.writeFile(path, content);
         baselines.set(path, content);
         useStore.getState().setDirty(`file:${path}`, false);
+        useStore.setState((state) => ({
+          tabs: state.tabs.map((item) =>
+            item.id === `file:${path}`
+              ? { ...item, externalChange: undefined }
+              : item,
+          ),
+        }));
         lspSaveDoc(path, model.getLanguageId(), content);
       } catch {
         return false;
