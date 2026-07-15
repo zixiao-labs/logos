@@ -17,6 +17,10 @@ The previous version is archived at [logos-classic](https://github.com/zixiao-la
 
 Current status: Actively developing
 
+## Documentation
+
+- [Debugging with `launch.json`](docs/debugging/launch-json.md), including VS Code compatibility and an AI generation prompt
+
 ## Development
 
 ```sh
