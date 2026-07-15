@@ -22,6 +22,17 @@ the operating system's per-user Logos data directory. They are not stored in
 `agent.openaiBaseUrl` applies only to API-key requests. ChatGPT subscription requests
 use the Codex Responses endpoint selected by the OAuth transport.
 
+## OpenAI Models
+
+The built-in runtime defaults to `gpt-5.6-sol` and also exposes the GPT-5.6 Terra
+and Luna tiers. Each tier supports `none`, `low`, `medium`, `high`, `xhigh`, and
+`max` reasoning effort. With Auto selected, GPT-5.6 uses medium effort.
+
+Each GPT-5.6 tier has a Fast mode that requests priority processing. Pro mode uses
+OpenAI's Pro reasoning mode and is available with API-key authentication; the ChatGPT
+Codex endpoint does not support Pro mode or the bare `gpt-5.6` alias. Logos therefore
+uses the explicit `gpt-5.6-sol` model ID as its cross-authentication default.
+
 ## Workspace Tools
 
 The Logos runtime provides `read_file`, `list_directory`, `search`, `write_file`, and

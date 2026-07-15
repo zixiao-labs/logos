@@ -22,7 +22,10 @@ function responseStream(events: unknown[], lineEnding = "\n"): Response {
   );
 }
 
-function request(cwd: string): AgentStartRequest {
+function request(
+  cwd: string,
+  overrides: Partial<AgentStartRequest> = {},
+): AgentStartRequest {
   return {
     sessionId: "thread-1",
     prompt: "",
@@ -30,15 +33,22 @@ function request(cwd: string): AgentStartRequest {
     model: "gpt-test",
     permissionMode: "default",
     runtime: { type: "logos" },
+    ...overrides,
   };
 }
 
-function fakeAuth(type: "none" | "api-key" = "api-key"): OpenAIAuthStore {
+function fakeAuth(
+  type: "none" | "api-key" | "chatgpt" = "api-key",
+): OpenAIAuthStore {
   return {
-    status: async () => ({ type }),
+    status: async () =>
+      type === "none" ? { type } : { type, label: type },
     requestAuth: async () => ({
-      type: "api-key",
-      url: "https://api.openai.test/v1/responses",
+      type: type === "chatgpt" ? "chatgpt" : "api-key",
+      url:
+        type === "chatgpt"
+          ? "https://chatgpt.test/codex/responses"
+          : "https://api.openai.test/v1/responses",
       headers: { Authorization: "Bearer test" },
     }),
     loginChatGPT: async () => ({ type: "chatgpt" }),
@@ -88,6 +98,88 @@ describe("Logos agent runtime", () => {
       ],
     });
     expect(events.some((event) => event.kind === "result")).toBe(false);
+  });
+
+  it("advertises GPT-5.6 models with an OAuth-compatible default", async () => {
+    await LogosAgentRuntime.create(
+      request(root, { model: "gpt-5.6-sol-pro" }),
+      hooks,
+      fakeAuth("chatgpt"),
+      sessionsDir,
+    );
+
+    const ready = events.find((event) => event.kind === "runtime-ready");
+    expect(ready).toMatchObject({
+      kind: "runtime-ready",
+      currentModelId: "gpt-5.6-sol",
+    });
+    if (ready?.kind !== "runtime-ready") throw new Error("Missing runtime-ready event");
+    expect(ready.models.some((model) => model.value === "gpt-5.6-sol")).toBe(true);
+    expect(ready.models.some((model) => model.value === "gpt-5.6")).toBe(false);
+    expect(ready.models.some((model) => model.value === "gpt-5.6-terra-fast")).toBe(
+      true,
+    );
+    expect(ready.models.some((model) => model.value.endsWith("-pro"))).toBe(false);
+  });
+
+  it("maps GPT-5.6 modes and efforts to Responses API fields", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: `response-${bodies.length}`, output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+
+    const pro = await LogosAgentRuntime.create(
+      request(root, { model: "gpt-5.6-sol-pro", effort: "max" }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+    await pro.prompt("use pro reasoning");
+
+    const fast = await LogosAgentRuntime.create(
+      request(root, { model: "gpt-5.6-terra-fast", effort: "none" }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+    await fast.prompt("use priority processing");
+
+    const legacy = await LogosAgentRuntime.create(
+      request(root, { model: "gpt-5.5", effort: "max" }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+    await legacy.prompt("use a legacy model");
+
+    fast.setEffort(undefined);
+    await fast.prompt("use the default effort");
+
+    expect(bodies[0]).toMatchObject({
+      model: "gpt-5.6-sol",
+      reasoning: { effort: "max", mode: "pro", summary: "auto" },
+      text: { verbosity: "low" },
+    });
+    expect(typeof bodies[0]?.prompt_cache_key).toBe("string");
+    expect(bodies[1]).toMatchObject({
+      model: "gpt-5.6-terra",
+      service_tier: "priority",
+      reasoning: { effort: "none", summary: "auto" },
+    });
+    expect(bodies[2]).toMatchObject({
+      model: "gpt-5.5",
+      reasoning: { effort: "high", summary: "auto" },
+    });
+    expect(bodies[3]).toMatchObject({
+      model: "gpt-5.6-terra",
+      reasoning: { effort: "medium", summary: "auto" },
+    });
   });
 
   it("streams text, emits debug trace, and persists a resumable session", async () => {

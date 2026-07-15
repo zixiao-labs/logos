@@ -67,6 +67,7 @@ describe("settings service", () => {
     const settings = await service.invoke<Settings>(CH.settingsGetAll);
     expect(settings["editor.fontSize"]).toBe(18);
     expect(settings["workbench.theme"]).toBe(DEFAULT_SETTINGS["workbench.theme"]);
+    expect(settings["agent.logosModel"]).toBe("gpt-5.6-sol");
   });
 
   it("persists patches, broadcasts changes, and resets to defaults", async () => {

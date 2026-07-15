@@ -166,8 +166,14 @@ export type AgentPermissionMode =
   | "bypassPermissions"
   | "plan";
 
-/** Reasoning effort levels the SDK accepts (maps 1:1 to the SDK `EffortLevel`). */
-export type AgentEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+/** Reasoning effort levels exposed by the built-in model runtimes. */
+export type AgentEffortLevel =
+  | "none"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 /** Effort setting value; "" means "defer to the model default". */
 export type AgentEffortSetting = "" | AgentEffortLevel;
 /** Extended-thinking mode exposed in settings/UI. */

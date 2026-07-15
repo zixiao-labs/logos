@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Button, Card } from "@heroui/react";
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
+import { DEFAULT_LOGOS_MODEL } from "../shared/logos-agent";
 import type { AcpAgentConfig, Settings } from "../shared/types";
 
 function Switch({
@@ -458,7 +459,7 @@ export function SettingsView() {
             <input
               className="field"
               value={settings["agent.logosModel"]}
-              placeholder="gpt-5.4"
+              placeholder={DEFAULT_LOGOS_MODEL}
               spellCheck={false}
               onChange={(event) => set("agent.logosModel", event.target.value)}
             />
@@ -530,6 +531,7 @@ export function SettingsView() {
               }
             >
               <option value="">{t("agent.effortAuto")}</option>
+              <option value="none">none</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>

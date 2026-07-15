@@ -1,4 +1,182 @@
-import type { AgentPermissionMode } from "./types";
+import type {
+  AgentEffortLevel,
+  AgentModelInfo,
+  AgentPermissionMode,
+} from "./types";
+
+export const DEFAULT_LOGOS_MODEL = "gpt-5.6-sol";
+
+const GPT_56_EFFORT_LEVELS: AgentEffortLevel[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+const GPT_54_EFFORT_LEVELS: AgentEffortLevel[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+const CODEX_SPARK_EFFORT_LEVELS: AgentEffortLevel[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+
+function gpt56Model(
+  value: string,
+  displayName: string,
+  description: string,
+): AgentModelInfo {
+  return {
+    value,
+    displayName,
+    description,
+    supportsEffort: true,
+    supportedEffortLevels: [...GPT_56_EFFORT_LEVELS],
+  };
+}
+
+export const LOGOS_OPENAI_MODELS: readonly AgentModelInfo[] = [
+  gpt56Model(
+    "gpt-5.6",
+    "GPT-5.6",
+    "Sol alias for direct OpenAI API access",
+  ),
+  gpt56Model(
+    "gpt-5.6-fast",
+    "GPT-5.6 Fast",
+    "Sol alias with priority processing",
+  ),
+  gpt56Model(
+    "gpt-5.6-pro",
+    "GPT-5.6 Pro",
+    "Sol alias with Pro reasoning (API key only)",
+  ),
+  gpt56Model(
+    "gpt-5.6-sol",
+    "GPT-5.6 Sol",
+    "Frontier model for complex coding and agentic work",
+  ),
+  gpt56Model(
+    "gpt-5.6-sol-fast",
+    "GPT-5.6 Sol Fast",
+    "Sol with priority processing",
+  ),
+  gpt56Model(
+    "gpt-5.6-sol-pro",
+    "GPT-5.6 Sol Pro",
+    "Sol with Pro reasoning (API key only)",
+  ),
+  gpt56Model(
+    "gpt-5.6-terra",
+    "GPT-5.6 Terra",
+    "Balanced capability and cost",
+  ),
+  gpt56Model(
+    "gpt-5.6-terra-fast",
+    "GPT-5.6 Terra Fast",
+    "Terra with priority processing",
+  ),
+  gpt56Model(
+    "gpt-5.6-terra-pro",
+    "GPT-5.6 Terra Pro",
+    "Terra with Pro reasoning (API key only)",
+  ),
+  gpt56Model(
+    "gpt-5.6-luna",
+    "GPT-5.6 Luna",
+    "Fast, cost-efficient model for high-volume work",
+  ),
+  gpt56Model(
+    "gpt-5.6-luna-fast",
+    "GPT-5.6 Luna Fast",
+    "Luna with priority processing",
+  ),
+  gpt56Model(
+    "gpt-5.6-luna-pro",
+    "GPT-5.6 Luna Pro",
+    "Luna with Pro reasoning (API key only)",
+  ),
+  {
+    value: "gpt-5.5",
+    displayName: "GPT-5.5",
+    description: "Previous frontier model",
+    supportsEffort: true,
+    supportedEffortLevels: [...GPT_54_EFFORT_LEVELS],
+  },
+  {
+    value: "gpt-5.4",
+    displayName: "GPT-5.4",
+    description: "Balanced coding model",
+    supportsEffort: true,
+    supportedEffortLevels: [...GPT_54_EFFORT_LEVELS],
+  },
+  {
+    value: "gpt-5.4-mini",
+    displayName: "GPT-5.4 mini",
+    description: "Fast and efficient",
+    supportsEffort: true,
+    supportedEffortLevels: [...GPT_54_EFFORT_LEVELS],
+  },
+  {
+    value: "gpt-5.3-codex-spark",
+    displayName: "GPT-5.3 Codex Spark",
+    description: "Fast coding agent",
+    supportsEffort: true,
+    supportedEffortLevels: [...CODEX_SPARK_EFFORT_LEVELS],
+  },
+];
+
+export type LogosOpenAIAuthType = "api-key" | "chatgpt";
+export type LogosOpenAIMode = "fast" | "pro";
+
+export interface LogosOpenAIModelTarget {
+  apiModel: string;
+  mode?: LogosOpenAIMode;
+}
+
+export function isGpt56Model(model: string): boolean {
+  return /^gpt-5\.6(?:$|-)/.test(model);
+}
+
+export function resolveLogosOpenAIModel(
+  model: string,
+  authType: LogosOpenAIAuthType,
+): LogosOpenAIModelTarget {
+  const modeMatch = /^(gpt-5\.6(?:-(?:sol|terra|luna))?)-(fast|pro)$/.exec(
+    model,
+  );
+  const apiModel = modeMatch?.[1] ?? model;
+  const mode = modeMatch?.[2] as LogosOpenAIMode | undefined;
+
+  if (authType === "chatgpt" && apiModel === "gpt-5.6") {
+    throw new Error(
+      "ChatGPT authentication requires gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna",
+    );
+  }
+  if (authType === "chatgpt" && mode === "pro") {
+    throw new Error("GPT-5.6 Pro mode requires an OpenAI API key");
+  }
+  return { apiModel, ...(mode ? { mode } : {}) };
+}
+
+export function logosOpenAIModels(
+  authType?: LogosOpenAIAuthType,
+): AgentModelInfo[] {
+  return LOGOS_OPENAI_MODELS.filter(
+    (model) =>
+      authType !== "chatgpt" ||
+      (!/^gpt-5\.6(?:-(?:fast|pro))?$/.test(model.value) &&
+        !model.value.endsWith("-pro")),
+  );
+}
 
 export interface LogosAgentToolInfo {
   name: string;

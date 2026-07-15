@@ -434,6 +434,7 @@ export function registerAgentService(ctx: ServiceContext): () => void {
     const sdk = await importEsm("@anthropic-ai/claude-agent-sdk");
     const input = new InputQueue();
     const env = authEnv(req);
+    const effort = req.effort === "none" ? undefined : req.effort;
     const options: Options = {
       cwd: req.cwd,
       model: req.model || undefined,
@@ -453,7 +454,7 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       ...(env ? { env } : {}),
       // B2/F2: conditional-spread so an unset control means "no override".
       ...(req.resume ? { resume: req.resume } : {}),
-      ...(req.effort ? { effort: req.effort } : {}),
+      ...(effort ? { effort } : {}),
       ...(req.thinking ? { thinking: req.thinking } : {}),
       ...(req.allowedTools?.length ? { allowedTools: req.allowedTools } : {}),
       ...(req.disallowedTools?.length
@@ -662,7 +663,10 @@ export function registerAgentService(ctx: ServiceContext): () => void {
         }
       }
       if (session.kind === "claude") session.input.push(req.prompt);
-      else void session.runtime.prompt(req.prompt);
+      else {
+        if (session.kind === "logos") session.runtime.setEffort(req.effort);
+        void session.runtime.prompt(req.prompt);
+      }
     } catch (err) {
       emit({
         kind: "error",

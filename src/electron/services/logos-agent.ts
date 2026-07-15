@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type {
   AgentAuthMethod,
+  AgentEffortLevel,
   AgentEvent,
   AgentPermissionMode,
   AgentStartRequest,
@@ -11,7 +12,11 @@ import type {
 } from "../../shared/types";
 import {
   buildLogosAgentSystemPrompt,
+  DEFAULT_LOGOS_MODEL,
+  isGpt56Model,
+  logosOpenAIModels,
   LOGOS_AGENT_TOOLS,
+  resolveLogosOpenAIModel,
 } from "../../shared/logos-agent";
 import type { OpenAIAuthStore } from "./openai-auth";
 
@@ -76,23 +81,6 @@ const AUTH_METHODS: AgentAuthMethod[] = [
     ],
   },
 ];
-
-const MODELS = [
-  { value: "gpt-5.5", displayName: "GPT-5.5", description: "Most capable" },
-  { value: "gpt-5.4", displayName: "GPT-5.4", description: "Balanced coding model" },
-  { value: "gpt-5.4-mini", displayName: "GPT-5.4 mini", description: "Fast and efficient" },
-  {
-    value: "gpt-5.3-codex-spark",
-    displayName: "GPT-5.3 Codex Spark",
-    description: "Fast coding agent",
-  },
-].map((model) => ({
-  ...model,
-  supportsEffort: true,
-  supportedEffortLevels: ["low", "medium", "high", "xhigh"] as Array<
-    "low" | "medium" | "high" | "xhigh"
-  >,
-}));
 
 const TOOLS = [
   {
@@ -239,6 +227,7 @@ export class LogosAgentRuntime {
   private readonly sessionId: string;
   private history: InputItem[] = [];
   private model: string;
+  private effort?: AgentEffortLevel;
   private mode: AgentPermissionMode;
   private abortController: AbortController | null = null;
   private activeToolProcess: ChildProcess | null = null;
@@ -257,7 +246,8 @@ export class LogosAgentRuntime {
       request.resume && /^[A-Za-z0-9_-]{1,128}$/.test(request.resume)
         ? request.resume
         : crypto.randomUUID();
-    this.model = request.model || "gpt-5.4";
+    this.model = request.model || DEFAULT_LOGOS_MODEL;
+    this.effort = request.effort;
     this.mode = request.permissionMode ?? "default";
   }
 
@@ -422,8 +412,12 @@ export class LogosAgentRuntime {
   }
 
   async setModel(modelId: string): Promise<void> {
-    this.model = modelId || "gpt-5.4";
+    this.model = modelId || DEFAULT_LOGOS_MODEL;
     await this.emitReady();
+  }
+
+  setEffort(effort?: AgentEffortLevel): void {
+    this.effort = effort;
   }
 
   async dispose(removeHistory = false): Promise<void> {
@@ -443,10 +437,22 @@ export class LogosAgentRuntime {
         (this.mode !== "plan" ||
           (tool.name !== "write_file" && tool.name !== "run_command")),
     );
+    const target = resolveLogosOpenAIModel(this.model, auth.type);
+    const gpt56 = isGpt56Model(target.apiModel);
     const effort =
-      this.request.effort === "max" ? "high" : this.request.effort;
+      this.effort === "max" && !gpt56
+        ? "high"
+        : (this.effort ?? (gpt56 ? "medium" : undefined));
+    const reasoning =
+      effort || target.mode === "pro"
+        ? {
+            ...(effort ? { effort } : {}),
+            ...(target.mode === "pro" ? { mode: "pro" as const } : {}),
+            summary: "auto" as const,
+          }
+        : undefined;
     const body = {
-      model: this.model,
+      model: target.apiModel,
       instructions: this.instructions(),
       input: this.history,
       tools,
@@ -455,7 +461,14 @@ export class LogosAgentRuntime {
       stream: true,
       store: false,
       include: ["reasoning.encrypted_content"],
-      ...(effort ? { reasoning: { effort, summary: "auto" } } : {}),
+      ...(target.mode === "fast" ? { service_tier: "priority" } : {}),
+      ...(gpt56
+        ? {
+            text: { verbosity: "low" },
+            prompt_cache_key: this.sessionId,
+          }
+        : {}),
+      ...(reasoning ? { reasoning } : {}),
     };
     this.trace("request", {
       step,
@@ -862,6 +875,14 @@ export class LogosAgentRuntime {
 
   private async emitReady(): Promise<void> {
     const status = await this.auth.status();
+    const modelAuthType = status.type === "api-key" ? "api-key" : "chatgpt";
+    if (status.type === "chatgpt") {
+      try {
+        resolveLogosOpenAIModel(this.model, modelAuthType);
+      } catch {
+        this.model = DEFAULT_LOGOS_MODEL;
+      }
+    }
     this.hooks.emit({
       kind: "runtime-ready",
       sessionId: this.request.sessionId,
@@ -874,7 +895,7 @@ export class LogosAgentRuntime {
         { id: "bypassPermissions", name: "Bypass permissions" },
       ],
       currentModeId: this.mode,
-      models: MODELS,
+      models: logosOpenAIModels(modelAuthType),
       currentModelId: this.model,
       configOptions: [],
       commands: [],

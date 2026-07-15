@@ -24,11 +24,16 @@ import type {
 } from "../shared/types";
 import {
   buildLogosAgentSystemPrompt,
+  logosOpenAIModels,
   LOGOS_AGENT_TOOLS,
 } from "../shared/logos-agent";
 import { Icon } from "./Icon";
 
 const ALL_EFFORT: AgentEffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+const ALL_OPENAI_EFFORT: AgentEffortLevel[] = [
+  "none",
+  ...ALL_EFFORT,
+];
 
 /**
  * Static fallback model list so the picker is usable before (or without) a
@@ -55,21 +60,6 @@ const STATIC_MODELS: AgentModelInfo[] = [
     description: "Fastest",
   },
 ];
-
-const LOGOS_MODELS: AgentModelInfo[] = [
-  { value: "gpt-5.5", displayName: "GPT-5.5", description: "Most capable" },
-  { value: "gpt-5.4", displayName: "GPT-5.4", description: "Balanced" },
-  { value: "gpt-5.4-mini", displayName: "GPT-5.4 mini", description: "Fast" },
-  {
-    value: "gpt-5.3-codex-spark",
-    displayName: "GPT-5.3 Codex Spark",
-    description: "Fast coding agent",
-  },
-].map((model) => ({
-  ...model,
-  supportsEffort: true,
-  supportedEffortLevels: ["low", "medium", "high", "xhigh"] as AgentEffortLevel[],
-}));
 
 export function AgentPanel({
   onClose,
@@ -399,6 +389,10 @@ function AgentControls({ session }: { session: AgentThread }) {
   const toggleAgentFollow = useStore((s) => s.toggleAgentFollow);
   const liveModels = useStore((s) => s.agentModels);
   const registry = useStore((s) => s.agentRegistry);
+  const credentialStatus = useStore((s) => s.agentCredentialStatus);
+  const fallbackLogosModels = logosOpenAIModels(
+    credentialStatus.type === "api-key" ? "api-key" : "chatgpt",
+  );
 
   const models =
     session.runtimeId === "claude"
@@ -410,7 +404,7 @@ function AgentControls({ session }: { session: AgentThread }) {
       : session.runtimeId === "logos"
         ? session.models.length
           ? session.models
-          : LOGOS_MODELS
+          : fallbackLogosModels
         : session.models;
   const model =
     session.currentModelId ??
@@ -418,12 +412,17 @@ function AgentControls({ session }: { session: AgentThread }) {
       ? settings["agent.logosModel"]
       : settings["agent.model"]);
   const selected = models.find((m) => m.value === model);
+  const fallbackEffortLevels =
+    session.runtimeId === "logos" ? ALL_OPENAI_EFFORT : ALL_EFFORT;
   // Default (no model) => all effort levels; a specific model => its own.
   const effortLevels = model
     ? selected?.supportsEffort === false
       ? []
-      : (selected?.supportedEffortLevels ?? ALL_EFFORT)
-    : ALL_EFFORT;
+      : (selected?.supportedEffortLevels ?? fallbackEffortLevels)
+    : fallbackEffortLevels;
+  const effortValue = settings["agent.effort"];
+  const selectedEffort =
+    !effortValue || effortLevels.includes(effortValue) ? effortValue : "";
 
   return (
     <div className="agent-controls">
@@ -544,7 +543,7 @@ function AgentControls({ session }: { session: AgentThread }) {
         <select
           className="agent-mini"
           title={t("agent.effort")}
-          value={settings["agent.effort"]}
+          value={selectedEffort}
           onChange={(e) =>
             void setSetting(
               "agent.effort",
