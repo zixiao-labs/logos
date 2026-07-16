@@ -21,6 +21,7 @@ import type {
   ConditionalWriteResult,
   FsWatchEvent,
   GitBranch,
+  GitBlameLine,
   GitFileDiff,
   GitLogEntry,
   GitStatus,
@@ -113,6 +114,8 @@ export interface LogosAPI {
     diff(root: string, path: string, staged: boolean): Promise<string>;
     fileDiff(root: string, path: string, staged: boolean): Promise<GitFileDiff>;
     log(root: string, limit?: number): Promise<GitLogEntry[]>;
+    /** Blame one 1-based line in an absolute working-tree file path. */
+    blame(root: string, path: string, line: number): Promise<GitBlameLine | null>;
     init(root: string): Promise<void>;
     fetch(root: string): Promise<string>;
     pull(root: string): Promise<string>;

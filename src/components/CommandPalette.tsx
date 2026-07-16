@@ -50,6 +50,30 @@ export function CommandPalette() {
       { id: "openSettings", title: t("cmd.openSettings"), icon: "settings", run: () => s.openSpecial("settings") },
       { id: "extensions", title: t("activity.extensions"), icon: "extensions", run: () => s.openSpecial("extensions") },
       {
+        id: "toggleInlineBlame",
+        title: t("cmd.toggleInlineBlame"),
+        icon: "git",
+        run: () => {
+          const state = store.getState();
+          void state.setSetting(
+            "git.blame.inline.enabled",
+            !state.settings["git.blame.inline.enabled"],
+          );
+        },
+      },
+      {
+        id: "toggleStatusBarBlame",
+        title: t("cmd.toggleStatusBarBlame"),
+        icon: "git",
+        run: () => {
+          const state = store.getState();
+          void state.setSetting(
+            "git.blame.statusBar.enabled",
+            !state.settings["git.blame.statusBar.enabled"],
+          );
+        },
+      },
+      {
         id: "newAgent",
         title: t("cmd.newAgent"),
         icon: "agent",

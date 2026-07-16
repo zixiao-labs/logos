@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { useStore } from "../state/store";
 import {
@@ -12,6 +12,7 @@ import {
   takeLspNavigationTarget,
 } from "../lib/lsp-monaco";
 import { serverIdForLanguage } from "../lib/language";
+import { formatBlameTooltip, formatInlineBlame } from "../lib/git-blame";
 import type { DebugBreakpointState } from "../shared/dap";
 import type { FileSnapshot } from "../shared/types";
 
@@ -247,7 +248,22 @@ export function MonacoEditor({
     useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
   const stackDecorationsRef =
     useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
+  const inlineBlameDecorationsRef =
+    useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
+  const blameRequestRef = useRef(0);
+  const [modelVersion, setModelVersion] = useState(0);
+  const [blameRefreshVersion, setBlameRefreshVersion] = useState(0);
   const settings = useStore((s) => s.settings);
+  const inlineBlameEnabled = settings["git.blame.inline.enabled"];
+  const statusBarBlameEnabled = settings["git.blame.statusBar.enabled"];
+  const languageCode = settings["workbench.language"];
+  const root = useStore((s) => s.root);
+  const isGitRepo = useStore((s) => s.git?.isRepo ?? false);
+  const gitHeadHash = useStore((s) => s.gitHead?.hash ?? "");
+  const cursorLine = useStore((s) => s.cursor.line);
+  const dirty = useStore(
+    (s) => s.tabs.find((tab) => tab.id === `file:${path}`)?.dirty ?? false,
+  );
   const setDirty = useStore((s) => s.setDirty);
   const setCursor = useStore((s) => s.setCursor);
   const breakpoints = useStore(
@@ -279,6 +295,7 @@ export function MonacoEditor({
     editorRef.current = editor;
     breakpointDecorationsRef.current = editor.createDecorationsCollection();
     stackDecorationsRef.current = editor.createDecorationsCollection();
+    inlineBlameDecorationsRef.current = editor.createDecorationsCollection();
 
     for (const [id, label, run] of [
       ["incomingCalls", "Show Incoming Calls", () => showLspHierarchyForEditor(editor, "incoming")],
@@ -372,6 +389,7 @@ export function MonacoEditor({
       mouseSub.dispose();
       breakpointDecorationsRef.current = null;
       stackDecorationsRef.current = null;
+      inlineBlameDecorationsRef.current = null;
       editor.dispose();
       editorRef.current = null;
     };
@@ -428,6 +446,9 @@ export function MonacoEditor({
       const editor = editorRef.current;
       editor?.setModel(model);
       if (editor) {
+        const position = editor.getPosition();
+        if (position) setCursor(position.lineNumber, position.column);
+        setModelVersion((version) => version + 1);
         updateBreakpointDecorations(
           breakpointDecorationsRef.current,
           useStore.getState().debug.breakpoints[path] ?? EMPTY_DEBUG_BREAKPOINTS,
@@ -455,7 +476,126 @@ export function MonacoEditor({
     return () => {
       cancelled = true;
     };
-  }, [language, path, providedContent, readOnly, setDirty]);
+  }, [language, path, providedContent, readOnly, setCursor, setDirty]);
+
+  useEffect(() => {
+    const model = editorRef.current?.getModel();
+    if (!model) return;
+    const subscription = model.onDidChangeContent(() => {
+      ++blameRequestRef.current;
+      inlineBlameDecorationsRef.current?.clear();
+      const current = useStore.getState().currentLineBlame;
+      if (current?.path === path) {
+        useStore.getState().setCurrentLineBlame(null);
+      }
+      if (model.getValue() === baselines.get(path)) {
+        setBlameRefreshVersion((version) => version + 1);
+      }
+    });
+    return () => subscription.dispose();
+  }, [modelVersion, path]);
+
+  useEffect(() => {
+    const requestVersion = ++blameRequestRef.current;
+    const editor = editorRef.current;
+    const collection = inlineBlameDecorationsRef.current;
+    collection?.clear();
+    const current = useStore.getState().currentLineBlame;
+    if (current?.path === path) {
+      useStore.getState().setCurrentLineBlame(null);
+    }
+
+    const model = editor?.getModel();
+    if (
+      !root ||
+      !isGitRepo ||
+      !editor ||
+      !model ||
+      readOnly ||
+      providedContent !== undefined ||
+      dirty ||
+      (!inlineBlameEnabled && !statusBarBlameEnabled) ||
+      cursorLine < 1 ||
+      cursorLine > model.getLineCount() ||
+      model.getValue() !== baselines.get(path)
+    ) return;
+
+    const contentVersion = model.getVersionId();
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void window.logos.git
+        .blame(root, path, cursorLine)
+        .catch(() => null)
+        .then((blame) => {
+          if (
+            cancelled ||
+            requestVersion !== blameRequestRef.current ||
+            editor.getModel() !== model ||
+            model.getVersionId() !== contentVersion ||
+            editor.getPosition()?.lineNumber !== cursorLine ||
+            model.getValue() !== baselines.get(path)
+          ) return;
+          const state = useStore.getState();
+          const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+          if (
+            active?.kind !== "file" ||
+            active.path !== path ||
+            active.dirty ||
+            !blame
+          ) return;
+
+          state.setCurrentLineBlame({ path, line: cursorLine, blame });
+          if (!inlineBlameEnabled) return;
+          const endColumn = model.getLineMaxColumn(cursorLine);
+          const hover = formatBlameTooltip(blame, languageCode).replaceAll(
+            "```",
+            "` ` `",
+          );
+          collection?.set([
+            {
+              range: new monaco.Range(
+                cursorLine,
+                endColumn,
+                cursorLine,
+                endColumn,
+              ),
+              options: {
+                after: {
+                  content: `   ${formatInlineBlame(blame, languageCode)}`,
+                  inlineClassName: "logos-inline-blame",
+                  cursorStops: monaco.editor.InjectedTextCursorStops.None,
+                },
+                hoverMessage: { value: `\`\`\`text\n${hover}\n\`\`\`` },
+              },
+            },
+          ]);
+        });
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      collection?.clear();
+      const latest = useStore.getState().currentLineBlame;
+      if (latest?.path === path && latest.line === cursorLine) {
+        useStore.getState().setCurrentLineBlame(null);
+      }
+    };
+  }, [
+    blameRefreshVersion,
+    cursorLine,
+    dirty,
+    gitHeadHash,
+    inlineBlameEnabled,
+    isGitRepo,
+    languageCode,
+    modelVersion,
+    path,
+    providedContent,
+    readOnly,
+    root,
+    statusBarBlameEnabled,
+  ]);
 
   useEffect(() => {
     updateBreakpointDecorations(
@@ -530,7 +670,7 @@ async function saveCurrent(
   }
   baselines.set(p, content);
   baselineRevisions.set(p, result.revision);
-  setDirty(`file:${p}`, false);
+  setDirty(`file:${p}`, model.getValue() !== content);
   useStore.setState((state) => ({
     tabs: state.tabs.map((item) =>
       item.id === `file:${p}` ? { ...item, externalChange: undefined } : item,

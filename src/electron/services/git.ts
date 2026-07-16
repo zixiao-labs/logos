@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { CH } from "../../shared/channels";
 import type {
+  GitBlameLine,
   GitBranch,
   GitFileChange,
   GitFileDiff,
@@ -12,6 +13,7 @@ import type {
 import type { ServiceContext } from "./context";
 
 const cache = new Map<string, SimpleGit>();
+const repositoryRootCache = new Map<string, Promise<string>>();
 
 function git(root: string): SimpleGit {
   let g = cache.get(root);
@@ -20,6 +22,22 @@ function git(root: string): SimpleGit {
     cache.set(root, g);
   }
   return g;
+}
+
+function repositoryRoot(root: string, g: SimpleGit): Promise<string> {
+  let pending = repositoryRootCache.get(root);
+  if (!pending) {
+    pending = g
+      .revparse(["--show-toplevel"])
+      .then((value) => fs.realpath(path.resolve(value.trim())));
+    repositoryRootCache.set(root, pending);
+  }
+  return pending.catch((error) => {
+    if (repositoryRootCache.get(root) === pending) {
+      repositoryRootCache.delete(root);
+    }
+    throw error;
+  });
 }
 
 async function status(root: string): Promise<GitStatus> {
@@ -54,6 +72,46 @@ async function status(root: string): Promise<GitStatus> {
     behind: s.behind,
     changes,
     clean: s.isClean(),
+  };
+}
+
+export function parseGitBlamePorcelain(
+  output: string,
+  repositoryPath: string,
+): GitBlameLine | null {
+  const lines = output.split(/\r?\n/);
+  const header = /^(\^?[0-9a-f]{40,64}) (\d+) (\d+)(?: \d+)?$/.exec(
+    lines[0] ?? "",
+  );
+  if (!header) return null;
+
+  const fields = new Map<string, string>();
+  for (const line of lines.slice(1)) {
+    if (line.startsWith("\t")) break;
+    const separator = line.indexOf(" ");
+    if (separator > 0) {
+      fields.set(line.slice(0, separator), line.slice(separator + 1));
+    }
+  }
+  const author = fields.get("author");
+  const authorTime = Number(fields.get("author-time"));
+  if (!author || !Number.isFinite(authorTime)) return null;
+
+  const hash = header[1].replace(/^\^/, "");
+  const uncommitted = /^0+$/.test(hash);
+  return {
+    hash,
+    shortHash: uncommitted ? "" : hash.slice(0, 7),
+    message: fields.get("summary") ?? "",
+    author,
+    authorEmail: uncommitted
+      ? ""
+      : (fields.get("author-mail") ?? "").replace(/^<|>$/g, ""),
+    date: new Date(authorTime * 1000).toISOString(),
+    path: repositoryPath,
+    originalLine: Number(header[2]),
+    finalLine: Number(header[3]),
+    uncommitted,
   };
 }
 
@@ -200,6 +258,54 @@ export function registerGitService(ctx: ServiceContext): () => void {
     },
   );
 
+  ipcMain.handle(
+    CH.gitBlame,
+    async (
+      _e,
+      root: string,
+      file: string,
+      line: number,
+    ): Promise<GitBlameLine | null> => {
+      if (
+        typeof root !== "string" ||
+        typeof file !== "string" ||
+        !Number.isInteger(line) ||
+        line < 1 ||
+        !path.isAbsolute(file)
+      ) return null;
+      const g = git(root);
+      try {
+        const rootPath = await repositoryRoot(root, g);
+        // Keep the final path segment intact so a tracked symlink is blamed as
+        // the repository entry rather than as its potentially external target.
+        const resolvedFile = path.resolve(file);
+        const canonicalFile = path.join(
+          await fs.realpath(path.dirname(resolvedFile)),
+          path.basename(resolvedFile),
+        );
+        const relativePath = path.relative(rootPath, canonicalFile);
+        if (
+          !relativePath ||
+          relativePath === ".." ||
+          relativePath.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relativePath)
+        ) return null;
+        const repositoryPath = relativePath.split(path.sep).join("/");
+        const output = await g.raw([
+          "blame",
+          "--line-porcelain",
+          "-L",
+          `${line},${line}`,
+          "--",
+          repositoryPath,
+        ]);
+        return parseGitBlamePorcelain(output, repositoryPath);
+      } catch {
+        return null;
+      }
+    },
+  );
+
   ipcMain.handle(CH.gitInit, (_e, root: string) =>
     git(root).init().then(() => undefined),
   );
@@ -259,5 +365,8 @@ export function registerGitService(ctx: ServiceContext): () => void {
     }
   });
 
-  return () => cache.clear();
+  return () => {
+    cache.clear();
+    repositoryRootCache.clear();
+  };
 }

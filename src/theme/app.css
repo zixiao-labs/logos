@@ -900,6 +900,11 @@ textarea.field {
 .logos-debug-stack-line {
   background: color-mix(in srgb, var(--warning) 12%, transparent);
 }
+.logos-inline-blame {
+  color: var(--muted) !important;
+  font-style: italic;
+  opacity: 0.72;
+}
 
 /* ---- status bar ---------------------------------------------------------- */
 .statusbar {
@@ -932,6 +937,12 @@ textarea.field {
 }
 .statusbar .spacer {
   flex: 1;
+}
+.statusbar .git-blame-status {
+  max-width: min(360px, 34vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- agent panel --------------------------------------------------------- */

@@ -11,10 +11,15 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { CH } from "../../shared/channels";
-import type { GitFileDiff, GitLogEntry, GitStatus } from "../../shared/types";
+import type {
+  GitBlameLine,
+  GitFileDiff,
+  GitLogEntry,
+  GitStatus,
+} from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
-import { registerGitService } from "./git";
+import { parseGitBlamePorcelain, registerGitService } from "./git";
 
 const exec = promisify(execFile);
 
@@ -47,6 +52,111 @@ describe("git service", () => {
       behind: 0,
       changes: [],
       clean: true,
+    });
+    expect(
+      await service.invoke(CH.gitBlame, root, path.join(root, "note.txt"), 1),
+    ).toBeNull();
+  });
+
+  it("returns committed and working-tree blame for one line", async () => {
+    await service.invoke(CH.gitInit, root);
+    await exec("git", ["-C", root, "config", "user.name", "Logos Tests"]);
+    await exec("git", ["-C", root, "config", "user.email", "tests@logos.local"]);
+    const file = path.join(root, "note with spaces.txt");
+    await fs.writeFile(file, "first\nsecond\n", "utf8");
+    await service.invoke(CH.gitStage, root, ["note with spaces.txt"]);
+    await service.invoke(CH.gitCommit, root, "Add two lines");
+
+    const committed = await service.invoke<GitBlameLine | null>(
+      CH.gitBlame,
+      root,
+      file,
+      1,
+    );
+    expect(committed).toMatchObject({
+      author: "Logos Tests",
+      authorEmail: "tests@logos.local",
+      message: "Add two lines",
+      path: "note with spaces.txt",
+      originalLine: 1,
+      finalLine: 1,
+      uncommitted: false,
+    });
+    expect(committed?.hash).toHaveLength(40);
+    expect(committed?.shortHash).toHaveLength(7);
+    expect(Number.isNaN(Date.parse(committed?.date ?? ""))).toBe(false);
+
+    await fs.writeFile(file, "changed\nsecond\n", "utf8");
+    expect(
+      await service.invoke<GitBlameLine | null>(CH.gitBlame, root, file, 1),
+    ).toMatchObject({
+      hash: "0000000000000000000000000000000000000000",
+      shortHash: "",
+      path: "note with spaces.txt",
+      finalLine: 1,
+      uncommitted: true,
+    });
+    expect(
+      await service.invoke<GitBlameLine | null>(CH.gitBlame, root, file, 2),
+    ).toMatchObject({ message: "Add two lines", uncommitted: false });
+
+    const untracked = path.join(root, "untracked.txt");
+    await fs.writeFile(untracked, "new\n", "utf8");
+    expect(await service.invoke(CH.gitBlame, root, untracked, 1)).toBeNull();
+    expect(await service.invoke(CH.gitBlame, root, file, 99)).toBeNull();
+    expect(await service.invoke(CH.gitBlame, root, file, 0)).toBeNull();
+    expect(await service.invoke(CH.gitBlame, root, file, 1.5)).toBeNull();
+    expect(await service.invoke(CH.gitBlame, root, "relative.txt", 1)).toBeNull();
+    expect(
+      await service.invoke(CH.gitBlame, root, null as unknown as string, 1),
+    ).toBeNull();
+    expect(
+      await service.invoke(CH.gitBlame, null as unknown as string, file, 1),
+    ).toBeNull();
+    expect(await service.invoke(CH.gitBlame, root, root, 1)).toBeNull();
+    expect(
+      await service.invoke(CH.gitBlame, root, path.dirname(root), 1),
+    ).toBeNull();
+    expect(
+      await service.invoke(
+        CH.gitBlame,
+        root,
+        path.join(root, "..", "outside.txt"),
+        1,
+      ),
+    ).toBeNull();
+  });
+
+  it("parses blame porcelain defensively", () => {
+    expect(parseGitBlamePorcelain("", "note.txt")).toBeNull();
+    expect(
+      parseGitBlamePorcelain(
+        `${"0".repeat(40)} 1 1\nauthor Nobody\n\tline`,
+        "note.txt",
+      ),
+    ).toBeNull();
+    expect(
+      parseGitBlamePorcelain(
+        `${"0".repeat(40)} 1 1\nauthor Nobody\nauthor-mail <not.committed.yet>\nauthor-time invalid\n\tline`,
+        "note.txt",
+      ),
+    ).toBeNull();
+    expect(
+      parseGitBlamePorcelain(
+        `^${"a".repeat(40)} 4 7\nauthor Ada\nauthor-time 0\n\tline`,
+        "note.txt",
+      ),
+    ).toEqual({
+      hash: "a".repeat(40),
+      shortHash: "aaaaaaa",
+      message: "",
+      author: "Ada",
+      authorEmail: "",
+      date: "1970-01-01T00:00:00.000Z",
+      path: "note.txt",
+      originalLine: 4,
+      finalLine: 7,
+      uncommitted: false,
     });
   });
 

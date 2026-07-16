@@ -16,6 +16,7 @@ import type {
   AgentToolLocation,
   AgentThinkingConfig,
   AcpRegistryAgent,
+  GitBlameLine,
   GitStatus,
   GitLogEntry,
   LanguageCode,
@@ -210,6 +211,12 @@ export interface Diagnostic {
   source?: string;
 }
 
+export interface CurrentLineBlame {
+  path: string;
+  line: number;
+  blame: GitBlameLine;
+}
+
 export interface DebugViewState {
   sessions: Record<string, DebugSessionInfo>;
   activeSessionId: string | null;
@@ -259,6 +266,7 @@ interface LogosState {
   git: GitStatus | null;
   /** The current HEAD commit, shown at the top of the Source Control panel. */
   gitHead: GitLogEntry | null;
+  currentLineBlame: CurrentLineBlame | null;
   diagnostics: Record<string, Diagnostic[]>;
   /** Language-server status keyed by server id (C1: surfaced in the status bar). */
   lsp: Record<string, LspProgress>;
@@ -320,6 +328,7 @@ interface LogosState {
   gitPull(): Promise<void>;
   gitPush(): Promise<void>;
   gitSync(): Promise<void>;
+  setCurrentLineBlame(blame: CurrentLineBlame | null): void;
   setDiagnostics(path: string, diags: Diagnostic[]): void;
   setLspProgress(p: LspProgress): void;
   appendLspLog(entry: LspLog): void;
@@ -1034,6 +1043,7 @@ export const useStore = create<LogosState>((set, get) => ({
 
   git: null,
   gitHead: null,
+  currentLineBlame: null,
   diagnostics: {},
   lsp: {},
   lspLogs: [],
@@ -1369,6 +1379,9 @@ export const useStore = create<LogosState>((set, get) => ({
     if (!root) return;
     notifyResult(await window.logos.git.sync(root), "Synced");
     await get().refreshGit();
+  },
+  setCurrentLineBlame(currentLineBlame) {
+    set({ currentLineBlame });
   },
   setDiagnostics(path, diags) {
     set((s) => ({ diagnostics: { ...s.diagnostics, [path]: diags } }));
