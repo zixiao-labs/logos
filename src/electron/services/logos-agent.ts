@@ -170,7 +170,21 @@ function stringify(value: unknown): string {
 function byteLimit(value: string, max = MAX_TOOL_OUTPUT_BYTES): string {
   const buffer = Buffer.from(value);
   if (buffer.byteLength <= max) return value;
-  return `${buffer.subarray(0, max).toString("utf8")}\n...[truncated]`;
+  const marker = "\n...[truncated]";
+  const contentBytes = Math.max(0, max - Buffer.byteLength(marker));
+  let content = buffer.subarray(0, contentBytes).toString("utf8");
+  while (Buffer.byteLength(content) > contentBytes) {
+    content = content.replace(/[\s\S]$/u, "");
+  }
+  return `${content}${marker}`;
+}
+
+function commandOutput(output: string, status: string): string {
+  const suffix = `\n[${status}]`;
+  return `${byteLimit(
+    output,
+    Math.max(0, MAX_TOOL_OUTPUT_BYTES - Buffer.byteLength(suffix)),
+  )}${suffix}`.trim();
 }
 
 function isFunctionCall(item: InputItem): item is FunctionCall {
@@ -271,6 +285,7 @@ export class LogosAgentRuntime {
   }
 
   async prompt(text: string): Promise<void> {
+    if (this.disposed) throw new Error("The Logos agent is closed");
     if (this.running) throw new Error("The Logos agent is already running");
     if ((await this.auth.status()).type === "none") {
       this.pendingPrompts.push(text);
@@ -371,7 +386,7 @@ export class LogosAgentRuntime {
   async credentialsChanged(): Promise<void> {
     await this.emitReady();
     const pending = this.pendingPrompts.splice(0);
-    for (const prompt of pending) void this.prompt(prompt);
+    for (const prompt of pending) await this.prompt(prompt);
   }
 
   async interrupt(): Promise<void> {
@@ -656,6 +671,7 @@ export class LogosAgentRuntime {
         isError: true,
       };
     }
+    result.output = byteLimit(result.output);
     this.trace("tool-result", {
       callId: call.call_id,
       name: call.name,
@@ -724,7 +740,21 @@ export class LogosAgentRuntime {
         }
         const oldText = await fs.readFile(target, "utf8").catch(() => "");
         await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, content, "utf8");
+        let existingMode: number | undefined;
+        try {
+          existingMode = (await fs.stat(target)).mode & 0o7777;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        try {
+          await fs.writeFile(temp, content, { encoding: "utf8", mode: 0o666 });
+          if (existingMode !== undefined) await fs.chmod(temp, existingMode);
+          await fs.rename(temp, target);
+        } catch (error) {
+          await fs.rm(temp, { force: true }).catch(() => undefined);
+          throw error;
+        }
         return {
           output: `Wrote ${Buffer.byteLength(content)} bytes to ${target}`,
           locations: [{ path: target, line: 1 }],
@@ -799,13 +829,22 @@ export class LogosAgentRuntime {
       child.once("error", (error) => {
         clearTimeout(timer);
         if (this.activeToolProcess === child) this.activeToolProcess = null;
-        resolve({ output: `${output}${error.message}`, isError: true });
+        resolve({
+          output: commandOutput(
+            output,
+            `spawn error: ${byteLimit(error.message, 1024)}`,
+          ),
+          isError: true,
+        });
       });
       child.once("close", (code, signal) => {
         clearTimeout(timer);
         if (this.activeToolProcess === child) this.activeToolProcess = null;
         resolve({
-          output: `${output}\n[exit ${signal ?? code ?? "unknown"}]`.trim(),
+          output: commandOutput(
+            output,
+            `exit ${signal ?? code ?? "unknown"}`,
+          ),
           isError: code !== 0,
         });
       });
@@ -859,10 +898,13 @@ export class LogosAgentRuntime {
   }
 
   private async mayRun(name: string, input: unknown): Promise<boolean> {
+    if (this.mode === "plan" || this.request.disallowedTools?.includes(name)) return false;
+    if (name === "run_command") {
+      return this.hooks.requestPermission(this.request.sessionId, name, input);
+    }
     if (this.mode === "bypassPermissions") return true;
     if (this.request.allowedTools?.includes(name)) return true;
     if (this.mode === "acceptEdits" && name === "write_file") return true;
-    if (this.mode === "plan" || this.request.disallowedTools?.includes(name)) return false;
     return this.hooks.requestPermission(this.request.sessionId, name, input);
   }
 

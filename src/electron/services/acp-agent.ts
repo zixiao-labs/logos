@@ -1,7 +1,6 @@
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
-import os from "node:os";
 import { Readable, Writable } from "node:stream";
 import type {
   AgentAuthMethod,
@@ -37,6 +36,7 @@ import type {
   SessionUpdate,
   ToolCallContent,
 } from "@agentclientprotocol/sdk";
+import { augmentPath } from "./path-env";
 
 type AcpSdk = typeof import("@agentclientprotocol/sdk");
 
@@ -85,21 +85,6 @@ function augmentedEnv(
   extra: Record<string, string> = {},
   sanitizeInherited = false,
 ): NodeJS.ProcessEnv {
-  const separator = process.platform === "win32" ? ";" : ":";
-  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string })
-    .resourcesPath;
-  const candidates =
-    process.platform === "win32"
-      ? []
-      : [
-          path.join(os.homedir(), ".opencode", "bin"),
-          path.join(os.homedir(), ".local", "bin"),
-          "/opt/homebrew/bin",
-          "/usr/local/bin",
-          "/usr/bin",
-          "/bin",
-        ];
-  if (resourcesPath) candidates.unshift(path.join(resourcesPath, "bin"));
   const inherited = sanitizeInherited
     ? Object.fromEntries(
         [
@@ -117,13 +102,15 @@ function augmentedEnv(
         ].flatMap((key) => (process.env[key] ? [[key, process.env[key]!]] : [])),
       )
     : process.env;
-  return {
+  const env = {
     ...inherited,
     ...extra,
-    PATH: [...candidates, extra.PATH ?? process.env.PATH ?? ""]
-      .filter(Boolean)
-      .join(separator),
   };
+  if (sanitizeInherited && !Object.keys(extra).some((key) => key.toLowerCase() === "path")) {
+    env.PATH = process.env.PATH;
+  }
+  augmentPath(env);
+  return env;
 }
 
 interface AcpTerminal {
@@ -152,6 +139,8 @@ export class AcpAgentRuntime {
   private setup: SessionSetup | null = null;
   private currentMessageId = crypto.randomUUID();
   private readonly pendingPrompts: string[] = [];
+  private promptQueue: Promise<void> = Promise.resolve();
+  private authBlocked = false;
   private disposed = false;
 
   private constructor(
@@ -177,8 +166,9 @@ export class AcpAgentRuntime {
     if (request.runtime?.type !== "acp") {
       throw new Error("ACP runtime configuration is missing");
     }
-    const sdk = await importAcp();
     const server = request.runtime.server;
+    request = { ...request, cwd: await fs.realpath(request.cwd) };
+    const sdk = await importAcp();
     hooks.emit({
       kind: "system",
       sessionId: request.sessionId,
@@ -281,6 +271,7 @@ export class AcpAgentRuntime {
   }
 
   async prompt(text: string): Promise<void> {
+    if (this.disposed) throw new Error("ACP runtime is closed");
     if (!this.acpSessionId) {
       this.pendingPrompts.push(text);
       this.hooks.emit({
@@ -288,6 +279,26 @@ export class AcpAgentRuntime {
         sessionId: this.request.sessionId,
         methods: this.authMethods,
       });
+      return;
+    }
+    return this.enqueuePrompts([text]);
+  }
+
+  private enqueuePrompts(prompts: string[]): Promise<void> {
+    const queued = this.promptQueue.then(async () => {
+      for (const prompt of prompts) {
+        if (this.authBlocked) this.pendingPrompts.push(prompt);
+        else await this.runPrompt(prompt);
+      }
+    });
+    this.promptQueue = queued.catch(() => undefined);
+    return queued;
+  }
+
+  private async runPrompt(text: string): Promise<void> {
+    if (this.disposed) return;
+    if (!this.acpSessionId) {
+      this.pendingPrompts.push(text);
       return;
     }
     const started = Date.now();
@@ -304,6 +315,7 @@ export class AcpAgentRuntime {
         messageId: crypto.randomUUID(),
         prompt: [{ type: "text", text }],
       });
+      if (this.disposed) return;
       this.hooks.emit({
         kind: "system",
         sessionId: this.request.sessionId,
@@ -320,8 +332,10 @@ export class AcpAgentRuntime {
         usage: result.usage ?? { stopReason: result.stopReason },
       });
     } catch (error) {
+      if (this.disposed) return;
       if (isAuthError(error) && this.authMethods.length > 0) {
-        this.pendingPrompts.unshift(text);
+        this.authBlocked = true;
+        this.pendingPrompts.push(text);
         this.hooks.emit({
           kind: "auth-required",
           sessionId: this.request.sessionId,
@@ -350,6 +364,12 @@ export class AcpAgentRuntime {
       sessionId: this.acpSessionId,
       modeId,
     });
+    if (this.setup?.modes) {
+      this.setup = {
+        ...this.setup,
+        modes: { ...this.setup.modes, currentModeId: modeId },
+      };
+    }
     this.hooks.emit({ kind: "mode", sessionId: this.request.sessionId, modeId });
   }
 
@@ -397,8 +417,9 @@ export class AcpAgentRuntime {
     }
     await this.connection.authenticate({ methodId: method.id });
     await this.ensureSession();
+    this.authBlocked = false;
     const pending = this.pendingPrompts.splice(0);
-    for (const prompt of pending) void this.prompt(prompt);
+    await this.enqueuePrompts(pending);
     return {};
   }
 
@@ -423,6 +444,8 @@ export class AcpAgentRuntime {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.authBlocked = true;
+    this.pendingPrompts.length = 0;
     for (const terminal of this.terminals.values()) terminal.process.kill();
     this.terminals.clear();
     if (this.acpSessionId && this.capabilities.sessionCapabilities?.close) {
@@ -601,6 +624,15 @@ export class AcpAgentRuntime {
         });
         break;
       case "current_mode_update":
+        if (this.setup?.modes) {
+          this.setup = {
+            ...this.setup,
+            modes: {
+              ...this.setup.modes,
+              currentModeId: update.currentModeId,
+            },
+          };
+        }
         this.hooks.emit({
           kind: "mode",
           sessionId: localSessionId,
@@ -629,9 +661,12 @@ export class AcpAgentRuntime {
     }
   }
 
-  createTerminal(input: CreateTerminalRequest): { terminalId: string } {
-    const cwd = input.cwd ?? this.request.cwd;
-    assertWorkspacePath(this.request.cwd, cwd);
+  async createTerminal(input: CreateTerminalRequest): Promise<{ terminalId: string }> {
+    const cwd = await resolveWorkspacePath(
+      this.request.cwd,
+      input.cwd ?? this.request.cwd,
+      true,
+    );
     const env = Object.fromEntries(
       (input.env ?? []).map((entry) => [entry.name, entry.value]),
     );
@@ -762,8 +797,8 @@ function createClient(
           };
     },
     async readTextFile(input) {
-      assertWorkspacePath(request.cwd, input.path);
-      const source = await fs.readFile(input.path, "utf8");
+      const filePath = await resolveWorkspacePath(request.cwd, input.path, true);
+      const source = await fs.readFile(filePath, "utf8");
       const lines = source.split("\n");
       const start = Math.max((input.line ?? 1) - 1, 0);
       return {
@@ -771,12 +806,10 @@ function createClient(
       };
     },
     async writeTextFile(input) {
-      assertWorkspacePath(request.cwd, input.path);
-      await fs.mkdir(path.dirname(input.path), { recursive: true });
-      await fs.writeFile(input.path, input.content, "utf8");
+      await writeWorkspaceTextFile(request.cwd, input.path, input.content);
       return {};
     },
-    createTerminal: (input) => Promise.resolve(runtime().createTerminal(input)),
+    createTerminal: (input) => runtime().createTerminal(input),
     terminalOutput: (input) =>
       Promise.resolve(runtime().terminalOutput(input.terminalId)),
     waitForTerminalExit: (input) => runtime().waitForTerminal(input.terminalId),
@@ -1001,12 +1034,79 @@ function normalizeLocations(
   }));
 }
 
-function assertWorkspacePath(root: string, target: string): void {
-  const resolvedRoot = path.resolve(root);
-  const resolvedTarget = path.resolve(target);
-  const relative = path.relative(resolvedRoot, resolvedTarget);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+function assertInsideWorkspace(root: string, target: string): void {
+  const relative = path.relative(root, target);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
     throw new Error(`ACP access outside workspace denied: ${target}`);
+  }
+}
+
+async function resolveWorkspacePath(
+  root: string,
+  target: string,
+  mustExist: boolean,
+): Promise<string> {
+  const resolvedRoot = path.resolve(root);
+  if ((await fs.realpath(resolvedRoot)) !== resolvedRoot) {
+    throw new Error("ACP workspace changed after the session started");
+  }
+  const resolvedTarget = path.resolve(resolvedRoot, target);
+  assertInsideWorkspace(resolvedRoot, resolvedTarget);
+  try {
+    const realTarget = await fs.realpath(resolvedTarget);
+    assertInsideWorkspace(resolvedRoot, realTarget);
+    return realTarget;
+  } catch (error) {
+    if (mustExist || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  let existing = path.dirname(resolvedTarget);
+  const missing: string[] = [path.basename(resolvedTarget)];
+  while (true) {
+    try {
+      const realParent = await fs.realpath(existing);
+      assertInsideWorkspace(resolvedRoot, realParent);
+      const candidate = path.join(realParent, ...missing.reverse());
+      assertInsideWorkspace(resolvedRoot, candidate);
+      return candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) throw error;
+      missing.push(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+async function writeWorkspaceTextFile(
+  root: string,
+  target: string,
+  content: string,
+): Promise<void> {
+  const resolvedRoot = path.resolve(root);
+  const candidate = await resolveWorkspacePath(resolvedRoot, target, false);
+  await fs.mkdir(path.dirname(candidate), { recursive: true });
+  const parent = await resolveWorkspacePath(resolvedRoot, path.dirname(candidate), true);
+  const destination = path.join(parent, path.basename(candidate));
+  assertInsideWorkspace(resolvedRoot, destination);
+  const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
+  const handle = await fs.open(
+    destination,
+    fsConstants.O_WRONLY |
+      fsConstants.O_CREAT |
+      fsConstants.O_TRUNC |
+      noFollow,
+    0o666,
+  );
+  try {
+    await handle.writeFile(content, "utf8");
+  } finally {
+    await handle.close();
   }
 }
 

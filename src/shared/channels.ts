@@ -7,7 +7,9 @@ export const CH = {
   // file system (invoke)
   fsReadDir: "fs:readDir",
   fsReadFile: "fs:readFile",
+  fsReadFileSnapshot: "fs:readFileSnapshot",
   fsWriteFile: "fs:writeFile",
+  fsWriteFileConditional: "fs:writeFileConditional",
   fsStat: "fs:stat",
   fsCreateFile: "fs:createFile",
   fsCreateDir: "fs:createDir",
@@ -63,6 +65,8 @@ export const CH = {
   settingsSet: "settings:set",
   settingsReset: "settings:reset",
   settingsGetPath: "settings:getPath",
+  settingsSetAcpSecret: "settings:setAcpSecret",
+  settingsDeleteAcpSecret: "settings:deleteAcpSecret",
   settingsChanged: "settings:changed", // push
 
   // agent

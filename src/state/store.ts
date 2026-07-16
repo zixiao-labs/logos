@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { DEFAULT_SETTINGS } from "../shared/defaults";
+import { isSensitiveEnvName } from "../shared/acp-env";
 import type {
   AgentAuthContext,
   AgentAuthMethod,
@@ -421,12 +422,314 @@ function agentAuthCtx(state: {
 }
 
 // --- Agent session persistence (F2) ---------------------------------------
-// A focused localStorage persister: only agent conversations + the SDK session
-// id survive a restart, so `resume` can rejoin the CLI session. Transient state
-// (running status, pending permission/ask) is never restored — the main-process
-// side of those is gone after a restart.
+// Session metadata remains in localStorage, while potentially large transcripts
+// live in IndexedDB. Transient state (running status, pending permission/ask) is
+// never restored because the main-process side is gone after a restart.
 const AGENT_PERSIST_KEY = "logos.agent.threads.v2";
 const LEGACY_AGENT_PERSIST_KEY = "logos.agent.v1";
+const AGENT_TRANSCRIPT_DB = "logos.agent.transcripts.v1";
+const AGENT_TRANSCRIPT_STORE = "transcripts";
+const AGENT_TRANSCRIPT_ITEM_LIMIT = 2_000;
+const AGENT_TRANSCRIPT_THREAD_BYTES = 2 * 1024 * 1024;
+const AGENT_TRANSCRIPT_TOTAL_BYTES = 20 * 1024 * 1024;
+
+interface AgentTranscriptRecord {
+  id: string;
+  items: AgentItem[];
+  updatedAt: number;
+  bytes: number;
+}
+
+const transcriptEncoder = new TextEncoder();
+let transcriptDbPromise: Promise<IDBDatabase | null> | null = null;
+
+function serializedBytes(value: unknown): number {
+  try {
+    return transcriptEncoder.encode(JSON.stringify(value)).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function serializableAgentItem(item: AgentItem): AgentItem {
+  try {
+    const seen = new WeakSet<object>();
+    const serialized = JSON.stringify(item, (_key, value: unknown) => {
+      if (typeof value === "bigint") return String(value);
+      if (typeof value === "function" || typeof value === "symbol") {
+        return String(value);
+      }
+      if (value && typeof value === "object") {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
+      }
+      return value;
+    });
+    if (serialized) return JSON.parse(serialized) as AgentItem;
+  } catch {
+    // Fall through to a small, cloneable item rather than losing the snapshot.
+  }
+  return {
+    id: item.id,
+    kind: "error",
+    message: "Transcript item could not be serialized",
+  };
+}
+
+function trailingText(
+  value: string | undefined,
+  limit: number,
+): string | undefined {
+  if (value == null || value.length <= limit) return value;
+  if (limit <= 0) return "[truncated]";
+  return `[truncated]${value.slice(-limit)}`;
+}
+
+function compactAgentItem(item: AgentItem, byteBudget: number): AgentItem {
+  const contentLimit = Math.max(0, Math.floor(byteBudget / 16));
+  const id = trailingText(item.id, 256) ?? "";
+  switch (item.kind) {
+    case "user":
+      return {
+        id,
+        kind: "user",
+        text: trailingText(item.text, contentLimit) ?? "",
+      };
+    case "assistant":
+      return {
+        id,
+        kind: "assistant",
+        text: trailingText(item.text, contentLimit) ?? "",
+        thinking: trailingText(item.thinking, contentLimit) ?? "",
+        parentToolUseId: trailingText(item.parentToolUseId, 256),
+      };
+    case "tool":
+      return {
+        id,
+        kind: "tool",
+        toolUseId: trailingText(item.toolUseId, 256) ?? "",
+        name: trailingText(item.name, 512) ?? "",
+        input: trailingText(stringifyAgentValue(item.input), contentLimit),
+        isError: item.isError,
+        result: trailingText(item.result, contentLimit),
+        parentToolUseId: trailingText(item.parentToolUseId, 256),
+        status: item.status,
+        toolKind: trailingText(item.toolKind, 256),
+      };
+    case "subagent":
+      return {
+        id,
+        kind: "subagent",
+        taskId: trailingText(item.taskId, 256) ?? "",
+        toolUseId: trailingText(item.toolUseId, 256),
+        agentType: trailingText(item.agentType, 256),
+        description: trailingText(item.description, contentLimit) ?? "",
+        status: item.status,
+        summary: trailingText(item.summary, contentLimit),
+      };
+    case "result":
+      return {
+        id,
+        kind: "result",
+        costUsd: item.costUsd,
+        durationMs: item.durationMs,
+      };
+    case "error":
+      return {
+        id,
+        kind: "error",
+        message: trailingText(item.message, contentLimit) ?? "",
+      };
+  }
+}
+
+function boundAgentTranscript(
+  items: AgentItem[],
+  byteLimit = AGENT_TRANSCRIPT_THREAD_BYTES,
+): { items: AgentItem[]; bytes: number } {
+  if (byteLimit <= 0 || items.length === 0) return { items: [], bytes: 0 };
+  const bounded = items
+    .slice(-AGENT_TRANSCRIPT_ITEM_LIMIT)
+    .map(serializableAgentItem);
+  const sizes = bounded.map(serializedBytes);
+  let bytes =
+    2 +
+    sizes.reduce((total, size) => total + size, 0) +
+    Math.max(0, bounded.length - 1);
+  let first = 0;
+  while (bytes > byteLimit && bounded.length - first > 1) {
+    bytes -= sizes[first] + 1;
+    first += 1;
+  }
+  let result = bounded.slice(first);
+  if (bytes > byteLimit && result.length === 1) {
+    let budget = byteLimit;
+    let compacted = compactAgentItem(result[0], budget);
+    bytes = 2 + serializedBytes(compacted);
+    while (bytes > byteLimit && budget > 0) {
+      budget = Math.floor(budget / 2);
+      compacted = compactAgentItem(result[0], budget);
+      bytes = 2 + serializedBytes(compacted);
+    }
+    result = bytes <= byteLimit ? [compacted] : [];
+  }
+  return { items: result, bytes: result.length ? bytes : 0 };
+}
+
+function boundAgentTranscriptRecords(
+  transcripts: Array<Pick<AgentTranscriptRecord, "id" | "items" | "updatedAt">>,
+): AgentTranscriptRecord[] {
+  const records = transcripts.map(({ id, items, updatedAt }) => ({
+    id,
+    updatedAt,
+    ...boundAgentTranscript(items),
+  }));
+  let total = records.reduce((sum, record) => sum + record.bytes, 0);
+  for (const record of [...records].sort((a, b) => a.updatedAt - b.updatedAt)) {
+    if (total <= AGENT_TRANSCRIPT_TOTAL_BYTES) break;
+    const previousBytes = record.bytes;
+    const allowance = Math.max(
+      0,
+      AGENT_TRANSCRIPT_TOTAL_BYTES - (total - previousBytes),
+    );
+    const bounded = boundAgentTranscript(record.items, allowance);
+    record.items = bounded.items;
+    record.bytes = bounded.bytes;
+    total += record.bytes - previousBytes;
+  }
+  return records.filter((record) => record.items.length > 0);
+}
+
+function mergeAgentTranscriptItems(
+  stored: AgentItem[],
+  current: AgentItem[],
+): AgentItem[] {
+  const merged = [...stored];
+  const indices = new Map(merged.map((item, index) => [item.id, index]));
+  for (const item of current) {
+    const index = indices.get(item.id);
+    if (index === undefined) {
+      indices.set(item.id, merged.length);
+      merged.push(item);
+    } else {
+      merged[index] = item;
+    }
+  }
+  return merged;
+}
+
+function openAgentTranscriptDb(): Promise<IDBDatabase | null> {
+  if (transcriptDbPromise) return transcriptDbPromise;
+  if (typeof indexedDB === "undefined") return Promise.resolve(null);
+  transcriptDbPromise = new Promise((resolve) => {
+    let settled = false;
+    const finish = (db: IDBDatabase | null) => {
+      if (settled) {
+        db?.close();
+        return;
+      }
+      settled = true;
+      resolve(db);
+    };
+    try {
+      const request = indexedDB.open(AGENT_TRANSCRIPT_DB, 1);
+      request.onupgradeneeded = () => {
+        try {
+          if (!request.result.objectStoreNames.contains(AGENT_TRANSCRIPT_STORE)) {
+            request.result.createObjectStore(AGENT_TRANSCRIPT_STORE, {
+              keyPath: "id",
+            });
+          }
+        } catch {
+          request.transaction?.abort();
+        }
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => {
+          db.close();
+          transcriptDbPromise = null;
+        };
+        finish(db);
+      };
+      request.onerror = () => finish(null);
+      request.onblocked = () => finish(null);
+    } catch {
+      finish(null);
+    }
+  });
+  return transcriptDbPromise;
+}
+
+async function loadAgentTranscripts(): Promise<{
+  success: boolean;
+  records: AgentTranscriptRecord[];
+}> {
+  try {
+    const db = await openAgentTranscriptDb();
+    if (!db) return { success: false, records: [] };
+    const result = await new Promise<{
+      success: boolean;
+      records: AgentTranscriptRecord[];
+    }>((resolve) => {
+      try {
+        const request = db
+          .transaction(AGENT_TRANSCRIPT_STORE, "readonly")
+          .objectStore(AGENT_TRANSCRIPT_STORE)
+          .getAll();
+        request.onsuccess = () =>
+          resolve({
+            success: true,
+            records: request.result as AgentTranscriptRecord[],
+          });
+        request.onerror = () => resolve({ success: false, records: [] });
+      } catch {
+        resolve({ success: false, records: [] });
+      }
+    });
+    if (!result.success) return result;
+    return {
+      success: true,
+      records: boundAgentTranscriptRecords(
+        result.records.filter(
+        (record) =>
+          record &&
+          typeof record.id === "string" &&
+          Array.isArray(record.items) &&
+          typeof record.updatedAt === "number",
+        ),
+      ),
+    };
+  } catch {
+    return { success: false, records: [] };
+  }
+}
+
+async function persistAgentTranscripts(
+  agentSessions: AgentThread[],
+): Promise<boolean> {
+  try {
+    const db = await openAgentTranscriptDb();
+    if (!db) return false;
+    const records = boundAgentTranscriptRecords(agentSessions);
+    return await new Promise<boolean>((resolve) => {
+      try {
+        const transaction = db.transaction(AGENT_TRANSCRIPT_STORE, "readwrite");
+        const store = transaction.objectStore(AGENT_TRANSCRIPT_STORE);
+        store.clear();
+        for (const record of records) store.put(record);
+        transaction.oncomplete = () => resolve(true);
+        transaction.onerror = () => resolve(false);
+        transaction.onabort = () => resolve(false);
+      } catch {
+        resolve(false);
+      }
+    });
+  } catch {
+    // IndexedDB is optional; transcripts remain available for this renderer run.
+    return false;
+  }
+}
 
 function loadPersistedAgent(): {
   agentSessions: AgentThread[];
@@ -445,6 +748,7 @@ function loadPersistedAgent(): {
       (a): AgentThread => ({
         id: a.id,
         name: a.name,
+        // Read old localStorage transcripts once so they can migrate to IndexedDB.
         items: a.items ?? [],
         sdkSessionId: a.sdkSessionId,
         runtimeId: a.runtimeId ?? "claude",
@@ -488,34 +792,38 @@ function persistAgent(
         agentSessions: agentSessions.map((a) => ({
           id: a.id,
           name: a.name,
-            items: a.items,
-            sdkSessionId: a.sdkSessionId,
-            runtimeId: a.runtimeId,
-            runtimeName: a.runtimeName,
-            workspaceRoot: a.workspaceRoot,
-            parentId: a.parentId,
-            createdAt: a.createdAt,
-            updatedAt: a.updatedAt,
-            followMode: a.followMode,
-            plan: a.plan,
-            modeId: a.modeId,
-            modes: a.modes,
-            currentModelId: a.currentModelId,
-            models: a.models,
-            configOptions: a.configOptions,
-            authMethods: a.authMethods,
-            commands: a.commands,
-            canConfigureProviders: a.canConfigureProviders,
+          sdkSessionId: a.sdkSessionId,
+          runtimeId: a.runtimeId,
+          runtimeName: a.runtimeName,
+          workspaceRoot: a.workspaceRoot,
+          parentId: a.parentId,
+          createdAt: a.createdAt,
+          updatedAt: a.updatedAt,
+          followMode: a.followMode,
+          plan: a.plan,
+          modeId: a.modeId,
+          modes: a.modes,
+          currentModelId: a.currentModelId,
+          models: a.models,
+          configOptions: a.configOptions,
+          authMethods: a.authMethods,
+          commands: a.commands,
+          canConfigureProviders: a.canConfigureProviders,
         })),
         activeAgentId,
       }),
     );
+    localStorage.removeItem(LEGACY_AGENT_PERSIST_KEY);
   } catch {
     /* storage unavailable / quota exceeded — non-fatal */
   }
 }
 
 const persistedAgent = loadPersistedAgent();
+let legacyTranscriptPending = persistedAgent.agentSessions.some(
+  (thread) => thread.items.length > 0,
+);
+let transcriptPersistenceEnabled = false;
 
 const DEBUG_BREAKPOINTS_KEY = "logos.debug.breakpoints.v1";
 
@@ -791,12 +1099,37 @@ export const useStore = create<LogosState>((set, get) => ({
   },
 
   async setSetting(key, value) {
-    set((s) => ({ settings: { ...s.settings, [key]: value } }));
-    await window.logos.settings.set(key, value);
+    set((state) => ({ settings: { ...state.settings, [key]: value } }));
+    try {
+      const settings = await window.logos.settings.set(key, value);
+      set({ settings });
+    } catch (error) {
+      set({ settings: await window.logos.settings.getAll() });
+      throw error;
+    }
   },
   async setManySettings(patch) {
-    set((s) => ({ settings: { ...s.settings, ...patch } }));
-    await window.logos.settings.setMany(patch);
+    const rendererPatch = patch["agent.acpServers"]
+      ? {
+          ...patch,
+          "agent.acpServers": patch["agent.acpServers"].map((server) => ({
+            ...server,
+            env: Object.fromEntries(
+              Object.entries(server.env).filter(
+                ([name]) => !isSensitiveEnvName(name),
+              ),
+            ),
+          })),
+        }
+      : patch;
+    set((state) => ({ settings: { ...state.settings, ...rendererPatch } }));
+    try {
+      const settings = await window.logos.settings.setMany(patch);
+      set({ settings });
+    } catch (error) {
+      set({ settings: await window.logos.settings.getAll() });
+      throw error;
+    }
   },
   async resetSettings() {
     const s = await window.logos.settings.reset();
@@ -2240,14 +2573,6 @@ export const useStore = create<LogosState>((set, get) => ({
     }));
   },
   async authenticateAgent(id, methodId) {
-    const markRunning = () =>
-      set((state) => ({
-        agentSessions: state.agentSessions.map((thread) =>
-          thread.id === id
-            ? { ...thread, status: "running", updatedAt: Date.now() }
-            : thread,
-        ),
-      }));
     let result: AgentAuthResult;
     try {
       result = await window.logos.agent.authenticate({
@@ -2278,7 +2603,6 @@ export const useStore = create<LogosState>((set, get) => ({
       return;
     }
     if (!result.terminal) {
-      markRunning();
       return;
     }
     const created = await window.logos.terminal.create(result.terminal);
@@ -2298,7 +2622,28 @@ export const useStore = create<LogosState>((set, get) => ({
       if (code !== 0) return;
       void window.logos.agent
         .authenticate({ sessionId: id, methodId, completed: true })
-        .then(markRunning);
+        .catch((error) => {
+          set((state) => ({
+            agentSessions: state.agentSessions.map((thread) =>
+              thread.id === id
+                ? {
+                    ...thread,
+                    status: "waiting",
+                    items: [
+                      ...thread.items,
+                      {
+                        id: crypto.randomUUID(),
+                        kind: "error" as const,
+                        message:
+                          error instanceof Error ? error.message : String(error),
+                      },
+                    ],
+                    updatedAt: Date.now(),
+                  }
+                : thread,
+            ),
+          }));
+        });
     });
   },
   async sendAgentPrompt(text) {
@@ -2359,7 +2704,8 @@ export const useStore = create<LogosState>((set, get) => ({
       acpServer = await window.logos.agent
         .resolveRegistryAgent(session.runtimeId.slice("registry:".length))
         .catch((error) => {
-          runtimeResolutionError = error instanceof Error ? error.message : String(error);
+          runtimeResolutionError =
+            error instanceof Error ? error.message : String(error);
           return undefined;
         });
     }
@@ -2398,37 +2744,63 @@ export const useStore = create<LogosState>((set, get) => ({
         : session?.runtimeId && session.runtimeId !== "claude" && acpServer
           ? ({ type: "acp", server: acpServer } as const)
           : ({ type: "claude" } as const);
-    await window.logos.agent.start({
-      sessionId: id!,
-      prompt: text,
-      cwd: root,
-      // `|| undefined` everywhere => "empty means no override", mirroring model.
-      model:
-        session?.currentModelId ||
-        (runtime.type === "logos" ? s["agent.logosModel"] : s["agent.model"]) ||
-        undefined,
-      permissionMode:
-        runtime.type === "claude" || runtime.type === "logos"
-          ? ((session?.modeId as Settings["agent.permissionMode"]) ??
-            s["agent.permissionMode"])
+    try {
+      await window.logos.agent.start({
+        sessionId: id!,
+        prompt: text,
+        cwd: root,
+        // `|| undefined` everywhere => "empty means no override", mirroring model.
+        model:
+          session?.currentModelId ||
+          (runtime.type === "logos" ? s["agent.logosModel"] : s["agent.model"]) ||
+          undefined,
+        permissionMode:
+          runtime.type === "claude" || runtime.type === "logos"
+            ? ((session?.modeId as Settings["agent.permissionMode"]) ??
+              s["agent.permissionMode"])
+            : undefined,
+        resume: session?.sdkSessionId,
+        effort: s["agent.effort"] || undefined,
+        thinking: thinkingConfig(s["agent.thinking"], s["agent.thinkingBudget"]),
+        allowedTools: allowed.length ? allowed : undefined,
+        disallowedTools: disallowed.length ? disallowed : undefined,
+        settingSources: s["agent.loadProjectSettings"]
+          ? ["user", "project"]
           : undefined,
-      resume: session?.sdkSessionId,
-      effort: s["agent.effort"] || undefined,
-      thinking: thinkingConfig(s["agent.thinking"], s["agent.thinkingBudget"]),
-      allowedTools: allowed.length ? allowed : undefined,
-      disallowedTools: disallowed.length ? disallowed : undefined,
-      settingSources: s["agent.loadProjectSettings"]
-        ? ["user", "project"]
-        : undefined,
-      apiKey: runtime.type === "claude" ? s["agent.apiKey"] || undefined : undefined,
-      authToken:
-        runtime.type === "claude" ? s["agent.authToken"] || undefined : undefined,
-      baseUrl:
-        runtime.type === "logos"
-          ? s["agent.openaiBaseUrl"]
-          : s["agent.baseUrl"] || undefined,
-      runtime,
-    });
+        apiKey:
+          runtime.type === "claude" ? s["agent.apiKey"] || undefined : undefined,
+        authToken:
+          runtime.type === "claude"
+            ? s["agent.authToken"] || undefined
+            : undefined,
+        baseUrl:
+          runtime.type === "logos"
+            ? s["agent.openaiBaseUrl"]
+            : s["agent.baseUrl"] || undefined,
+        runtime,
+      });
+    } catch (error) {
+      const message =
+        (error instanceof Error ? error.message : stringifyAgentValue(error)) ||
+        "Agent failed to start";
+      set((current) => ({
+        agentSessions: current.agentSessions.map((thread) =>
+          thread.id === id && thread.status === "running"
+            ? {
+                ...thread,
+                status: "idle",
+                pendingAsk: undefined,
+                pendingPermission: undefined,
+                items: [
+                  ...thread.items,
+                  { id: crypto.randomUUID(), kind: "error", message },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+    }
   },
   async interruptAgent() {
     const id = get().activeAgentId;
@@ -2471,7 +2843,7 @@ export const useStore = create<LogosState>((set, get) => ({
       const state = get();
       const thread = state.agentSessions.find((item) => item.id === e.sessionId);
       if (thread?.followMode) {
-        const absolute = /^(?:[A-Za-z]:[\\/]|\/)/.test(e.location.path)
+        const absolute = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(e.location.path)
           ? e.location.path
           : state.root
             ? `${state.root}/${e.location.path}`
@@ -2753,9 +3125,65 @@ export const useStore = create<LogosState>((set, get) => ({
   },
 }));
 
-// F2: write agent conversations to localStorage when they change. Debounced so
-// token-by-token streaming (which rebuilds agentSessions on every delta) does
-// not thrash storage; reference equality skips unrelated state updates.
+const initialTranscriptState = new Map(
+  useStore
+    .getState()
+    .agentSessions.map((thread) => [
+      thread.id,
+      { items: thread.items, updatedAt: thread.updatedAt },
+    ]),
+);
+void loadAgentTranscripts()
+  .then(({ success, records }) => {
+    transcriptPersistenceEnabled = success;
+    if (!success) return;
+    const byId = new Map(records.map((record) => [record.id, record]));
+    useStore.setState((state) => {
+      let changed = false;
+      const agentSessions = state.agentSessions.map((thread) => {
+        const initial = initialTranscriptState.get(thread.id);
+        const record = byId.get(thread.id);
+        if (!initial || !record) {
+          return thread;
+        }
+        if (thread.items !== initial.items) {
+          const items = mergeAgentTranscriptItems(record.items, thread.items);
+          changed = true;
+          return { ...thread, items };
+        }
+        if (
+          initial.items.length > 0 &&
+          initial.updatedAt >= record.updatedAt
+        ) return thread;
+        changed = true;
+        return { ...thread, items: record.items };
+      });
+      return changed ? { agentSessions } : state;
+    });
+  })
+  .catch(() => undefined)
+  .finally(() => {
+    const state = useStore.getState();
+    void persistAgentState(state.agentSessions, state.activeAgentId);
+  });
+
+async function persistAgentState(
+  sessions: AgentThread[],
+  activeAgentId: string | null,
+): Promise<void> {
+  if (!transcriptPersistenceEnabled) {
+    if (!legacyTranscriptPending) persistAgent(sessions, activeAgentId);
+    return;
+  }
+  const transcriptSaved = await persistAgentTranscripts(sessions);
+  if (transcriptSaved) legacyTranscriptPending = false;
+  if (transcriptSaved || !legacyTranscriptPending) {
+    persistAgent(sessions, activeAgentId);
+  }
+}
+
+// Debounce metadata and transcript writes so token-by-token streaming does not
+// thrash either storage backend; reference equality skips unrelated updates.
 let lastSessions = useStore.getState().agentSessions;
 let lastActive = useStore.getState().activeAgentId;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2767,9 +3195,8 @@ useStore.subscribe((state) => {
     lastSessions = state.agentSessions;
     lastActive = state.activeAgentId;
     if (persistTimer) clearTimeout(persistTimer);
-    persistTimer = setTimeout(
-      () => persistAgent(lastSessions, lastActive),
-      500,
-    );
+    persistTimer = setTimeout(() => {
+      void persistAgentState(lastSessions, lastActive);
+    }, 500);
   }
 });

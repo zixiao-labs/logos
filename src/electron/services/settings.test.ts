@@ -14,6 +14,7 @@ import type { Settings } from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { registerSettingsService } from "./settings";
+import type { AcpSecretStore } from "./acp-secrets";
 
 describe("settings service", () => {
   let userDataDir: string;
@@ -26,7 +27,7 @@ describe("settings service", () => {
     await fs.rm(userDataDir, { recursive: true, force: true });
   });
 
-  function setup() {
+  function setup(acpSecrets?: AcpSecretStore) {
     const ipc = createIpcHarness();
     const sent: Array<[string, ...unknown[]]> = [];
     const ctx = {
@@ -35,7 +36,7 @@ describe("settings service", () => {
       getWindow: () => null,
       send: (channel: string, ...args: unknown[]) => sent.push([channel, ...args]),
     } satisfies ServiceContext;
-    registerSettingsService(ctx);
+    registerSettingsService(ctx, acpSecrets);
     return { ...ipc, sent };
   }
 
@@ -92,5 +93,47 @@ describe("settings service", () => {
     expect(await service.invoke<string>(CH.settingsGetPath)).toBe(
       path.join(userDataDir, "settings.json"),
     );
+  });
+
+  it("moves sensitive ACP environment values out of settings", async () => {
+    const stored = new Map<string, string>();
+    const acpSecrets = {
+      async set(
+        serverId: string,
+        name: string,
+        value: string,
+        reference?: string,
+      ) {
+        const ref = reference ?? `secret:${serverId}:${name}`;
+        stored.set(ref, value);
+        return ref;
+      },
+      async delete(reference: string) {
+        stored.delete(reference);
+      },
+      async has(_serverId: string, _name: string, reference: string) {
+        return stored.has(reference);
+      },
+    } as AcpSecretStore;
+    const service = setup(acpSecrets);
+    const settings = await service.invoke<Settings>(CH.settingsSet, {
+      "agent.acpServers": [
+        {
+          id: "custom",
+          name: "Custom",
+          command: "agent",
+          args: [],
+          env: { OPENAI_API_KEY: "secret-value", LOG_LEVEL: "debug" },
+        },
+      ],
+    } satisfies Partial<Settings>);
+
+    expect(settings["agent.acpServers"][0]).toMatchObject({
+      env: { LOG_LEVEL: "debug" },
+      secretEnv: { OPENAI_API_KEY: "secret:custom:OPENAI_API_KEY" },
+    });
+    expect(stored.get("secret:custom:OPENAI_API_KEY")).toBe("secret-value");
+    const raw = await fs.readFile(path.join(userDataDir, "settings.json"), "utf8");
+    expect(raw.includes("secret-value")).toBe(false);
   });
 });

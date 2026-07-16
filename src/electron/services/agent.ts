@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { sep } from "node:path";
+import { resolve, sep } from "node:path";
 import { CH } from "../../shared/channels";
 import type {
   AgentAskResponse,
@@ -30,6 +30,7 @@ import type {
 import { AcpAgentRuntime } from "./acp-agent";
 import { LogosAgentRuntime } from "./logos-agent";
 import { OpenAIAuthStore } from "./openai-auth";
+import type { AcpSecretStore } from "./acp-secrets";
 
 /**
  * `@anthropic-ai/claude-agent-sdk` is ESM-only. The Electron main bundle is
@@ -173,6 +174,8 @@ interface LogosSession {
 
 type Session = ClaudeSession | AcpSession | LogosSession;
 
+class SessionStartCancelled extends Error {}
+
 /** A `canUseTool` call awaiting the user's response from the renderer. */
 interface PendingRequest {
   sessionId: string;
@@ -199,11 +202,18 @@ function stringifyContent(content: unknown): string {
   return content == null ? "" : JSON.stringify(content);
 }
 
-export function registerAgentService(ctx: ServiceContext): () => void {
+export function registerAgentService(
+  ctx: ServiceContext,
+  acpSecrets?: AcpSecretStore,
+): () => void {
   const { ipcMain } = ctx;
   const sessions = new Map<string, Session>();
+  const startingSessions = new Map<string, Promise<Session>>();
+  const startingFingerprints = new Map<string, string>();
+  const sessionGenerations = new Map<string, number>();
   const pendingPerms = new Map<string, PendingRequest>();
   const openAIAuth = new OpenAIAuthStore(ctx.userDataDir);
+  let shuttingDown = false;
   let permCounter = 0;
 
   const emit = (e: AgentEvent) => ctx.send(CH.agentEvent, e);
@@ -503,8 +513,6 @@ export function registerAgentService(ctx: ServiceContext): () => void {
       query,
       currentMessageIds: new Map(),
     };
-    sessions.set(req.sessionId, session);
-
     // Consume the message stream for the lifetime of the session.
     (async () => {
       try {
@@ -516,7 +524,9 @@ export function registerAgentService(ctx: ServiceContext): () => void {
           message: err instanceof Error ? err.message : String(err),
         });
       } finally {
-        sessions.delete(req.sessionId);
+        if (sessions.get(req.sessionId) === session) {
+          sessions.delete(req.sessionId);
+        }
       }
     })();
 
@@ -630,7 +640,103 @@ export function registerAgentService(ctx: ServiceContext): () => void {
     },
   };
 
+  async function createSession(req: AgentStartRequest): Promise<Session> {
+    if (req.runtime?.type === "acp") {
+      const server = req.runtime.server;
+      const secretEnv = Object.keys(server.secretEnv ?? {}).length
+        ? await acpSecrets?.resolve(server.id, server.secretEnv)
+        : {};
+      if (Object.keys(server.secretEnv ?? {}).length && !acpSecrets) {
+        throw new Error("ACP secret storage is unavailable");
+      }
+      const runtime = await AcpAgentRuntime.create(
+        {
+          ...req,
+          runtime: {
+            type: "acp",
+            server: {
+              ...server,
+              env: { ...server.env, ...secretEnv },
+              secretEnv: undefined,
+            },
+          },
+        },
+        acpHooks,
+      );
+      return { kind: "acp", runtime };
+    }
+    if (req.runtime?.type === "logos") {
+      const runtime = await LogosAgentRuntime.create(
+        req,
+        logosHooks,
+        openAIAuth,
+        `${ctx.userDataDir}/agent-sessions`,
+      );
+      return { kind: "logos", runtime };
+    }
+    return startClaudeSession(req);
+  }
+
+  async function disposeSession(
+    session: Session,
+    removeHistory = false,
+  ): Promise<void> {
+    if (session.kind === "claude") {
+      session.input.close();
+      await session.query.interrupt().catch(() => undefined);
+    } else if (session.kind === "logos") {
+      await session.runtime.dispose(removeHistory);
+    } else {
+      await session.runtime.dispose();
+    }
+  }
+
+  function startFingerprint(req: AgentStartRequest): string {
+    const runtimeId =
+      req.runtime?.type === "acp"
+        ? `acp:${req.runtime.server.id}`
+        : (req.runtime?.type ?? "claude");
+    return JSON.stringify([resolve(req.cwd), runtimeId]);
+  }
+
+  async function getOrCreateSession(req: AgentStartRequest): Promise<Session> {
+    const existing = sessions.get(req.sessionId);
+    if (existing) return existing;
+    let starting = startingSessions.get(req.sessionId);
+    const fingerprint = startFingerprint(req);
+    if (
+      starting &&
+      startingFingerprints.get(req.sessionId) !== fingerprint
+    ) {
+      throw new Error("Concurrent agent starts disagree on workspace or runtime");
+    }
+    if (!starting) {
+      const generation = sessionGenerations.get(req.sessionId) ?? 0;
+      starting = createSession(req).then(async (session) => {
+        if (
+          shuttingDown ||
+          (sessionGenerations.get(req.sessionId) ?? 0) !== generation
+        ) {
+          await disposeSession(session, true);
+          throw new SessionStartCancelled();
+        }
+        sessions.set(req.sessionId, session);
+        return session;
+      });
+      startingSessions.set(req.sessionId, starting);
+      startingFingerprints.set(req.sessionId, fingerprint);
+      void starting.finally(() => {
+        if (startingSessions.get(req.sessionId) === starting) {
+          startingSessions.delete(req.sessionId);
+          startingFingerprints.delete(req.sessionId);
+        }
+      }).catch(() => undefined);
+    }
+    return starting;
+  }
+
   ipcMain.handle(CH.agentStart, async (_e, req: AgentStartRequest) => {
+    const generation = sessionGenerations.get(req.sessionId) ?? 0;
     try {
       let session = sessions.get(req.sessionId);
       if (
@@ -644,30 +750,29 @@ export function registerAgentService(ctx: ServiceContext): () => void {
         });
         return;
       }
-      if (!session) {
-        if (req.runtime?.type === "acp") {
-          const runtime = await AcpAgentRuntime.create(req, acpHooks);
-          session = { kind: "acp", runtime };
-          sessions.set(req.sessionId, session);
-        } else if (req.runtime?.type === "logos") {
-          const runtime = await LogosAgentRuntime.create(
-            req,
-            logosHooks,
-            openAIAuth,
-            `${ctx.userDataDir}/agent-sessions`,
-          );
-          session = { kind: "logos", runtime };
-          sessions.set(req.sessionId, session);
-        } else {
-          session = await startClaudeSession(req);
-        }
+      if (!session) session = await getOrCreateSession(req);
+      if (
+        session.kind === "logos" &&
+        !(await session.runtime.matchesWorkspace(req.cwd))
+      ) {
+        emit({
+          kind: "error",
+          sessionId: req.sessionId,
+          message: "This agent thread belongs to a different workspace. Create a new thread to continue.",
+        });
+        return;
       }
+      if (
+        sessions.get(req.sessionId) !== session ||
+        (sessionGenerations.get(req.sessionId) ?? 0) !== generation
+      ) return;
       if (session.kind === "claude") session.input.push(req.prompt);
       else {
         if (session.kind === "logos") session.runtime.setEffort(req.effort);
-        void session.runtime.prompt(req.prompt);
+        await session.runtime.prompt(req.prompt);
       }
     } catch (err) {
+      if (err instanceof SessionStartCancelled) return;
       emit({
         kind: "error",
         sessionId: req.sessionId,
@@ -689,18 +794,14 @@ export function registerAgentService(ctx: ServiceContext): () => void {
   });
 
   ipcMain.handle(CH.agentClose, async (_e, sessionId: string) => {
+    sessionGenerations.set(sessionId, (sessionGenerations.get(sessionId) ?? 0) + 1);
+    startingSessions.delete(sessionId);
+    startingFingerprints.delete(sessionId);
     const session = sessions.get(sessionId);
     sessions.delete(sessionId);
     cancelPending(sessionId);
     if (!session) return;
-    if (session.kind === "claude") {
-      session.input.close();
-      await session.query.interrupt().catch(() => undefined);
-    } else if (session.kind === "logos") {
-      await session.runtime.dispose(true);
-    } else {
-      await session.runtime.dispose();
-    }
+    await disposeSession(session, true);
   });
 
   ipcMain.handle(
@@ -745,6 +846,13 @@ export function registerAgentService(ctx: ServiceContext): () => void {
           answers: res.answers,
         } as never,
       );
+      return;
+    }
+    if (res.action === "cancel" || res.action === "decline") {
+      pending.resolve({
+        behavior: "deny",
+        message: "Question cancelled by user",
+      } as never);
       return;
     }
     const updatedInput = res.response
@@ -955,13 +1063,17 @@ export function registerAgentService(ctx: ServiceContext): () => void {
   );
 
   return () => {
+    shuttingDown = true;
+    for (const sessionId of startingSessions.keys()) {
+      sessionGenerations.set(
+        sessionId,
+        (sessionGenerations.get(sessionId) ?? 0) + 1,
+      );
+    }
+    startingSessions.clear();
+    startingFingerprints.clear();
     for (const s of sessions.values()) {
-      if (s.kind === "claude") {
-        s.input.close();
-        s.query.interrupt?.().catch(() => undefined);
-      } else {
-        void s.runtime.dispose();
-      }
+      void disposeSession(s);
     }
     sessions.clear();
     pendingPerms.clear();

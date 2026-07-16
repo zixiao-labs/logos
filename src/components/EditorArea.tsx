@@ -27,6 +27,22 @@ export function EditorArea() {
     await closeTabSafely(id);
   }
 
+  async function reloadActiveFile(tabId: string, path: string) {
+    try {
+      await reloadFileFromDisk(path);
+    } catch {
+      const exists = await window.logos.fs.exists(path).catch(() => true);
+      if (exists) return;
+      useStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === tabId && tab.kind === "file" && tab.path === path
+            ? { ...tab, externalChange: "deleted" }
+            : tab,
+        ),
+      }));
+    }
+  }
+
   const crumbs =
     active?.kind === "file" && active.path
       ? (root && active.path.startsWith(root)
@@ -92,7 +108,7 @@ export function EditorArea() {
               className="external-change"
               title={t(`editor.external.${active.externalChange}`)}
               disabled={active.externalChange === "deleted"}
-              onClick={() => void reloadFileFromDisk(active.path!)}
+              onClick={() => void reloadActiveFile(active.id, active.path!)}
             >
               <Icon name="warning" size={12} />
               {t(`editor.external.${active.externalChange}`)}

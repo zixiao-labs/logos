@@ -59,6 +59,7 @@ describe("terminal service", () => {
       cwd: "/workspace",
       cols: 120,
       rows: 40,
+      env: { PATH: `/custom/bin${process.platform === "win32" ? ";" : ":"}/usr/bin` },
     });
     expect(created).toEqual({
       id: "term-1",
@@ -72,6 +73,17 @@ describe("terminal service", () => {
       rows: 40,
       name: "xterm-256color",
     });
+    const spawnedEnv = (spawnArgs[2] as { env: Record<string, string> }).env;
+    const pathKey = Object.keys(spawnedEnv).find(
+      (key) => key.toLowerCase() === "path",
+    );
+    const pathEntries = spawnedEnv[pathKey!].split(
+      process.platform === "win32" ? ";" : ":",
+    );
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string })
+      .resourcesPath;
+    expect(pathEntries[resourcesPath ? 1 : 0]).toBe("/custom/bin");
+    expect(pathEntries.filter((entry) => entry === "/usr/bin")).toHaveLength(1);
 
     ipc.emit(CH.terminalWrite, created.id, "echo test\r");
     ipc.emit(CH.terminalResize, created.id, 0, -4);

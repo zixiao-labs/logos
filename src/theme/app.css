@@ -1202,7 +1202,7 @@ textarea.field {
   color: var(--muted);
   font: 10px/1.45 var(--mono-font);
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .agent-runtime-contract {
   border: 1px solid color-mix(in srgb, var(--success) 32%, var(--border));
@@ -1282,7 +1282,7 @@ textarea.field {
   color: var(--muted);
   font: 10px/1.5 var(--mono-font);
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .agent-result {
   font-size: 11px;

@@ -193,10 +193,14 @@ function AgentConversation({ session }: { session: AgentThread }) {
   }, [session.runtimeId, loadAgentModels, loadAgentCommands]);
 
   useEffect(() => {
+    timelineFollowing.current = true;
+  }, [session.id]);
+
+  useEffect(() => {
     if (timelineFollowing.current) {
       logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
     }
-  }, [session.items, session.pendingAsk, session.pendingPermission, session.plan]);
+  }, [session.id, session.items, session.pendingAsk, session.pendingPermission, session.plan]);
 
   const deferredText = useDeferredValue(text);
 
@@ -1023,7 +1027,7 @@ function AskCard({
   }
 
   const complete = questions.every((question, i) => {
-    if (!question.required || question.type === "url") return true;
+    if (!question.required) return true;
     const a = answers[i];
     const hasOther = (other[i] ?? "").trim().length > 0;
     if (Array.isArray(a)) return a.length > 0 || hasOther;

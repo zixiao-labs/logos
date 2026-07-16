@@ -31,6 +31,14 @@ export interface FileStat {
   mtimeMs: number;
 }
 
+export type FileSnapshot =
+  | { exists: true; content: string; revision: string }
+  | { exists: false; revision: string };
+
+export type ConditionalWriteResult =
+  | { status: "written"; revision: string }
+  | { status: "conflict"; current: FileSnapshot };
+
 export type FsWatchEventType = "create" | "change" | "delete" | "rename";
 
 export interface FsWatchEvent {
@@ -247,6 +255,8 @@ export interface AcpAgentConfig {
   command: string;
   args: string[];
   env: Record<string, string>;
+  /** Environment name -> opaque reference resolved only in the main process. */
+  secretEnv?: Record<string, string>;
   /** Registry package-runner argv that must also prefix terminal auth commands. */
   authArgsPrefix?: string[];
 }

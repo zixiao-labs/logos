@@ -99,7 +99,15 @@ const api: LogosAPI = {
   fs: {
     readDir: (p) => ipcRenderer.invoke(CH.fsReadDir, p),
     readFile: (p) => ipcRenderer.invoke(CH.fsReadFile, p),
+    readFileSnapshot: (p) => ipcRenderer.invoke(CH.fsReadFileSnapshot, p),
     writeFile: (p, content) => ipcRenderer.invoke(CH.fsWriteFile, p, content),
+    writeFileConditional: (p, content, expectedRevision) =>
+      ipcRenderer.invoke(
+        CH.fsWriteFileConditional,
+        p,
+        content,
+        expectedRevision,
+      ),
     stat: (p) => ipcRenderer.invoke(CH.fsStat, p),
     createFile: (p, content) =>
       withLspFileOperation("Create", { paths: [p], kinds: ["file"] }, () =>
@@ -196,6 +204,16 @@ const api: LogosAPI = {
     setMany: (patch) => ipcRenderer.invoke(CH.settingsSet, patch),
     reset: () => ipcRenderer.invoke(CH.settingsReset),
     getPath: () => ipcRenderer.invoke(CH.settingsGetPath),
+    setAcpSecret: (serverId, name, value, reference) =>
+      ipcRenderer.invoke(
+        CH.settingsSetAcpSecret,
+        serverId,
+        name,
+        value,
+        reference,
+      ),
+    deleteAcpSecret: (reference) =>
+      ipcRenderer.invoke(CH.settingsDeleteAcpSecret, reference),
     onChanged: (cb) => on<Settings>(CH.settingsChanged, cb),
   },
   agent: {

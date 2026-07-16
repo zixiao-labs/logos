@@ -1,12 +1,61 @@
 import { promises as fs, watch as fsWatch, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { CH } from "../../shared/channels";
-import type { DirListing, FileEntry, FileStat } from "../../shared/types";
+import type {
+  ConditionalWriteResult,
+  DirListing,
+  FileEntry,
+  FileSnapshot,
+  FileStat,
+} from "../../shared/types";
 import type { ServiceContext } from "./context";
 
 /** Directories we never want to descend into or list eagerly. */
 const IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
 const WATCH_IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
+
+function fileRevision(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function readFileSnapshot(filePath: string): Promise<FileSnapshot> {
+  try {
+    const content = await fs.readFile(filePath, "utf8");
+    return { exists: true, content, revision: fileRevision(content) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { exists: false, revision: "missing" };
+    }
+    throw error;
+  }
+}
+
+async function conditionalWriteTarget(filePath: string): Promise<string> {
+  try {
+    return await fs.realpath(filePath);
+  } catch {
+    try {
+      const stat = await fs.lstat(filePath);
+      if (stat.isSymbolicLink()) {
+        const link = await fs.readlink(filePath);
+        return path.resolve(path.dirname(filePath), link);
+      }
+    } catch {
+      // The target does not exist yet.
+    }
+    return path.resolve(filePath);
+  }
+}
+
+async function conditionalWriteKey(filePath: string): Promise<string> {
+  try {
+    const stat = await fs.stat(filePath);
+    return `inode:${stat.dev}:${stat.ino}`;
+  } catch {
+    return `path:${await conditionalWriteTarget(filePath)}`;
+  }
+}
 
 async function readDir(dirPath: string): Promise<DirListing> {
   const dirents = await fs.readdir(dirPath, { withFileTypes: true });
@@ -33,6 +82,7 @@ async function readDir(dirPath: string): Promise<DirListing> {
 export function registerFsService(ctx: ServiceContext): () => void {
   const { ipcMain } = ctx;
   const watchers = new Map<string, { watcher: FSWatcher; references: number }>();
+  const conditionalWrites = new Map<string, Promise<ConditionalWriteResult>>();
   // Coalesce rapid-fire fs events so we don't flood the renderer.
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -40,10 +90,64 @@ export function registerFsService(ctx: ServiceContext): () => void {
 
   ipcMain.handle(CH.fsReadFile, (_e, p: string) => fs.readFile(p, "utf8"));
 
+  ipcMain.handle(CH.fsReadFileSnapshot, (_e, p: string) => readFileSnapshot(p));
+
   ipcMain.handle(CH.fsWriteFile, async (_e, p: string, content: string) => {
     await fs.mkdir(path.dirname(p), { recursive: true });
     await fs.writeFile(p, content, "utf8");
   });
+
+  ipcMain.handle(
+    CH.fsWriteFileConditional,
+    async (
+      _e,
+      p: string,
+      content: string,
+      expectedRevision: string,
+    ): Promise<ConditionalWriteResult> => {
+      const queueKey = await conditionalWriteKey(p);
+      const previous =
+        conditionalWrites.get(queueKey)?.catch(() => undefined) ?? Promise.resolve();
+      const operation = previous.then(async () => {
+        const current = await readFileSnapshot(p);
+        if (current.revision !== expectedRevision) {
+          return { status: "conflict", current } as const;
+        }
+        const target = await conditionalWriteTarget(p);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        try {
+          await fs.writeFile(temp, content, "utf8");
+          const latest = await readFileSnapshot(p);
+          const latestTarget = await conditionalWriteTarget(p);
+          if (
+            latest.revision !== expectedRevision ||
+            latestTarget !== target
+          ) {
+            return { status: "conflict", current: latest } as const;
+          }
+          if (latest.exists) {
+            const mode = (await fs.stat(target)).mode & 0o7777;
+            await fs.chmod(temp, mode);
+          }
+          await fs.rename(temp, target);
+          return {
+            status: "written",
+            revision: fileRevision(content),
+          } as const;
+        } finally {
+          await fs.rm(temp, { force: true }).catch(() => undefined);
+        }
+      });
+      conditionalWrites.set(queueKey, operation);
+      void operation.finally(() => {
+        if (conditionalWrites.get(queueKey) === operation) {
+          conditionalWrites.delete(queueKey);
+        }
+      }).catch(() => undefined);
+      return operation;
+    },
+  );
 
   ipcMain.handle(CH.fsStat, async (_e, p: string): Promise<FileStat> => {
     const s = await fs.stat(p);
@@ -108,12 +212,11 @@ export function registerFsService(ctx: ServiceContext): () => void {
                 .then(() => true)
                 .catch(() => false);
               ctx.send(CH.fsWatchEvent, {
-                type:
-                  eventType === "change"
+                type: !exists
+                  ? "delete"
+                  : eventType === "change"
                     ? "change"
-                    : exists
-                      ? "create"
-                      : "delete",
+                    : "create",
                 path: full,
               });
             }, 80),

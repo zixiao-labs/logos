@@ -1,10 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync, promises as fs } from "node:fs";
 import path from "node:path";
-import { Readable, type Transform } from "node:stream";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { extract as extractTar, type ReadEntry } from "tar";
-// @ts-expect-error unbzip2-stream does not publish TypeScript declarations.
 import unbzip2Stream from "unbzip2-stream";
 import * as yauzl from "yauzl";
 import { CH } from "../../shared/channels";
@@ -14,8 +13,6 @@ import type {
   AcpRegistryDistributionKind,
 } from "../../shared/types";
 import type { ServiceContext } from "./context";
-
-const createBzip2Decoder = unbzip2Stream as () => Transform;
 
 export const ACP_REGISTRY_URL =
   "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -29,6 +26,7 @@ const DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const EXTRACTED_MAX_BYTES = 512 * 1024 * 1024;
 const ARCHIVE_MAX_ENTRIES = 20_000;
 const ARCHIVE_MAX_DEPTH = 64;
+const HTTPS_MAX_REDIRECTS = 5;
 const INSTALL_MARKER = ".acp-install.json";
 
 export type AcpPlatform =
@@ -50,7 +48,7 @@ export interface AcpRegistryBinary {
   cmd: string;
   args: string[];
   env: Record<string, string>;
-  sha256?: string;
+  sha256: string;
 }
 
 export interface ParsedAcpRegistryAgent {
@@ -178,13 +176,13 @@ function parseBinaryLaunch(value: unknown): AcpRegistryBinary | undefined {
   const args = parseArgs(value.args);
   const env = parseEnv(value.env);
   const sha256 = normalizeSha256(value.sha256);
-  if (!args || !env || sha256 === null) return undefined;
+  if (!args || !env || !sha256) return undefined;
   return {
     archive: archive.toString(),
     cmd,
     args,
     env,
-    ...(sha256 ? { sha256 } : {}),
+    sha256,
   };
 }
 
@@ -442,18 +440,38 @@ async function readResponseLimited(response: Response, maxBytes: number): Promis
   return Buffer.concat(chunks, received);
 }
 
+async function fetchHttps(url: string | URL, init: RequestInit): Promise<Response> {
+  let current = new URL(url);
+  let redirects = 0;
+  while (true) {
+    if (current.protocol !== "https:") throw new Error("ACP requests must use HTTPS.");
+    const response = await fetch(current, { ...init, redirect: "manual" });
+    if (response.url && new URL(response.url).protocol !== "https:") {
+      throw new Error("ACP request redirected to an insecure URL.");
+    }
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+
+    const location = response.headers.get("location");
+    await response.body?.cancel();
+    if (!location) return response;
+    if (redirects >= HTTPS_MAX_REDIRECTS) {
+      throw new Error("ACP request exceeded the redirect limit.");
+    }
+    const next = new URL(location, current);
+    if (next.protocol !== "https:") {
+      throw new Error("ACP request redirected to an insecure URL.");
+    }
+    current = next;
+    redirects += 1;
+  }
+}
+
 async function downloadBinary(url: string): Promise<Buffer> {
-  const parsed = new URL(url);
-  if (parsed.protocol !== "https:") throw new Error("ACP binary downloads must use HTTPS.");
-  const response = await fetch(parsed, {
+  const response = await fetchHttps(url, {
     headers: { Accept: "application/octet-stream", "User-Agent": "Logos" },
-    redirect: "follow",
     signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`ACP binary download failed with HTTP ${response.status}.`);
-  if (response.url && new URL(response.url).protocol !== "https:") {
-    throw new Error("ACP binary download redirected to an insecure URL.");
-  }
   return readResponseLimited(response, DOWNLOAD_MAX_BYTES);
 }
 
@@ -496,7 +514,7 @@ function tarExtractOptions(cwd: string) {
 async function extractTarArchive(data: Buffer, destination: string, bzip2: boolean): Promise<void> {
   const options = tarExtractOptions(destination);
   if (bzip2) {
-    await pipeline(Readable.from(data), createBzip2Decoder(), extractTar(options));
+    await pipeline(Readable.from(data), unbzip2Stream(), extractTar(options));
     return;
   }
   const archive = path.join(path.dirname(destination), `.${randomUUID()}.archive`);
@@ -595,7 +613,7 @@ async function completedInstall(
       marker.version !== agent.version ||
       marker.platform !== platform ||
       marker.archive !== binary.archive ||
-      marker.sha256 !== (binary.sha256 ?? null) ||
+      marker.sha256 !== binary.sha256 ||
       marker.cmd !== binary.cmd
     ) {
       return null;
@@ -624,10 +642,8 @@ async function installBinary(
   const staging = await fs.mkdtemp(path.join(parent, `.${platform}-`));
   try {
     const data = await downloadBinary(binary.archive);
-    if (binary.sha256) {
-      const digest = createHash("sha256").update(data).digest("hex");
-      if (digest !== binary.sha256) throw new Error("ACP binary download failed SHA-256 verification.");
-    }
+    const digest = createHash("sha256").update(data).digest("hex");
+    if (digest !== binary.sha256) throw new Error("ACP binary download failed SHA-256 verification.");
 
     const kind = archiveKind(binary.archive);
     if (kind === "zip") {
@@ -655,7 +671,7 @@ async function installBinary(
           version: agent.version,
           platform,
           archive: binary.archive,
-          sha256: binary.sha256 ?? null,
+          sha256: binary.sha256,
           cmd: binary.cmd,
         },
         null,
@@ -723,7 +739,7 @@ function createRegistryLoader(userDataDir: string) {
     try {
       const headers = new Headers({ Accept: "application/json", "User-Agent": "Logos" });
       if (cached?.etag) headers.set("If-None-Match", cached.etag);
-      const response = await fetch(ACP_REGISTRY_URL, {
+      const response = await fetchHttps(ACP_REGISTRY_URL, {
         headers,
         signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
       });

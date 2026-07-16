@@ -137,6 +137,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/unbzip2-stream": "^1.4.3",
     "@types/yauzl": "^3.4.0",
     "electron": "^41.0.0",
     "electron-builder": "^26.8.1",

@@ -27,6 +27,12 @@ interface ApiKeyCredential {
 
 type OpenAICredential = OAuthCredential | ApiKeyCredential;
 
+interface CredentialStorage {
+  isEncryptionAvailable(): boolean;
+  encryptString(value: string): Buffer;
+  decryptString(value: Buffer): string;
+}
+
 interface TokenResponse {
   access_token: string;
   refresh_token?: string;
@@ -103,6 +109,8 @@ export class OpenAIAuthStore {
   private readonly file: string;
   private loaded = false;
   private credential: OpenAICredential | null = null;
+  private loadPromise: Promise<OpenAICredential | null> | null = null;
+  private credentialQueue: Promise<void> = Promise.resolve();
   private refreshPromise: Promise<OAuthCredential> | null = null;
   private loginPromise: Promise<AgentCredentialStatus> | null = null;
   private revision = 0;
@@ -111,6 +119,7 @@ export class OpenAIAuthStore {
     userDataDir: string,
     private readonly openExternal: (url: string) => Promise<unknown> = (url) =>
       shell.openExternal(url),
+    private readonly secureStorage: CredentialStorage = safeStorage,
   ) {
     this.file = path.join(userDataDir, "credentials", "openai.enc");
   }
@@ -131,16 +140,27 @@ export class OpenAIAuthStore {
   async setApiKey(apiKey: string): Promise<AgentCredentialStatus> {
     const value = apiKey.trim();
     if (!value) throw new Error("OpenAI API key is required");
-    this.revision += 1;
-    await this.save({ type: "api-key", apiKey: value });
+    const revision = ++this.revision;
+    await this.mutateCredential(async () => {
+      if (revision !== this.revision) {
+        throw new Error("OpenAI API key update was superseded");
+      }
+      const credential: ApiKeyCredential = { type: "api-key", apiKey: value };
+      await this.persistCredential(credential);
+      this.credential = credential;
+      this.loaded = true;
+    });
     return this.status();
   }
 
   async logout(): Promise<void> {
-    this.revision += 1;
-    this.credential = null;
-    this.loaded = true;
-    await fs.rm(this.file, { force: true });
+    const revision = ++this.revision;
+    await this.mutateCredential(async () => {
+      if (revision !== this.revision) return;
+      await fs.rm(this.file, { force: true });
+      this.credential = null;
+      this.loaded = true;
+    });
   }
 
   async loginChatGPT(): Promise<AgentCredentialStatus> {
@@ -180,33 +200,54 @@ export class OpenAIAuthStore {
 
   private async load(): Promise<OpenAICredential | null> {
     if (this.loaded) return this.credential;
-    this.loaded = true;
-    try {
-      const encrypted = await fs.readFile(this.file);
-      if (!safeStorage.isEncryptionAvailable()) {
-        throw new Error("OS secure storage is unavailable");
-      }
-      const raw = safeStorage.decryptString(encrypted);
-      const parsed = JSON.parse(raw) as OpenAICredential;
-      if (parsed.type !== "api-key" && parsed.type !== "chatgpt") return null;
-      this.credential = parsed;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!this.loadPromise) {
+      this.loadPromise = this.mutateCredential(async () => {
+        if (this.loaded) return this.credential;
+        try {
+          const encrypted = await fs.readFile(this.file);
+          if (!this.secureStorage.isEncryptionAvailable()) {
+            throw new Error("OS secure storage is unavailable");
+          }
+          const raw = this.secureStorage.decryptString(encrypted);
+          const parsed = JSON.parse(raw) as OpenAICredential;
+          this.credential =
+            parsed.type === "api-key" || parsed.type === "chatgpt" ? parsed : null;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          this.credential = null;
+        }
+        this.loaded = true;
+        return this.credential;
+      }).finally(() => {
+        this.loadPromise = null;
+      });
     }
-    return this.credential;
+    return this.loadPromise;
   }
 
-  private async save(credential: OpenAICredential): Promise<void> {
-    if (!safeStorage.isEncryptionAvailable()) {
+  private async persistCredential(credential: OpenAICredential): Promise<void> {
+    if (!this.secureStorage.isEncryptionAvailable()) {
       throw new Error("OS secure storage is unavailable; credentials were not saved");
     }
-    const encrypted = safeStorage.encryptString(JSON.stringify(credential));
+    const encrypted = this.secureStorage.encryptString(JSON.stringify(credential));
     await fs.mkdir(path.dirname(this.file), { recursive: true });
-    const temp = `${this.file}.${process.pid}.tmp`;
-    await fs.writeFile(temp, encrypted, { mode: 0o600 });
-    await fs.rename(temp, this.file);
-    this.credential = credential;
-    this.loaded = true;
+    const temp = `${this.file}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    try {
+      await fs.writeFile(temp, encrypted, { mode: 0o600 });
+      await fs.rename(temp, this.file);
+    } catch (error) {
+      await fs.rm(temp, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private mutateCredential<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.credentialQueue.then(operation, operation);
+    this.credentialQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async refresh(current: OAuthCredential): Promise<OAuthCredential> {
@@ -220,9 +261,6 @@ export class OpenAIAuthStore {
         }),
       )
         .then(async (tokens) => {
-          if (revision !== this.revision || this.credential !== current) {
-            throw new Error("OpenAI credentials changed while the token was refreshing");
-          }
           const identity = tokenIdentity(tokens);
           const refreshed: OAuthCredential = {
             type: "chatgpt",
@@ -232,7 +270,14 @@ export class OpenAIAuthStore {
             accountId: identity.accountId ?? current.accountId,
             email: identity.email ?? current.email,
           };
-          await this.save(refreshed);
+          await this.mutateCredential(async () => {
+            if (revision !== this.revision || this.credential !== current) {
+              throw new Error("OpenAI credentials changed while the token was refreshing");
+            }
+            await this.persistCredential(refreshed);
+            this.credential = refreshed;
+            this.loaded = true;
+          });
           return refreshed;
         })
         .finally(() => {
@@ -321,15 +366,20 @@ export class OpenAIAuthStore {
       });
       const identity = tokenIdentity(tokens);
       if (!tokens.refresh_token) throw new Error("OpenAI did not return a refresh token");
-      if (revision !== this.revision) {
-        throw new Error("ChatGPT login was superseded by another credential change");
-      }
-      await this.save({
+      const credential: OAuthCredential = {
         type: "chatgpt",
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt: Date.now() + (tokens.expires_in ?? 3600) * 1000,
         ...identity,
+      };
+      await this.mutateCredential(async () => {
+        if (revision !== this.revision) {
+          throw new Error("ChatGPT login was superseded by another credential change");
+        }
+        await this.persistCredential(credential);
+        this.credential = credential;
+        this.loaded = true;
       });
       return this.status();
     } finally {

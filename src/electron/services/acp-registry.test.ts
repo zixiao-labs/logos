@@ -74,6 +74,27 @@ describe("ACP registry parsing and resolution", () => {
     expect(registry.agents[1]?.distribution.uvx?.package).toBe("example-agent==1.2.3");
   });
 
+  it("rejects binary entries without SHA-256 while preserving package fallback", () => {
+    const registry = parseAcpRegistry({
+      agents: [
+        registryAgent({
+          distribution: {
+            binary: {
+              "linux-x86_64": {
+                archive: "https://example.test/agent.tar.gz",
+                cmd: "bin/agent",
+              },
+            },
+            npx: { package: "example@1.2.3" },
+          },
+        }),
+      ],
+    });
+
+    expect(registry.agents[0]?.distribution.binary).toBeUndefined();
+    expect(registry.agents[0]?.distribution.npx?.package).toBe("example@1.2.3");
+  });
+
   it("resolves npx as a pinned, argument-safe launch with manifest env only", async () => {
     const agent = parseAcpRegistry({ agents: [registryAgent()] }).agents[0]!;
     const config = await resolveAcpRegistryAgent(agent, {
@@ -212,5 +233,74 @@ describe("ACP registry service cache", () => {
     expect(cache.body).toBe(body);
     expect(cache.etag).toBe('"registry-v1"');
     expect(typeof cache.fetchedAt).toBe("number");
+  });
+
+  it("rejects an HTTPS registry redirect chain that downgrades to HTTP", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "https://example.test/registry.json" },
+        });
+      }
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "http://example.test/registry-v2.json" },
+      });
+    }) as typeof globalThis.fetch;
+
+    const ipc = createIpcHarness();
+    registerAcpRegistryService({
+      ipcMain: ipc.ipcMain,
+      userDataDir,
+      getWindow: () => null,
+      send: () => undefined,
+    } satisfies ServiceContext);
+
+    await expect(ipc.invoke(CH.agentRegistryList)).rejects.toThrow("insecure URL");
+    expect(calls).toBe(2);
+  });
+
+  it("rejects an HTTPS binary redirect that downgrades to HTTP", async () => {
+    const platform = currentAcpPlatform();
+    if (!platform) throw new Error("Test requires a supported ACP platform.");
+    const body = JSON.stringify({
+      version: "1.0.0",
+      agents: [
+        registryAgent({
+          distribution: {
+            binary: {
+              [platform]: {
+                archive: "https://example.test/agent",
+                cmd: "agent",
+                sha256: "a".repeat(64),
+              },
+            },
+          },
+        }),
+      ],
+    });
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response(body, { status: 200 });
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "http://example.test/agent" },
+      });
+    }) as typeof globalThis.fetch;
+
+    const ipc = createIpcHarness();
+    registerAcpRegistryService({
+      ipcMain: ipc.ipcMain,
+      userDataDir,
+      getWindow: () => null,
+      send: () => undefined,
+    } satisfies ServiceContext);
+
+    await expect(ipc.invoke(CH.agentRegistryResolve, "example")).rejects.toThrow("insecure URL");
+    expect(calls).toBe(2);
   });
 });

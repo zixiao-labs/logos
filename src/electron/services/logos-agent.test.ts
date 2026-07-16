@@ -227,6 +227,10 @@ describe("Logos agent runtime", () => {
   });
 
   it("executes an approved write tool and continues the model loop", async () => {
+    const target = path.join(root, "created.txt");
+    await fs.writeFile(target, "old content", "utf8");
+    await fs.chmod(target, 0o640);
+    await fs.mkdir(path.join(root, "target-dir"));
     let calls = 0;
     globalThis.fetch = (async () => {
       calls += 1;
@@ -243,6 +247,13 @@ describe("Logos agent runtime", () => {
                   call_id: "call-1",
                   name: "write_file",
                   arguments: JSON.stringify({ path: "created.txt", content: "created" }),
+                },
+                {
+                  type: "function_call",
+                  id: "item-2",
+                  call_id: "call-2",
+                  name: "write_file",
+                  arguments: JSON.stringify({ path: "target-dir", content: "blocked" }),
                 },
               ],
             },
@@ -276,7 +287,11 @@ describe("Logos agent runtime", () => {
 
     await runtime.prompt("create a file");
 
-    expect(await fs.readFile(path.join(root, "created.txt"), "utf8")).toBe("created");
+    expect(await fs.readFile(target, "utf8")).toBe("created");
+    if (process.platform !== "win32") {
+      expect((await fs.stat(target)).mode & 0o777).toBe(0o640);
+    }
+    expect((await fs.readdir(root)).some((name) => name.endsWith(".tmp"))).toBe(false);
     expect(calls).toBe(2);
     expect(events.some((event) => event.kind === "tool-use" && event.name === "write_file")).toBe(true);
     expect(
@@ -287,6 +302,11 @@ describe("Logos agent runtime", () => {
           event.diffs?.[0]?.newText === "created",
       ),
     ).toBe(true);
+    expect(
+      events.find(
+        (event) => event.kind === "tool-result" && event.toolUseId === "call-2",
+      ),
+    ).toMatchObject({ kind: "tool-result", isError: true });
   });
 
   it("executes read, list, search, and command tools with observable results", async () => {
@@ -387,6 +407,163 @@ describe("Logos agent runtime", () => {
     expect(result("command-1")?.content).toContain("command-ok");
     expect(approvals).toEqual(["run_command"]);
     expect(calls).toBe(2);
+  });
+
+  it("requires explicit approval for commands in bypass mode", async () => {
+    const marker = path.join(root, "command-ran.txt");
+    const approvals: string[] = [];
+    hooks.requestPermission = async (_sessionId, toolName) => {
+      approvals.push(toolName);
+      return false;
+    };
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream([
+          {
+            type: "response.completed",
+            response: {
+              id: "resp-command",
+              output: [
+                {
+                  type: "function_call",
+                  call_id: "command-bypass",
+                  name: "run_command",
+                  arguments: JSON.stringify({
+                    command: process.execPath,
+                    args: [
+                      "-e",
+                      `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "bad")`,
+                    ],
+                  }),
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-command-done", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root, {
+        permissionMode: "bypassPermissions",
+        allowedTools: ["run_command"],
+      }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("run a command");
+
+    expect(approvals).toEqual(["run_command"]);
+    expect(await fs.stat(marker).catch(() => null)).toBeNull();
+    expect(
+      events.find(
+        (event) =>
+          event.kind === "tool-result" && event.toolUseId === "command-bypass",
+      ),
+    ).toMatchObject({ kind: "tool-result", isError: true, content: "Denied by user" });
+  });
+
+  it("byte-limits error tool output before emitting or replaying it", async () => {
+    const escapedPath = `../${"x".repeat(1024 * 1024)}`;
+    let calls = 0;
+    let replayedOutput: string | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream([
+          {
+            type: "response.completed",
+            response: {
+              id: "resp-large-error",
+              output: [
+                {
+                  type: "function_call",
+                  call_id: "large-error",
+                  name: "read_file",
+                  arguments: JSON.stringify({ path: escapedPath }),
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      const body = JSON.parse(String(init?.body)) as { input?: Array<Record<string, unknown>> };
+      replayedOutput = body.input?.find(
+        (item) => item.type === "function_call_output",
+      )?.output as string | undefined;
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-large-error-done", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("read outside the workspace");
+
+    const result = events.find(
+      (event) => event.kind === "tool-result" && event.toolUseId === "large-error",
+    );
+    if (result?.kind !== "tool-result") throw new Error("Missing tool result");
+    expect(result.isError).toBe(true);
+    expect(result.content.startsWith("Path is outside the workspace:")).toBe(true);
+    expect(result.content.endsWith("...[truncated]")).toBe(true);
+    expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(1024 * 1024);
+    expect(replayedOutput).toBe(result.content);
+  });
+
+  it("awaits queued prompts serially after credentials change", async () => {
+    let authenticated = false;
+    const auth = {
+      status: async () =>
+        authenticated
+          ? ({ type: "api-key", label: "OpenAI API key" } as const)
+          : ({ type: "none" } as const),
+      requestAuth: async () => ({
+        type: "api-key" as const,
+        url: "https://api.openai.test/v1/responses",
+        headers: { Authorization: "Bearer test" },
+      }),
+    } as unknown as OpenAIAuthStore;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: `response-${calls}`, output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root),
+      hooks,
+      auth,
+      sessionsDir,
+    );
+    await runtime.prompt("first");
+    await runtime.prompt("second");
+    authenticated = true;
+
+    await runtime.credentialsChanged();
+
+    expect(calls).toBe(2);
+    expect(events.filter((event) => event.kind === "result").length).toBe(2);
   });
 
   it("reports denied mutations and workspace path escapes as tool errors", async () => {

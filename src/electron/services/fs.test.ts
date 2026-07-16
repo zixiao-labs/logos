@@ -9,7 +9,12 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CH } from "../../shared/channels";
-import type { DirListing, FileStat } from "../../shared/types";
+import type {
+  ConditionalWriteResult,
+  DirListing,
+  FileSnapshot,
+  FileStat,
+} from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { registerFsService } from "./fs";
@@ -87,5 +92,59 @@ describe("filesystem service", () => {
 
     expect(await service.invoke<string>(CH.fsReadFile, file)).toBe("new");
     await expect(service.invoke(CH.fsCreateFile, file, "replace")).rejects.toThrow();
+  });
+
+  it("writes only when the on-disk revision still matches", async () => {
+    const file = path.join(root, "conditional.txt");
+    await fs.writeFile(file, "initial");
+    if (process.platform !== "win32") await fs.chmod(file, 0o755);
+    const snapshot = await service.invoke<FileSnapshot>(CH.fsReadFileSnapshot, file);
+
+    await fs.writeFile(file, "external");
+    const conflict = await service.invoke<ConditionalWriteResult>(
+      CH.fsWriteFileConditional,
+      file,
+      "editor",
+      snapshot.revision,
+    );
+    expect(conflict).toMatchObject({
+      status: "conflict",
+      current: { exists: true, content: "external" },
+    });
+    expect(await fs.readFile(file, "utf8")).toBe("external");
+
+    if (conflict.status !== "conflict") throw new Error("Expected a conflict");
+    const written = await service.invoke<ConditionalWriteResult>(
+      CH.fsWriteFileConditional,
+      file,
+      "editor",
+      conflict.current.revision,
+    );
+    expect(written.status).toBe("written");
+    expect(await fs.readFile(file, "utf8")).toBe("editor");
+    if (process.platform !== "win32") {
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o755);
+    }
+
+    const nextSnapshot = await service.invoke<FileSnapshot>(
+      CH.fsReadFileSnapshot,
+      file,
+    );
+    const concurrent = await Promise.all([
+      service.invoke<ConditionalWriteResult>(
+        CH.fsWriteFileConditional,
+        file,
+        "first",
+        nextSnapshot.revision,
+      ),
+      service.invoke<ConditionalWriteResult>(
+        CH.fsWriteFileConditional,
+        file,
+        "second",
+        nextSnapshot.revision,
+      ),
+    ]);
+    expect(concurrent.filter((result) => result.status === "written")).toHaveLength(1);
+    expect(concurrent.filter((result) => result.status === "conflict")).toHaveLength(1);
   });
 });

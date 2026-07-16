@@ -14,6 +14,7 @@ import { registerMenu } from "./services/menu";
 import { registerSettingsService } from "./services/settings";
 import { registerTerminalService } from "./services/terminal";
 import { registerWorkspaceService } from "./services/workspace";
+import { AcpSecretStore } from "./services/acp-secrets";
 import { setupAutoUpdater } from "./services/updater";
 
 let mainWindow: BrowserWindow | null = null;
@@ -111,15 +112,16 @@ async function createWindow() {
 
 app.whenReady().then(() => {
   const ctx = createContext();
+  const acpSecrets = new AcpSecretStore(ctx.userDataDir);
   registerAppHandlers();
   disposers.push(
     registerFsService(ctx),
     registerGitService(ctx),
     registerTerminalService(ctx),
-    registerSettingsService(ctx),
+    registerSettingsService(ctx, acpSecrets),
     registerWorkspaceService(ctx, dialog),
     registerAcpRegistryService(ctx),
-    registerAgentService(ctx),
+    registerAgentService(ctx, acpSecrets),
     registerLspService(ctx),
     registerDebugService(ctx),
     registerMenu(ctx),

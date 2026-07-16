@@ -17,6 +17,8 @@ import type {
   AppVersions,
   DirListing,
   FileStat,
+  FileSnapshot,
+  ConditionalWriteResult,
   FsWatchEvent,
   GitBranch,
   GitFileDiff,
@@ -60,7 +62,13 @@ export interface LogosAPI {
   fs: {
     readDir(path: string): Promise<DirListing>;
     readFile(path: string): Promise<string>;
+    readFileSnapshot(path: string): Promise<FileSnapshot>;
     writeFile(path: string, content: string): Promise<void>;
+    writeFileConditional(
+      path: string,
+      content: string,
+      expectedRevision: string,
+    ): Promise<ConditionalWriteResult>;
     stat(path: string): Promise<FileStat>;
     createFile(path: string, content?: string): Promise<void>;
     createDir(path: string): Promise<void>;
@@ -121,6 +129,13 @@ export interface LogosAPI {
     setMany(patch: Partial<Settings>): Promise<Settings>;
     reset(): Promise<Settings>;
     getPath(): Promise<string>;
+    setAcpSecret(
+      serverId: string,
+      name: string,
+      value: string,
+      reference?: string,
+    ): Promise<string>;
+    deleteAcpSecret(reference: string): Promise<void>;
     onChanged(cb: (settings: Settings) => void): Unsubscribe;
   };
   agent: {

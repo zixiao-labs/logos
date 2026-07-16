@@ -3,6 +3,8 @@ import { Button, Card } from "@heroui/react";
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import { DEFAULT_LOGOS_MODEL } from "../shared/logos-agent";
+import { DEFAULT_SETTINGS } from "../shared/defaults";
+import { ACP_SECRET_MASK, isSensitiveEnvName } from "../shared/acp-env";
 import type { AcpAgentConfig, Settings } from "../shared/types";
 
 function Switch({
@@ -75,13 +77,97 @@ function Row({ name, settingKey, children }: RowProps) {
 
 function AcpServersEditor({
   servers,
+  referencedIds,
   onChange,
 }: {
   servers: AcpAgentConfig[];
-  onChange: (servers: AcpAgentConfig[]) => void;
+  referencedIds: Set<string>;
+  onChange: (servers: AcpAgentConfig[]) => Promise<void>;
 }) {
-  const update = (id: string, patch: Partial<AcpAgentConfig>) =>
-    onChange(servers.map((server) => (server.id === id ? { ...server, ...patch } : server)));
+  const [busyServerId, setBusyServerId] = useState<string | null>(null);
+  const update = (id: string, patch: Partial<AcpAgentConfig>) => {
+    const current = useStore.getState().settings["agent.acpServers"];
+    return onChange(
+      current.map((server) =>
+        server.id === id ? { ...server, ...patch } : server,
+      ),
+    );
+  };
+
+  async function updateEnvironment(
+    server: AcpAgentConfig,
+    value: string,
+  ): Promise<Record<string, string>> {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error("ACP environment must be a JSON object");
+    }
+    const entries = Object.entries(parsed);
+    for (const [name, rawValue] of entries) {
+      if (typeof rawValue !== "string") {
+        throw new Error(`ACP environment value must be a string: ${name}`);
+      }
+    }
+    const env: Record<string, string> = {};
+    const secretEnv: Record<string, string> = {};
+    const createdReferences: string[] = [];
+    try {
+      for (const [name, rawValue] of entries as Array<[string, string]>) {
+        const existingReference = server.secretEnv?.[name];
+        if (!existingReference && !isSensitiveEnvName(name)) {
+          env[name] = rawValue;
+          continue;
+        }
+        if (rawValue === ACP_SECRET_MASK) {
+          if (!existingReference) throw new Error(`Enter a value for ${name}`);
+          secretEnv[name] = existingReference;
+        } else {
+          const reference = await window.logos.settings.setAcpSecret(
+            server.id,
+            name,
+            rawValue,
+          );
+          secretEnv[name] = reference;
+          createdReferences.push(reference);
+        }
+      }
+      await update(server.id, {
+        env,
+        secretEnv: Object.keys(secretEnv).length ? secretEnv : undefined,
+      });
+    } catch (error) {
+      await Promise.all(
+        createdReferences.map((reference) =>
+          window.logos.settings.deleteAcpSecret(reference),
+        ),
+      );
+      throw error;
+    }
+    await Promise.all(
+      Object.entries(server.secretEnv ?? {}).flatMap(([name, reference]) =>
+        secretEnv[name] === reference
+          ? []
+          : [window.logos.settings.deleteAcpSecret(reference)],
+      ),
+    );
+    return {
+      ...env,
+      ...Object.fromEntries(
+        Object.keys(secretEnv).map((name) => [name, ACP_SECRET_MASK]),
+      ),
+    };
+  }
+
+  async function removeServer(server: AcpAgentConfig): Promise<void> {
+    if (referencedIds.has(server.id)) return;
+    const current = useStore.getState().settings["agent.acpServers"];
+    await onChange(current.filter((item) => item.id !== server.id));
+    await Promise.all(
+      Object.values(server.secretEnv ?? {}).map((reference) =>
+        window.logos.settings.deleteAcpSecret(reference),
+      ),
+    );
+  }
 
   return (
     <div className="acp-server-list">
@@ -94,40 +180,44 @@ function AcpServersEditor({
               aria-label="Remove ACP server"
               size="sm"
               variant="danger"
-              onPress={() => onChange(servers.filter((item) => item.id !== server.id))}
+              isDisabled={
+                referencedIds.has(server.id) || busyServerId === server.id
+              }
+              onPress={() => void removeServer(server)}
             >
               ×
             </Button>
           </Card.Header>
           <Card.Content className="acp-server-fields">
-            <input
-              className="field"
-              aria-label="Agent id"
-              placeholder="id"
-              value={server.id}
-              onChange={(event) => update(server.id, { id: event.target.value })}
-            />
+            <code>{server.id}</code>
             <input
               className="field"
               aria-label="Agent name"
               placeholder="Display name"
+              disabled={busyServerId === server.id}
               value={server.name}
-              onChange={(event) => update(server.id, { name: event.target.value })}
+              onChange={(event) =>
+                void update(server.id, { name: event.target.value })
+              }
             />
             <input
               className="field"
               aria-label="Agent command"
               placeholder="opencode"
+              disabled={busyServerId === server.id}
               value={server.command}
-              onChange={(event) => update(server.id, { command: event.target.value })}
+              onChange={(event) =>
+                void update(server.id, { command: event.target.value })
+              }
             />
             <input
               className="field"
               aria-label="Agent arguments"
               placeholder="acp"
+              disabled={busyServerId === server.id}
               value={server.args.join(" ")}
               onChange={(event) =>
-                update(server.id, {
+                void update(server.id, {
                   args: event.target.value.split(/\s+/).filter(Boolean),
                 })
               }
@@ -136,14 +226,49 @@ function AcpServersEditor({
               className="field acp-env"
               aria-label="Agent environment"
               placeholder='{"OPENAI_API_KEY":"..."}'
-              defaultValue={JSON.stringify(server.env, null, 2)}
+              disabled={busyServerId === server.id}
+              defaultValue={JSON.stringify(
+                {
+                  ...server.env,
+                  ...Object.fromEntries(
+                    Object.keys(server.secretEnv ?? {}).map((name) => [
+                      name,
+                      ACP_SECRET_MASK,
+                    ]),
+                  ),
+                },
+                null,
+                2,
+              )}
               onBlur={(event) => {
-                try {
-                  const env = JSON.parse(event.target.value) as Record<string, string>;
-                  update(server.id, { env });
-                } catch {
-                  event.target.value = JSON.stringify(server.env, null, 2);
-                }
+                const target = event.currentTarget;
+                setBusyServerId(server.id);
+                target.disabled = true;
+                void updateEnvironment(server, target.value)
+                  .then((displayEnv) => {
+                    target.value = JSON.stringify(displayEnv, null, 2);
+                  })
+                  .catch(() => {
+                    target.value = JSON.stringify(
+                      {
+                        ...server.env,
+                        ...Object.fromEntries(
+                          Object.keys(server.secretEnv ?? {}).map((name) => [
+                            name,
+                            ACP_SECRET_MASK,
+                          ]),
+                        ),
+                      },
+                      null,
+                      2,
+                    );
+                  })
+                  .finally(() => {
+                    target.disabled = false;
+                    setBusyServerId((current) =>
+                      current === server.id ? null : current,
+                    );
+                  });
               }}
             />
           </Card.Content>
@@ -153,10 +278,10 @@ function AcpServersEditor({
         size="sm"
         variant="secondary"
         onPress={() =>
-          onChange([
+          void onChange([
             ...servers,
             {
-              id: `agent-${servers.length + 1}`,
+              id: `acp-${crypto.randomUUID()}`,
               name: "ACP Agent",
               command: "",
               args: [],
@@ -178,6 +303,7 @@ export function SettingsView() {
   const setManySettings = useStore((s) => s.setManySettings);
   const resetSettings = useStore((s) => s.resetSettings);
   const registry = useStore((s) => s.agentRegistry);
+  const agentSessions = useStore((s) => s.agentSessions);
   const credentialStatus = useStore((s) => s.agentCredentialStatus);
   const loginChatGPT = useStore((s) => s.loginChatGPT);
   const setOpenAIKey = useStore((s) => s.setOpenAIKey);
@@ -373,16 +499,20 @@ export function SettingsView() {
           <Row name={t("settings.acpAgents")} settingKey="agent.acpServers">
             <AcpServersEditor
               servers={settings["agent.acpServers"]}
+              referencedIds={new Set(agentSessions.map((session) => session.runtimeId))}
               onChange={(servers) => {
                 const currentRuntime = settings["agent.defaultRuntime"];
-                void setManySettings({
+                return setManySettings({
                   "agent.acpServers": servers,
                   ...(
                     currentRuntime !== "claude" &&
                     currentRuntime !== "logos" &&
                     !currentRuntime.startsWith("registry:") &&
                     !servers.some((server) => server.id === currentRuntime)
-                      ? { "agent.defaultRuntime": "claude" }
+                      ? {
+                          "agent.defaultRuntime":
+                            DEFAULT_SETTINGS["agent.defaultRuntime"],
+                        }
                       : {}
                   ),
                 });
