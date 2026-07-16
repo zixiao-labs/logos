@@ -9,7 +9,12 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CH } from "../../shared/channels";
-import type { DirListing, FileStat } from "../../shared/types";
+import type {
+  ConditionalWriteResult,
+  DirListing,
+  FileSnapshot,
+  FileStat,
+} from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { registerFsService } from "./fs";
@@ -87,5 +92,66 @@ describe("filesystem service", () => {
 
     expect(await service.invoke<string>(CH.fsReadFile, file)).toBe("new");
     await expect(service.invoke(CH.fsCreateFile, file, "replace")).rejects.toThrow();
+  });
+
+  it("optimistically detects conflicts and serializes local writes", async () => {
+    const file = path.join(root, "conditional.txt");
+    await fs.writeFile(file, "initial");
+    if (process.platform !== "win32") await fs.chmod(file, 0o755);
+    const snapshot = await service.invoke<FileSnapshot>(CH.fsReadFileSnapshot, file);
+
+    await fs.writeFile(file, "external");
+    const conflict = await service.invoke<ConditionalWriteResult>(
+      CH.fsWriteFileConditional,
+      file,
+      "editor",
+      snapshot.revision,
+    );
+    expect(conflict).toMatchObject({
+      status: "conflict",
+      current: { exists: true, content: "external" },
+    });
+    expect(await fs.readFile(file, "utf8")).toBe("external");
+
+    if (conflict.status !== "conflict") throw new Error("Expected a conflict");
+    const written = await service.invoke<ConditionalWriteResult>(
+      CH.fsWriteFileConditional,
+      file,
+      "editor",
+      conflict.current.revision,
+    );
+    expect(written.status).toBe("written-optimistically");
+    expect(await fs.readFile(file, "utf8")).toBe("editor");
+    if (process.platform !== "win32") {
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o755);
+    }
+
+    const nextSnapshot = await service.invoke<FileSnapshot>(
+      CH.fsReadFileSnapshot,
+      file,
+    );
+    const concurrent = await Promise.all(
+      ["first", "second"].map(async (payload) => ({
+        payload,
+        result: await service.invoke<ConditionalWriteResult>(
+          CH.fsWriteFileConditional,
+          file,
+          payload,
+          nextSnapshot.revision,
+        ),
+      })),
+    );
+    const winners = concurrent.filter(
+      ({ result }) => result.status === "written-optimistically",
+    );
+    const losers = concurrent.filter(({ result }) => result.status === "conflict");
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    const winner = winners[0];
+    const loser = losers[0];
+    if (!winner || !loser) throw new Error("Expected one writer and one conflict");
+    const persisted = await fs.readFile(file, "utf8");
+    expect(persisted).toBe(winner.payload);
+    expect(persisted).not.toBe(loser.payload);
   });
 });

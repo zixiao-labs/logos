@@ -26,7 +26,10 @@ jobs:
           cache: npm
 
       - name: Install dependencies (skip native rebuild)
-        run: npm ci --ignore-scripts
+        run: |
+          npm ci --ignore-scripts
+          # Tests import Electron APIs, but the root electron-rebuild is unnecessary here.
+          npm rebuild electron
 
       - name: Unit and integration tests with coverage
         run: npm run test:coverage -- --reporter=github-actions

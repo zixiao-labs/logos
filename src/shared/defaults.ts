@@ -1,4 +1,5 @@
 import type { Settings } from "./types";
+import { DEFAULT_LOGOS_MODEL } from "./logos-agent";
 
 /** Canonical default settings, shared by the main process and the renderer. */
 export const DEFAULT_SETTINGS: Settings = {
@@ -26,5 +27,17 @@ export const DEFAULT_SETTINGS: Settings = {
   "agent.allowedTools": [],
   "agent.disallowedTools": [],
   "agent.loadProjectSettings": true,
+  "agent.defaultRuntime": "logos",
+  "agent.logosModel": DEFAULT_LOGOS_MODEL,
+  "agent.openaiBaseUrl": "https://api.openai.com/v1",
+  "agent.acpServers": [
+    {
+      id: "opencode",
+      name: "OpenCode",
+      command: "opencode",
+      args: ["acp"],
+      env: {},
+    },
+  ],
   "lsp.autoDownload": true,
 };

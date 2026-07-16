@@ -1,12 +1,21 @@
 import { create } from "zustand";
 import { DEFAULT_SETTINGS } from "../shared/defaults";
+import { isSensitiveEnvName } from "../shared/acp-env";
 import type {
   AgentAuthContext,
+  AgentAuthMethod,
+  AgentAuthResult,
+  AgentCredentialStatus,
+  AgentConfigOption,
   AgentEvent,
   AgentModelInfo,
+  AgentPlanEntry,
   AgentQuestion,
   AgentSlashCommand,
+  AgentToolDiff,
+  AgentToolLocation,
   AgentThinkingConfig,
+  AcpRegistryAgent,
   GitStatus,
   GitLogEntry,
   LanguageCode,
@@ -15,6 +24,7 @@ import type {
   LspProgress,
   LspWorkDoneProgress,
   Settings,
+  TerminalCreateOptions,
   ThemeMode,
 } from "../shared/types";
 import { basename, languageFromPath } from "../lib/language";
@@ -49,6 +59,7 @@ import type {
 
 export type TabKind =
   | "file"
+  | "diff"
   | "debug-source"
   | "preview"
   | "settings"
@@ -63,10 +74,12 @@ export interface EditorTab {
   path?: string;
   language?: string;
   dirty?: boolean;
+  externalChange?: "changed" | "deleted";
   url?: string;
   content?: string;
   debugPosition?: { line: number; column: number };
   debugSessionId?: string;
+  diff?: { path: string; staged: boolean };
 }
 
 export type SidebarView =
@@ -106,7 +119,13 @@ export interface TerminalInstance {
 
 export type AgentItem =
   | { id: string; kind: "user"; text: string }
-  | { id: string; kind: "assistant"; text: string; thinking: string }
+  | {
+      id: string;
+      kind: "assistant";
+      text: string;
+      thinking: string;
+      parentToolUseId?: string;
+    }
   | {
       id: string;
       kind: "tool";
@@ -115,20 +134,71 @@ export type AgentItem =
       input: unknown;
       isError?: boolean;
       result?: string;
+      parentToolUseId?: string;
+      status?: "pending" | "in_progress" | "completed" | "failed";
+      toolKind?: string;
+      locations?: AgentToolLocation[];
+      diffs?: AgentToolDiff[];
+    }
+  | {
+      id: string;
+      kind: "subagent";
+      taskId: string;
+      toolUseId?: string;
+      agentType?: string;
+      description: string;
+      status: "pending" | "running" | "completed" | "failed" | "stopped";
+      summary?: string;
     }
   | { id: string; kind: "result"; costUsd: number | null; durationMs: number }
   | { id: string; kind: "error"; message: string };
 
-export interface AgentSession {
+export interface AgentThread {
   id: string;
   name: string;
   items: AgentItem[];
-  status: "idle" | "running";
+  status: "idle" | "running" | "waiting";
+  runtimeId: string;
+  runtimeName?: string;
+  workspaceRoot?: string;
+  parentId?: string;
+  createdAt: number;
+  updatedAt: number;
+  followMode: boolean;
+  plan: AgentPlanEntry[];
+  modeId?: string;
+  modes: Array<{ id: string; name: string; description?: string }>;
+  currentModelId?: string;
+  models: AgentModelInfo[];
+  configOptions: AgentConfigOption[];
+  authMethods: AgentAuthMethod[];
+  commands: AgentSlashCommand[];
+  canConfigureProviders: boolean;
+  trace: AgentTraceEntry[];
   /** SDK session id captured from the result event; used to resume (F2). */
   sdkSessionId?: string;
   pendingAsk?: { requestId: string; questions: AgentQuestion[] };
-  pendingPermission?: { requestId: string; toolName: string; input: unknown };
+  pendingPermission?: {
+    requestId: string;
+    toolName: string;
+    input: unknown;
+    options?: Array<{
+      id: string;
+      name: string;
+      kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+    }>;
+  };
 }
+
+export interface AgentTraceEntry {
+  id: string;
+  time: number;
+  subtype: string;
+  data: unknown;
+}
+
+/** Kept as a source-compatible alias while the UI migrates to Thread naming. */
+export type AgentSession = AgentThread;
 
 export interface Diagnostic {
   message: string;
@@ -198,12 +268,14 @@ interface LogosState {
 
   debug: DebugViewState;
 
-  agentSessions: AgentSession[];
+  agentSessions: AgentThread[];
   activeAgentId: string | null;
   /** Cached model list from the SDK (D1). Empty until loaded / if unavailable. */
   agentModels: AgentModelInfo[];
   /** Cached slash-commands from the SDK (D4). */
   agentCommands: AgentSlashCommand[];
+  agentRegistry: AcpRegistryAgent[];
+  agentCredentialStatus: AgentCredentialStatus;
 
   paletteOpen: boolean;
 
@@ -220,6 +292,7 @@ interface LogosState {
   setRoot(path: string): Promise<void>;
 
   openFile(path: string): void;
+  openGitDiff(path: string, staged: boolean): void;
   openSpecial(kind: "settings" | "extensions" | "welcome"): void;
   openPreview(path: string): void;
   openWebview(url: string, name: string): void;
@@ -237,7 +310,7 @@ interface LogosState {
   setSecondaryWidth(w: number): void;
   setPanelHeight(h: number): void;
 
-  newTerminal(): Promise<void>;
+  newTerminal(options?: TerminalCreateOptions): Promise<void>;
   closeTerminal(id: string): void;
   setActiveTerminal(id: string): void;
 
@@ -255,6 +328,11 @@ interface LogosState {
   clearLspWorkDone(serverId: string, token: string | number): void;
   loadAgentModels(): Promise<void>;
   loadAgentCommands(): Promise<void>;
+  loadAgentRegistry(forceRefresh?: boolean): Promise<void>;
+  refreshAgentAuth(): Promise<void>;
+  loginChatGPT(): Promise<void>;
+  setOpenAIKey(apiKey: string): Promise<void>;
+  logoutOpenAI(): Promise<void>;
 
   loadDebugConfigurations(): Promise<void>;
   createDebugConfiguration(): Promise<void>;
@@ -271,19 +349,27 @@ interface LogosState {
   clearDebugConsole(): void;
   applyDebugEvent(event: DebugSessionEvent): void;
 
-  newAgentSession(name?: string): string;
+  newAgentSession(name?: string, parentId?: string, runtimeId?: string): string;
   removeAgentSession(id: string): void;
   setActiveAgent(id: string): void;
+  setAgentRuntime(id: string, runtimeId: string): void;
+  setAgentMode(id: string, modeId: string): Promise<void>;
+  setAgentModel(id: string, modelId: string): Promise<void>;
+  setAgentConfig(id: string, configId: string, value: string | boolean): Promise<void>;
+  toggleAgentFollow(id: string): void;
+  authenticateAgent(id: string, methodId: string): Promise<void>;
   sendAgentPrompt(text: string): Promise<void>;
   interruptAgent(): Promise<void>;
   answerAsk(
     requestId: string,
-    answers: Record<string, string | string[]>,
+    answers: Record<string, string | string[] | number | boolean>,
     response?: string,
+    action?: "accept" | "decline" | "cancel",
   ): Promise<void>;
   respondPermission(
     requestId: string,
     behavior: "allow" | "deny",
+    optionId?: string,
   ): Promise<void>;
   applyAgentEvent(e: AgentEvent): void;
 
@@ -305,6 +391,22 @@ function thinkingConfig(
   return undefined; // "adaptive" => defer to the model/SDK default
 }
 
+function stringifyAgentValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function agentTraceData(value: unknown): string {
+  const serialized = stringifyAgentValue(value);
+  return serialized.length > 32_768
+    ? `${serialized.slice(0, 32_768)}\n...[trace truncated]`
+    : serialized;
+}
+
 /** Build the credential/cwd context used to probe SDK models/commands. */
 function agentAuthCtx(state: {
   root: string | null;
@@ -320,29 +422,356 @@ function agentAuthCtx(state: {
 }
 
 // --- Agent session persistence (F2) ---------------------------------------
-// A focused localStorage persister: only agent conversations + the SDK session
-// id survive a restart, so `resume` can rejoin the CLI session. Transient state
-// (running status, pending permission/ask) is never restored — the main-process
-// side of those is gone after a restart.
-const AGENT_PERSIST_KEY = "logos.agent.v1";
+// Session metadata remains in localStorage, while potentially large transcripts
+// live in IndexedDB. Transient state (running status, pending permission/ask) is
+// never restored because the main-process side is gone after a restart.
+const AGENT_PERSIST_KEY = "logos.agent.threads.v2";
+const LEGACY_AGENT_PERSIST_KEY = "logos.agent.v1";
+const AGENT_TRANSCRIPT_DB = "logos.agent.transcripts.v1";
+const AGENT_TRANSCRIPT_STORE = "transcripts";
+const AGENT_TRANSCRIPT_ITEM_LIMIT = 2_000;
+const AGENT_TRANSCRIPT_THREAD_BYTES = 2 * 1024 * 1024;
+const AGENT_TRANSCRIPT_TOTAL_BYTES = 20 * 1024 * 1024;
+
+interface AgentTranscriptRecord {
+  id: string;
+  items: AgentItem[];
+  updatedAt: number;
+  bytes: number;
+}
+
+const transcriptEncoder = new TextEncoder();
+let transcriptDbPromise: Promise<IDBDatabase | null> | null = null;
+
+function serializedBytes(value: unknown): number {
+  try {
+    return transcriptEncoder.encode(JSON.stringify(value)).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function serializableAgentItem(item: AgentItem): AgentItem {
+  try {
+    const seen = new WeakSet<object>();
+    const serialized = JSON.stringify(item, (_key, value: unknown) => {
+      if (typeof value === "bigint") return String(value);
+      if (typeof value === "function" || typeof value === "symbol") {
+        return String(value);
+      }
+      if (value && typeof value === "object") {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
+      }
+      return value;
+    });
+    if (serialized) return JSON.parse(serialized) as AgentItem;
+  } catch {
+    // Fall through to a small, cloneable item rather than losing the snapshot.
+  }
+  return {
+    id: item.id,
+    kind: "error",
+    message: "Transcript item could not be serialized",
+  };
+}
+
+function trailingText(
+  value: string | undefined,
+  limit: number,
+): string | undefined {
+  if (value == null || value.length <= limit) return value;
+  if (limit <= 0) return "[truncated]";
+  return `[truncated]${value.slice(-limit)}`;
+}
+
+function compactAgentItem(item: AgentItem, byteBudget: number): AgentItem {
+  const contentLimit = Math.max(0, Math.floor(byteBudget / 16));
+  const id = trailingText(item.id, 256) ?? "";
+  switch (item.kind) {
+    case "user":
+      return {
+        id,
+        kind: "user",
+        text: trailingText(item.text, contentLimit) ?? "",
+      };
+    case "assistant":
+      return {
+        id,
+        kind: "assistant",
+        text: trailingText(item.text, contentLimit) ?? "",
+        thinking: trailingText(item.thinking, contentLimit) ?? "",
+        parentToolUseId: trailingText(item.parentToolUseId, 256),
+      };
+    case "tool":
+      return {
+        id,
+        kind: "tool",
+        toolUseId: trailingText(item.toolUseId, 256) ?? "",
+        name: trailingText(item.name, 512) ?? "",
+        input: trailingText(stringifyAgentValue(item.input), contentLimit),
+        isError: item.isError,
+        result: trailingText(item.result, contentLimit),
+        parentToolUseId: trailingText(item.parentToolUseId, 256),
+        status: item.status,
+        toolKind: trailingText(item.toolKind, 256),
+      };
+    case "subagent":
+      return {
+        id,
+        kind: "subagent",
+        taskId: trailingText(item.taskId, 256) ?? "",
+        toolUseId: trailingText(item.toolUseId, 256),
+        agentType: trailingText(item.agentType, 256),
+        description: trailingText(item.description, contentLimit) ?? "",
+        status: item.status,
+        summary: trailingText(item.summary, contentLimit),
+      };
+    case "result":
+      return {
+        id,
+        kind: "result",
+        costUsd: item.costUsd,
+        durationMs: item.durationMs,
+      };
+    case "error":
+      return {
+        id,
+        kind: "error",
+        message: trailingText(item.message, contentLimit) ?? "",
+      };
+  }
+}
+
+function boundAgentTranscript(
+  items: AgentItem[],
+  byteLimit = AGENT_TRANSCRIPT_THREAD_BYTES,
+): { items: AgentItem[]; bytes: number } {
+  if (byteLimit <= 0 || items.length === 0) return { items: [], bytes: 0 };
+  const bounded = items
+    .slice(-AGENT_TRANSCRIPT_ITEM_LIMIT)
+    .map(serializableAgentItem);
+  const sizes = bounded.map(serializedBytes);
+  let bytes =
+    2 +
+    sizes.reduce((total, size) => total + size, 0) +
+    Math.max(0, bounded.length - 1);
+  let first = 0;
+  while (bytes > byteLimit && bounded.length - first > 1) {
+    bytes -= sizes[first] + 1;
+    first += 1;
+  }
+  let result = bounded.slice(first);
+  if (bytes > byteLimit && result.length === 1) {
+    let budget = byteLimit;
+    let compacted = compactAgentItem(result[0], budget);
+    bytes = 2 + serializedBytes(compacted);
+    while (bytes > byteLimit && budget > 0) {
+      budget = Math.floor(budget / 2);
+      compacted = compactAgentItem(result[0], budget);
+      bytes = 2 + serializedBytes(compacted);
+    }
+    result = bytes <= byteLimit ? [compacted] : [];
+  }
+  return { items: result, bytes: result.length ? bytes : 0 };
+}
+
+function boundAgentTranscriptRecords(
+  transcripts: Array<Pick<AgentTranscriptRecord, "id" | "items" | "updatedAt">>,
+): AgentTranscriptRecord[] {
+  const records = transcripts.map(({ id, items, updatedAt }) => ({
+    id,
+    updatedAt,
+    ...boundAgentTranscript(items),
+  }));
+  let total = records.reduce((sum, record) => sum + record.bytes, 0);
+  for (const record of [...records].sort((a, b) => a.updatedAt - b.updatedAt)) {
+    if (total <= AGENT_TRANSCRIPT_TOTAL_BYTES) break;
+    const previousBytes = record.bytes;
+    const allowance = Math.max(
+      0,
+      AGENT_TRANSCRIPT_TOTAL_BYTES - (total - previousBytes),
+    );
+    const bounded = boundAgentTranscript(record.items, allowance);
+    record.items = bounded.items;
+    record.bytes = bounded.bytes;
+    total += record.bytes - previousBytes;
+  }
+  return records.filter((record) => record.items.length > 0);
+}
+
+function mergeAgentTranscriptItems(
+  stored: AgentItem[],
+  current: AgentItem[],
+): AgentItem[] {
+  const merged = [...stored];
+  const indices = new Map(merged.map((item, index) => [item.id, index]));
+  for (const item of current) {
+    const index = indices.get(item.id);
+    if (index === undefined) {
+      indices.set(item.id, merged.length);
+      merged.push(item);
+    } else {
+      merged[index] = item;
+    }
+  }
+  return merged;
+}
+
+function openAgentTranscriptDb(): Promise<IDBDatabase | null> {
+  if (transcriptDbPromise) return transcriptDbPromise;
+  if (typeof indexedDB === "undefined") return Promise.resolve(null);
+  let resolveOpening!: (db: IDBDatabase | null) => void;
+  const opening = new Promise<IDBDatabase | null>((resolve) => {
+    resolveOpening = resolve;
+  });
+  transcriptDbPromise = opening;
+  let settled = false;
+  const finish = (db: IDBDatabase | null) => {
+    if (settled) {
+      db?.close();
+      return;
+    }
+    settled = true;
+    if (!db && transcriptDbPromise === opening) transcriptDbPromise = null;
+    resolveOpening(db);
+  };
+  try {
+    const request = indexedDB.open(AGENT_TRANSCRIPT_DB, 1);
+    request.onupgradeneeded = () => {
+      try {
+        if (!request.result.objectStoreNames.contains(AGENT_TRANSCRIPT_STORE)) {
+          request.result.createObjectStore(AGENT_TRANSCRIPT_STORE, {
+            keyPath: "id",
+          });
+        }
+      } catch {
+        request.transaction?.abort();
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        if (transcriptDbPromise === opening) transcriptDbPromise = null;
+      };
+      finish(db);
+    };
+    request.onerror = () => finish(null);
+    request.onblocked = () => finish(null);
+  } catch {
+    finish(null);
+  }
+  return opening;
+}
+
+async function loadAgentTranscripts(): Promise<{
+  success: boolean;
+  records: AgentTranscriptRecord[];
+}> {
+  try {
+    const db = await openAgentTranscriptDb();
+    if (!db) return { success: false, records: [] };
+    const result = await new Promise<{
+      success: boolean;
+      records: AgentTranscriptRecord[];
+    }>((resolve) => {
+      try {
+        const request = db
+          .transaction(AGENT_TRANSCRIPT_STORE, "readonly")
+          .objectStore(AGENT_TRANSCRIPT_STORE)
+          .getAll();
+        request.onsuccess = () =>
+          resolve({
+            success: true,
+            records: request.result as AgentTranscriptRecord[],
+          });
+        request.onerror = () => resolve({ success: false, records: [] });
+      } catch {
+        resolve({ success: false, records: [] });
+      }
+    });
+    if (!result.success) return result;
+    return {
+      success: true,
+      records: boundAgentTranscriptRecords(
+        result.records.filter(
+        (record) =>
+          record &&
+          typeof record.id === "string" &&
+          Array.isArray(record.items) &&
+          typeof record.updatedAt === "number",
+        ),
+      ),
+    };
+  } catch {
+    return { success: false, records: [] };
+  }
+}
+
+async function persistAgentTranscripts(
+  agentSessions: AgentThread[],
+): Promise<boolean> {
+  try {
+    const db = await openAgentTranscriptDb();
+    if (!db) return false;
+    const records = boundAgentTranscriptRecords(agentSessions);
+    return await new Promise<boolean>((resolve) => {
+      try {
+        const transaction = db.transaction(AGENT_TRANSCRIPT_STORE, "readwrite");
+        const store = transaction.objectStore(AGENT_TRANSCRIPT_STORE);
+        store.clear();
+        for (const record of records) store.put(record);
+        transaction.oncomplete = () => resolve(true);
+        transaction.onerror = () => resolve(false);
+        transaction.onabort = () => resolve(false);
+      } catch {
+        resolve(false);
+      }
+    });
+  } catch {
+    // IndexedDB is optional; transcripts remain available for this renderer run.
+    return false;
+  }
+}
 
 function loadPersistedAgent(): {
-  agentSessions: AgentSession[];
+  agentSessions: AgentThread[];
   activeAgentId: string | null;
 } {
   try {
-    const raw = localStorage.getItem(AGENT_PERSIST_KEY);
+    const raw =
+      localStorage.getItem(AGENT_PERSIST_KEY) ??
+      localStorage.getItem(LEGACY_AGENT_PERSIST_KEY);
     if (!raw) return { agentSessions: [], activeAgentId: null };
     const parsed = JSON.parse(raw) as {
-      agentSessions?: AgentSession[];
+      agentSessions?: Array<Partial<AgentThread> & Pick<AgentThread, "id" | "name">>;
       activeAgentId?: string | null;
     };
     const agentSessions = (parsed.agentSessions ?? []).map(
-      (a): AgentSession => ({
+      (a): AgentThread => ({
         id: a.id,
         name: a.name,
+        // Read old localStorage transcripts once so they can migrate to IndexedDB.
         items: a.items ?? [],
         sdkSessionId: a.sdkSessionId,
+        runtimeId: a.runtimeId ?? "claude",
+        runtimeName: a.runtimeName,
+        workspaceRoot: a.workspaceRoot,
+        parentId: a.parentId,
+        createdAt: a.createdAt ?? Date.now(),
+        updatedAt: a.updatedAt ?? Date.now(),
+        followMode: a.followMode ?? true,
+        plan: a.plan ?? [],
+        modeId: a.modeId,
+        modes: a.modes ?? [],
+        currentModelId: a.currentModelId,
+        models: a.models ?? [],
+        configOptions: a.configOptions ?? [],
+        authMethods: a.authMethods ?? [],
+        commands: a.commands ?? [],
+        canConfigureProviders: a.canConfigureProviders ?? false,
+        trace: [],
         status: "idle",
       }),
     );
@@ -357,7 +786,7 @@ function loadPersistedAgent(): {
 }
 
 function persistAgent(
-  agentSessions: AgentSession[],
+  agentSessions: AgentThread[],
   activeAgentId: string | null,
 ): void {
   try {
@@ -367,18 +796,38 @@ function persistAgent(
         agentSessions: agentSessions.map((a) => ({
           id: a.id,
           name: a.name,
-          items: a.items,
           sdkSessionId: a.sdkSessionId,
+          runtimeId: a.runtimeId,
+          runtimeName: a.runtimeName,
+          workspaceRoot: a.workspaceRoot,
+          parentId: a.parentId,
+          createdAt: a.createdAt,
+          updatedAt: a.updatedAt,
+          followMode: a.followMode,
+          plan: a.plan,
+          modeId: a.modeId,
+          modes: a.modes,
+          currentModelId: a.currentModelId,
+          models: a.models,
+          configOptions: a.configOptions,
+          authMethods: a.authMethods,
+          commands: a.commands,
+          canConfigureProviders: a.canConfigureProviders,
         })),
         activeAgentId,
       }),
     );
+    localStorage.removeItem(LEGACY_AGENT_PERSIST_KEY);
   } catch {
     /* storage unavailable / quota exceeded — non-fatal */
   }
 }
 
 const persistedAgent = loadPersistedAgent();
+let legacyTranscriptPending = persistedAgent.agentSessions.some(
+  (thread) => thread.items.length > 0,
+);
+let transcriptPersistenceEnabled = false;
 
 const DEBUG_BREAKPOINTS_KEY = "logos.debug.breakpoints.v1";
 
@@ -596,6 +1045,8 @@ export const useStore = create<LogosState>((set, get) => ({
   activeAgentId: persistedAgent.activeAgentId,
   agentModels: [],
   agentCommands: [],
+  agentRegistry: [],
+  agentCredentialStatus: { type: "none" },
 
   paletteOpen: false,
 
@@ -645,17 +1096,44 @@ export const useStore = create<LogosState>((set, get) => ({
 
     // Always have at least one agent session ready (the Cursor layout shows it).
     if (get().agentSessions.length === 0) get().newAgentSession("Agent 1");
+    void get().loadAgentRegistry();
+    void get().refreshAgentAuth();
     if (root) void get().refreshGit();
     void get().loadDebugConfigurations();
   },
 
   async setSetting(key, value) {
-    set((s) => ({ settings: { ...s.settings, [key]: value } }));
-    await window.logos.settings.set(key, value);
+    set((state) => ({ settings: { ...state.settings, [key]: value } }));
+    try {
+      const settings = await window.logos.settings.set(key, value);
+      set({ settings });
+    } catch (error) {
+      set({ settings: await window.logos.settings.getAll() });
+      throw error;
+    }
   },
   async setManySettings(patch) {
-    set((s) => ({ settings: { ...s.settings, ...patch } }));
-    await window.logos.settings.setMany(patch);
+    const rendererPatch = patch["agent.acpServers"]
+      ? {
+          ...patch,
+          "agent.acpServers": patch["agent.acpServers"].map((server) => ({
+            ...server,
+            env: Object.fromEntries(
+              Object.entries(server.env).filter(
+                ([name]) => !isSensitiveEnvName(name),
+              ),
+            ),
+          })),
+        }
+      : patch;
+    set((state) => ({ settings: { ...state.settings, ...rendererPatch } }));
+    try {
+      const settings = await window.logos.settings.setMany(patch);
+      set({ settings });
+    } catch (error) {
+      set({ settings: await window.logos.settings.getAll() });
+      throw error;
+    }
   },
   async resetSettings() {
     const s = await window.logos.settings.reset();
@@ -706,6 +1184,25 @@ export const useStore = create<LogosState>((set, get) => ({
     };
     set((s) => ({
       tabs: [...s.tabs.filter((t) => t.kind !== "welcome"), tab],
+      activeTabId: id,
+    }));
+  },
+  openGitDiff(path, staged) {
+    const root = get().root;
+    if (!root) return;
+    const id = `diff:${staged ? "index" : "worktree"}:${path}`;
+    const tab: EditorTab = {
+      id,
+      kind: "diff",
+      name: `${basename(path)} (${staged ? "Index" : "Working Tree"})`,
+      path: `${root}/${path}`,
+      language: languageFromPath(path),
+      diff: { path, staged },
+    };
+    set((state) => ({
+      tabs: state.tabs.some((item) => item.id === id)
+        ? state.tabs
+        : [...state.tabs.filter((item) => item.kind !== "welcome"), tab],
       activeTabId: id,
     }));
   },
@@ -801,13 +1298,14 @@ export const useStore = create<LogosState>((set, get) => ({
     set({ panelHeight: Math.max(120, Math.min(720, h)) });
   },
 
-  async newTerminal() {
+  async newTerminal(options = {}) {
     const created = await window.logos.terminal.create({
       cwd: get().root ?? undefined,
+      ...options,
     });
     const inst: TerminalInstance = {
       id: created.id,
-      name: `${basename(created.shell)} ${get().terminals.length + 1}`,
+      name: `${options.executable ? basename(options.executable) : basename(created.shell)} ${get().terminals.length + 1}`,
       pid: created.pid,
     };
     set((s) => ({
@@ -911,6 +1409,30 @@ export const useStore = create<LogosState>((set, get) => ({
       .listCommands(agentAuthCtx(get()))
       .catch(() => []);
     set({ agentCommands: commands });
+  },
+  async loadAgentRegistry(forceRefresh) {
+    try {
+      const agents = await window.logos.agent.listRegistry(forceRefresh);
+      set({ agentRegistry: agents });
+    } catch {
+      // Keep the last successful registry when refresh fails.
+    }
+  },
+  async refreshAgentAuth() {
+    const status = await window.logos.agent.authStatus();
+    set({ agentCredentialStatus: status });
+  },
+  async loginChatGPT() {
+    const status = await window.logos.agent.loginChatGPT();
+    set({ agentCredentialStatus: status });
+  },
+  async setOpenAIKey(apiKey) {
+    const status = await window.logos.agent.setOpenAIKey(apiKey);
+    set({ agentCredentialStatus: status });
+  },
+  async logoutOpenAI() {
+    await window.logos.agent.logoutOpenAI();
+    set({ agentCredentialStatus: { type: "none" } });
   },
 
   async loadDebugConfigurations() {
@@ -1920,13 +2442,37 @@ export const useStore = create<LogosState>((set, get) => ({
     }
   },
 
-  newAgentSession(name) {
+  newAgentSession(name, parentId, runtimeId) {
     const id = crypto.randomUUID();
-    const session: AgentSession = {
+    const now = Date.now();
+    const selectedRuntime = runtimeId ?? get().settings["agent.defaultRuntime"];
+    const session: AgentThread = {
       id,
-      name: name ?? `Agent ${get().agentSessions.length + 1}`,
+      name:
+        name ??
+        (parentId
+          ? `Subthread ${get().agentSessions.filter((item) => item.parentId === parentId).length + 1}`
+          : `Thread ${get().agentSessions.filter((item) => !item.parentId).length + 1}`),
       items: [],
       status: "idle",
+      runtimeId: selectedRuntime,
+      workspaceRoot: undefined,
+      parentId,
+      createdAt: now,
+      updatedAt: now,
+      followMode: true,
+      plan: [],
+      modeId:
+        selectedRuntime === "claude" || selectedRuntime === "logos"
+          ? get().settings["agent.permissionMode"]
+          : undefined,
+      modes: [],
+      models: [],
+      configOptions: [],
+      authMethods: [],
+      commands: [],
+      canConfigureProviders: false,
+      trace: [],
     };
     set((s) => ({
       agentSessions: [...s.agentSessions, session],
@@ -1935,11 +2481,23 @@ export const useStore = create<LogosState>((set, get) => ({
     return id;
   },
   removeAgentSession(id) {
-    void window.logos.agent.interrupt(id);
+    const state = get();
+    const removed = new Set([id]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const thread of state.agentSessions) {
+        if (thread.parentId && removed.has(thread.parentId) && !removed.has(thread.id)) {
+          removed.add(thread.id);
+          changed = true;
+        }
+      }
+    }
+    for (const threadId of removed) void window.logos.agent.close(threadId);
     set((s) => {
-      const agentSessions = s.agentSessions.filter((a) => a.id !== id);
+      const agentSessions = s.agentSessions.filter((a) => !removed.has(a.id));
       const activeAgentId =
-        s.activeAgentId === id
+        s.activeAgentId != null && removed.has(s.activeAgentId)
           ? (agentSessions[agentSessions.length - 1]?.id ?? null)
           : s.activeAgentId;
       return { agentSessions, activeAgentId };
@@ -1948,79 +2506,371 @@ export const useStore = create<LogosState>((set, get) => ({
   setActiveAgent(id) {
     set({ activeAgentId: id });
   },
+  setAgentRuntime(id, runtimeId) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id
+          ? {
+              ...thread,
+              runtimeId,
+              runtimeName: undefined,
+              workspaceRoot: undefined,
+              sdkSessionId: undefined,
+              modeId:
+                runtimeId === "claude" || runtimeId === "logos"
+                  ? state.settings["agent.permissionMode"]
+                  : undefined,
+              modes: [],
+              models: [],
+              currentModelId: undefined,
+              configOptions: [],
+              authMethods: [],
+              commands: [],
+              canConfigureProviders: false,
+              trace: [],
+              updatedAt: Date.now(),
+            }
+          : thread,
+      ),
+    }));
+  },
+  async setAgentMode(id, modeId) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id ? { ...thread, modeId, updatedAt: Date.now() } : thread,
+      ),
+    }));
+    await window.logos.agent.setMode(id, modeId).catch(() => undefined);
+  },
+  async setAgentModel(id, modelId) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id
+          ? { ...thread, currentModelId: modelId, updatedAt: Date.now() }
+          : thread,
+      ),
+    }));
+    await window.logos.agent.setModel(id, modelId).catch(() => undefined);
+  },
+  async setAgentConfig(id, configId, value) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) => {
+        if (thread.id !== id) return thread;
+        return {
+          ...thread,
+          configOptions: thread.configOptions.map((option) =>
+            option.id === configId
+              ? { ...option, currentValue: value } as AgentConfigOption
+              : option,
+          ),
+          updatedAt: Date.now(),
+        };
+      }),
+    }));
+    await window.logos.agent.setConfig({ sessionId: id, configId, value });
+  },
+  toggleAgentFollow(id) {
+    set((state) => ({
+      agentSessions: state.agentSessions.map((thread) =>
+        thread.id === id
+          ? { ...thread, followMode: !thread.followMode, updatedAt: Date.now() }
+          : thread,
+      ),
+    }));
+  },
+  async authenticateAgent(id, methodId) {
+    let result: AgentAuthResult;
+    try {
+      result = await window.logos.agent.authenticate({
+        sessionId: id,
+        methodId,
+      });
+      await get().refreshAgentAuth();
+    } catch (error) {
+      set((state) => ({
+        agentSessions: state.agentSessions.map((thread) =>
+          thread.id === id
+            ? {
+                ...thread,
+                status: "waiting",
+                items: [
+                  ...thread.items,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "error" as const,
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+      return;
+    }
+    if (!result.terminal) {
+      return;
+    }
+    const created = await window.logos.terminal.create(result.terminal);
+    const terminal: TerminalInstance = {
+      id: created.id,
+      name: `Auth: ${basename(created.shell)}`,
+      pid: created.pid,
+    };
+    set((state) => ({
+      terminals: [...state.terminals, terminal],
+      activeTerminalId: terminal.id,
+      panelVisible: true,
+      panelTab: "terminal",
+    }));
+    const off = window.logos.terminal.onExit(created.id, (code) => {
+      off();
+      if (code !== 0) return;
+      void window.logos.agent
+        .authenticate({ sessionId: id, methodId, completed: true })
+        .catch((error) => {
+          set((state) => ({
+            agentSessions: state.agentSessions.map((thread) =>
+              thread.id === id
+                ? {
+                    ...thread,
+                    status: "waiting",
+                    items: [
+                      ...thread.items,
+                      {
+                        id: crypto.randomUUID(),
+                        kind: "error" as const,
+                        message:
+                          error instanceof Error ? error.message : String(error),
+                      },
+                    ],
+                    updatedAt: Date.now(),
+                  }
+                : thread,
+            ),
+          }));
+        });
+    });
+  },
   async sendAgentPrompt(text) {
-    const state = get();
+    let state = get();
     let id = state.activeAgentId;
     if (!id) id = get().newAgentSession();
+    state = get();
     const root = state.root ?? ".";
     const s = state.settings;
     // sdkSessionId survives restarts (F2): resume the CLI session if present.
     const session = state.agentSessions.find((a) => a.id === id);
+    if (session?.workspaceRoot && session.workspaceRoot !== root) {
+      set((current) => ({
+        agentSessions: current.agentSessions.map((thread) =>
+          thread.id === id
+            ? {
+                ...thread,
+                items: [
+                  ...thread.items,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "error" as const,
+                    message: "This thread belongs to a different workspace. Create a new thread to continue.",
+                  },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+      return;
+    }
     set((st) => ({
       agentSessions: st.agentSessions.map((a) =>
         a.id === id
           ? {
               ...a,
               status: "running",
+              workspaceRoot: a.workspaceRoot ?? root,
               pendingAsk: undefined,
               pendingPermission: undefined,
               items: [
                 ...a.items,
                 { id: crypto.randomUUID(), kind: "user", text },
               ],
+              updatedAt: Date.now(),
             }
           : a,
       ),
     }));
     const allowed = s["agent.allowedTools"];
     const disallowed = s["agent.disallowedTools"];
-    await window.logos.agent.start({
-      sessionId: id!,
-      prompt: text,
-      cwd: root,
-      // `|| undefined` everywhere => "empty means no override", mirroring model.
-      model: s["agent.model"] || undefined,
-      permissionMode: s["agent.permissionMode"],
-      resume: session?.sdkSessionId,
-      effort: s["agent.effort"] || undefined,
-      thinking: thinkingConfig(s["agent.thinking"], s["agent.thinkingBudget"]),
-      allowedTools: allowed.length ? allowed : undefined,
-      disallowedTools: disallowed.length ? disallowed : undefined,
-      settingSources: s["agent.loadProjectSettings"]
-        ? ["user", "project"]
-        : undefined,
-      apiKey: s["agent.apiKey"] || undefined,
-      authToken: s["agent.authToken"] || undefined,
-      baseUrl: s["agent.baseUrl"] || undefined,
-    });
+    let acpServer = s["agent.acpServers"].find(
+      (server) => server.id === session?.runtimeId,
+    );
+    let runtimeResolutionError: string | undefined;
+    if (session?.runtimeId.startsWith("registry:")) {
+      acpServer = await window.logos.agent
+        .resolveRegistryAgent(session.runtimeId.slice("registry:".length))
+        .catch((error) => {
+          runtimeResolutionError =
+            error instanceof Error ? error.message : String(error);
+          return undefined;
+        });
+    }
+    if (
+      session?.runtimeId &&
+      session.runtimeId !== "claude" &&
+      session.runtimeId !== "logos" &&
+      !acpServer
+    ) {
+      set((current) => ({
+        agentSessions: current.agentSessions.map((thread) =>
+          thread.id === id
+            ? {
+                ...thread,
+                status: "idle",
+                items: [
+                  ...thread.items,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "error",
+                    message:
+                      runtimeResolutionError ??
+                      `ACP runtime "${thread.runtimeId}" is not configured`,
+                  },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+      return;
+    }
+    const runtime =
+      session?.runtimeId === "logos"
+        ? ({ type: "logos" } as const)
+        : session?.runtimeId && session.runtimeId !== "claude" && acpServer
+          ? ({ type: "acp", server: acpServer } as const)
+          : ({ type: "claude" } as const);
+    try {
+      await window.logos.agent.start({
+        sessionId: id!,
+        prompt: text,
+        cwd: root,
+        // `|| undefined` everywhere => "empty means no override", mirroring model.
+        model:
+          session?.currentModelId ||
+          (runtime.type === "logos" ? s["agent.logosModel"] : s["agent.model"]) ||
+          undefined,
+        permissionMode:
+          runtime.type === "claude" || runtime.type === "logos"
+            ? ((session?.modeId as Settings["agent.permissionMode"]) ??
+              s["agent.permissionMode"])
+            : undefined,
+        resume: session?.sdkSessionId,
+        effort: s["agent.effort"] || undefined,
+        thinking: thinkingConfig(s["agent.thinking"], s["agent.thinkingBudget"]),
+        allowedTools: allowed.length ? allowed : undefined,
+        disallowedTools: disallowed.length ? disallowed : undefined,
+        settingSources: s["agent.loadProjectSettings"]
+          ? ["user", "project"]
+          : undefined,
+        apiKey:
+          runtime.type === "claude" ? s["agent.apiKey"] || undefined : undefined,
+        authToken:
+          runtime.type === "claude"
+            ? s["agent.authToken"] || undefined
+            : undefined,
+        baseUrl:
+          runtime.type === "logos"
+            ? s["agent.openaiBaseUrl"]
+            : s["agent.baseUrl"] || undefined,
+        runtime,
+      });
+    } catch (error) {
+      const message =
+        (error instanceof Error ? error.message : stringifyAgentValue(error)) ||
+        "Agent failed to start";
+      set((current) => ({
+        agentSessions: current.agentSessions.map((thread) =>
+          thread.id === id && thread.status === "running"
+            ? {
+                ...thread,
+                status: "idle",
+                pendingAsk: undefined,
+                pendingPermission: undefined,
+                items: [
+                  ...thread.items,
+                  { id: crypto.randomUUID(), kind: "error", message },
+                ],
+                updatedAt: Date.now(),
+              }
+            : thread,
+        ),
+      }));
+    }
   },
   async interruptAgent() {
     const id = get().activeAgentId;
-    if (id) await window.logos.agent.interrupt(id);
+    if (id) {
+      await window.logos.agent.interrupt(id);
+    }
   },
-  async answerAsk(requestId, answers, response) {
-    await window.logos.agent.respondAsk({ requestId, answers, response });
+  async answerAsk(requestId, answers, response, action) {
+    await window.logos.agent.respondAsk({ requestId, answers, response, action });
     set((s) => ({
       agentSessions: s.agentSessions.map((a) =>
         a.pendingAsk?.requestId === requestId
-          ? { ...a, pendingAsk: undefined }
+          ? {
+              ...a,
+              pendingAsk: undefined,
+              status: "running",
+              updatedAt: Date.now(),
+            }
           : a,
       ),
     }));
   },
-  async respondPermission(requestId, behavior) {
-    await window.logos.agent.respondPermission({ requestId, behavior });
+  async respondPermission(requestId, behavior, optionId) {
+    await window.logos.agent.respondPermission({ requestId, behavior, optionId });
     set((s) => ({
       agentSessions: s.agentSessions.map((a) =>
         a.pendingPermission?.requestId === requestId
-          ? { ...a, pendingPermission: undefined }
+          ? {
+              ...a,
+              pendingPermission: undefined,
+              status: "running",
+              updatedAt: Date.now(),
+            }
           : a,
       ),
     }));
   },
   applyAgentEvent(e) {
+    if (e.kind === "follow") {
+      const state = get();
+      const thread = state.agentSessions.find((item) => item.id === e.sessionId);
+      if (thread?.followMode) {
+        const absolute = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(e.location.path)
+          ? e.location.path
+          : state.root
+            ? `${state.root}/${e.location.path}`
+            : e.location.path;
+        get().openFile(absolute);
+        if (e.location.line != null) {
+          window.dispatchEvent(
+            new CustomEvent("logos:lsp-navigate", {
+              detail: {
+                path: absolute,
+                target: { lineNumber: Math.max(e.location.line, 1), column: 1 },
+                takeFocus: false,
+              },
+            }),
+          );
+        }
+      }
+      return;
+    }
     set((s) => {
-      const sessions = s.agentSessions.map((a): AgentSession => {
+      const sessions = s.agentSessions.map((a): AgentThread => {
         if (a.id !== e.sessionId) return a;
         const items = [...a.items];
         const findAssistant = (mid: string) => {
@@ -2031,6 +2881,20 @@ export const useStore = create<LogosState>((set, get) => ({
           return -1;
         };
         switch (e.kind) {
+          case "system":
+            return {
+              ...a,
+              trace: [
+                ...a.trace,
+                {
+                  id: crypto.randomUUID(),
+                  time: Date.now(),
+                  subtype: e.subtype,
+                  data: agentTraceData(e.data),
+                },
+              ].slice(-250),
+              updatedAt: Date.now(),
+            };
           case "text-delta": {
             let idx = findAssistant(e.messageId);
             if (idx === -1) {
@@ -2039,12 +2903,13 @@ export const useStore = create<LogosState>((set, get) => ({
                 kind: "assistant",
                 text: "",
                 thinking: "",
+                parentToolUseId: e.parentToolUseId,
               });
               idx = items.length - 1;
             }
             const it = items[idx] as Extract<AgentItem, { kind: "assistant" }>;
             items[idx] = { ...it, text: it.text + e.delta };
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
           case "text": {
             const idx = findAssistant(e.messageId);
@@ -2054,6 +2919,7 @@ export const useStore = create<LogosState>((set, get) => ({
                 kind: "assistant",
                 text: e.text,
                 thinking: "",
+                parentToolUseId: e.parentToolUseId,
               });
             } else {
               const it = items[idx] as Extract<
@@ -2062,7 +2928,7 @@ export const useStore = create<LogosState>((set, get) => ({
               >;
               items[idx] = { ...it, text: e.text };
             }
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
           case "thinking": {
             let idx = findAssistant(e.messageId);
@@ -2072,12 +2938,13 @@ export const useStore = create<LogosState>((set, get) => ({
                 kind: "assistant",
                 text: "",
                 thinking: "",
+                parentToolUseId: e.parentToolUseId,
               });
               idx = items.length - 1;
             }
             const it = items[idx] as Extract<AgentItem, { kind: "assistant" }>;
             items[idx] = { ...it, thinking: it.thinking + e.delta };
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
           case "tool-use":
             items.push({
@@ -2086,18 +2953,118 @@ export const useStore = create<LogosState>((set, get) => ({
               toolUseId: e.toolUseId,
               name: e.name,
               input: e.input,
+              parentToolUseId: e.parentToolUseId,
+              status: e.status,
+              toolKind: e.toolKind,
+              locations: e.locations,
+              diffs: e.diffs,
             });
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           case "tool-result": {
             const idx = items.findIndex(
               (it) => it.kind === "tool" && it.toolUseId === e.toolUseId,
             );
             if (idx !== -1) {
               const it = items[idx] as Extract<AgentItem, { kind: "tool" }>;
-              items[idx] = { ...it, isError: e.isError, result: e.content };
+              items[idx] = {
+                ...it,
+                isError: e.isError,
+                result: e.content,
+                status: e.isError ? "failed" : "completed",
+                locations: e.locations ?? it.locations,
+                diffs: e.diffs ?? it.diffs,
+              };
             }
-            return { ...a, items };
+            return { ...a, items, updatedAt: Date.now() };
           }
+          case "tool-update": {
+            const idx = items.findIndex(
+              (item) => item.kind === "tool" && item.toolUseId === e.toolUseId,
+            );
+            if (idx === -1) {
+              items.push({
+                id: e.toolUseId,
+                kind: "tool",
+                toolUseId: e.toolUseId,
+                name: e.title ?? "Tool",
+                input: e.input,
+                result: e.output == null ? undefined : stringifyAgentValue(e.output),
+                status: e.status,
+                locations: e.locations,
+                diffs: e.diffs,
+                isError: e.status === "failed",
+              });
+            } else {
+              const item = items[idx] as Extract<AgentItem, { kind: "tool" }>;
+              items[idx] = {
+                ...item,
+                name: e.title ?? item.name,
+                input: e.input ?? item.input,
+                result:
+                  e.output == null ? item.result : stringifyAgentValue(e.output),
+                status: e.status ?? item.status,
+                locations: e.locations ?? item.locations,
+                diffs: e.diffs ?? item.diffs,
+                isError: e.status === "failed" || item.isError,
+              };
+            }
+            return { ...a, items, updatedAt: Date.now() };
+          }
+          case "subagent": {
+            const idx = items.findIndex(
+              (item) => item.kind === "subagent" && item.taskId === e.taskId,
+            );
+            const next: Extract<AgentItem, { kind: "subagent" }> = {
+              id: `subagent:${e.taskId}`,
+              kind: "subagent",
+              taskId: e.taskId,
+              toolUseId: e.toolUseId,
+              agentType: e.agentType,
+              description: e.description,
+              status: e.status,
+              summary: e.summary,
+            };
+            if (idx === -1) items.push(next);
+            else items[idx] = { ...items[idx], ...next } as AgentItem;
+            return { ...a, items, updatedAt: Date.now() };
+          }
+          case "plan":
+            return { ...a, plan: e.entries, updatedAt: Date.now() };
+          case "runtime-ready":
+            return {
+              ...a,
+              runtimeName: e.runtimeName,
+              sdkSessionId: e.sdkSessionId || a.sdkSessionId,
+              modes: e.modes.length ? e.modes : a.modes,
+              modeId: e.currentModeId ?? a.modeId,
+              models: e.models.length ? e.models : a.models,
+              currentModelId: e.currentModelId ?? a.currentModelId,
+              configOptions: e.configOptions.length
+                ? e.configOptions
+                : a.configOptions,
+              authMethods: e.authMethods.length ? e.authMethods : a.authMethods,
+              commands: e.commands.length ? e.commands : a.commands,
+              canConfigureProviders: e.canConfigureProviders,
+              status: a.status === "waiting" ? "running" : a.status,
+              updatedAt: Date.now(),
+            };
+          case "mode":
+            return { ...a, modeId: e.modeId, updatedAt: Date.now() };
+          case "config":
+            return { ...a, configOptions: e.options, updatedAt: Date.now() };
+          case "session-info":
+            return {
+              ...a,
+              name: e.title || a.name,
+              updatedAt: Date.now(),
+            };
+          case "auth-required":
+            return {
+              ...a,
+              status: "waiting",
+              authMethods: e.methods,
+              updatedAt: Date.now(),
+            };
           case "result":
             items.push({
               id: crypto.randomUUID(),
@@ -2111,6 +3078,9 @@ export const useStore = create<LogosState>((set, get) => ({
               items,
               status: "idle",
               sdkSessionId: e.sdkSessionId ?? a.sdkSessionId,
+              pendingAsk: undefined,
+              pendingPermission: undefined,
+              updatedAt: Date.now(),
             };
           case "error":
             items.push({
@@ -2118,7 +3088,14 @@ export const useStore = create<LogosState>((set, get) => ({
               kind: "error",
               message: e.message,
             });
-            return { ...a, items, status: "idle" };
+            return {
+              ...a,
+              items,
+              status: "idle",
+              pendingAsk: undefined,
+              pendingPermission: undefined,
+              updatedAt: Date.now(),
+            };
           case "permission":
             return {
               ...a,
@@ -2126,12 +3103,17 @@ export const useStore = create<LogosState>((set, get) => ({
                 requestId: e.requestId,
                 toolName: e.toolName,
                 input: e.input,
+                options: e.options,
               },
+              status: "waiting",
+              updatedAt: Date.now(),
             };
           case "ask":
             return {
               ...a,
               pendingAsk: { requestId: e.requestId, questions: e.questions },
+              status: "waiting",
+              updatedAt: Date.now(),
             };
           default:
             return a;
@@ -2149,9 +3131,65 @@ export const useStore = create<LogosState>((set, get) => ({
   },
 }));
 
-// F2: write agent conversations to localStorage when they change. Debounced so
-// token-by-token streaming (which rebuilds agentSessions on every delta) does
-// not thrash storage; reference equality skips unrelated state updates.
+const initialTranscriptState = new Map(
+  useStore
+    .getState()
+    .agentSessions.map((thread) => [
+      thread.id,
+      { items: thread.items, updatedAt: thread.updatedAt },
+    ]),
+);
+void loadAgentTranscripts()
+  .then(({ success, records }) => {
+    transcriptPersistenceEnabled = success;
+    if (!success) return;
+    const byId = new Map(records.map((record) => [record.id, record]));
+    useStore.setState((state) => {
+      let changed = false;
+      const agentSessions = state.agentSessions.map((thread) => {
+        const initial = initialTranscriptState.get(thread.id);
+        const record = byId.get(thread.id);
+        if (!initial || !record) {
+          return thread;
+        }
+        if (thread.items !== initial.items) {
+          const items = mergeAgentTranscriptItems(record.items, thread.items);
+          changed = true;
+          return { ...thread, items };
+        }
+        if (
+          initial.items.length > 0 &&
+          initial.updatedAt >= record.updatedAt
+        ) return thread;
+        changed = true;
+        return { ...thread, items: record.items };
+      });
+      return changed ? { agentSessions } : state;
+    });
+  })
+  .catch(() => undefined)
+  .finally(() => {
+    const state = useStore.getState();
+    void persistAgentState(state.agentSessions, state.activeAgentId);
+  });
+
+async function persistAgentState(
+  sessions: AgentThread[],
+  activeAgentId: string | null,
+): Promise<void> {
+  if (!transcriptPersistenceEnabled) {
+    if (!legacyTranscriptPending) persistAgent(sessions, activeAgentId);
+    return;
+  }
+  const transcriptSaved = await persistAgentTranscripts(sessions);
+  if (transcriptSaved) legacyTranscriptPending = false;
+  if (transcriptSaved || !legacyTranscriptPending) {
+    persistAgent(sessions, activeAgentId);
+  }
+}
+
+// Debounce metadata and transcript writes so token-by-token streaming does not
+// thrash either storage backend; reference equality skips unrelated updates.
 let lastSessions = useStore.getState().agentSessions;
 let lastActive = useStore.getState().activeAgentId;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2163,9 +3201,8 @@ useStore.subscribe((state) => {
     lastSessions = state.agentSessions;
     lastActive = state.activeAgentId;
     if (persistTimer) clearTimeout(persistTimer);
-    persistTimer = setTimeout(
-      () => persistAgent(lastSessions, lastActive),
-      500,
-    );
+    persistTimer = setTimeout(() => {
+      void persistAgentState(lastSessions, lastActive);
+    }, 500);
   }
 });

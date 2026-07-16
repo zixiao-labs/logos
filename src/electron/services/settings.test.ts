@@ -14,6 +14,7 @@ import type { Settings } from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { registerSettingsService } from "./settings";
+import type { AcpSecretStore } from "./acp-secrets";
 
 describe("settings service", () => {
   let userDataDir: string;
@@ -26,7 +27,7 @@ describe("settings service", () => {
     await fs.rm(userDataDir, { recursive: true, force: true });
   });
 
-  function setup() {
+  function setup(acpSecrets?: AcpSecretStore) {
     const ipc = createIpcHarness();
     const sent: Array<[string, ...unknown[]]> = [];
     const ctx = {
@@ -35,7 +36,7 @@ describe("settings service", () => {
       getWindow: () => null,
       send: (channel: string, ...args: unknown[]) => sent.push([channel, ...args]),
     } satisfies ServiceContext;
-    registerSettingsService(ctx);
+    registerSettingsService(ctx, acpSecrets);
     return { ...ipc, sent };
   }
 
@@ -67,6 +68,7 @@ describe("settings service", () => {
     const settings = await service.invoke<Settings>(CH.settingsGetAll);
     expect(settings["editor.fontSize"]).toBe(18);
     expect(settings["workbench.theme"]).toBe(DEFAULT_SETTINGS["workbench.theme"]);
+    expect(settings["agent.logosModel"]).toBe("gpt-5.6-sol");
   });
 
   it("persists patches, broadcasts changes, and resets to defaults", async () => {
@@ -91,5 +93,171 @@ describe("settings service", () => {
     expect(await service.invoke<string>(CH.settingsGetPath)).toBe(
       path.join(userDataDir, "settings.json"),
     );
+  });
+
+  it("moves sensitive ACP environment values out of settings", async () => {
+    const stored = new Map<string, string>();
+    const acpSecrets = {
+      async set(
+        serverId: string,
+        name: string,
+        value: string,
+        reference?: string,
+      ) {
+        const ref = reference ?? `secret:${serverId}:${name}`;
+        stored.set(ref, value);
+        return ref;
+      },
+      async delete(reference: string) {
+        stored.delete(reference);
+      },
+      async has(_serverId: string, _name: string, reference: string) {
+        return stored.has(reference);
+      },
+    } as AcpSecretStore;
+    const service = setup(acpSecrets);
+    const settings = await service.invoke<Settings>(CH.settingsSet, {
+      "agent.acpServers": [
+        {
+          id: "custom",
+          name: "Custom",
+          command: "agent",
+          args: [],
+          env: {
+            OPENAI_API_KEY: "api-secret",
+            SSH_PRIVATE_KEY: "private-secret",
+            AWS_ACCESS_KEY_ID: "access-secret",
+            LOG_LEVEL: "debug",
+          },
+        },
+      ],
+    } satisfies Partial<Settings>);
+
+    expect(settings["agent.acpServers"][0]).toMatchObject({
+      env: { LOG_LEVEL: "debug" },
+      secretEnv: {
+        OPENAI_API_KEY: "secret:custom:OPENAI_API_KEY",
+        SSH_PRIVATE_KEY: "secret:custom:SSH_PRIVATE_KEY",
+        AWS_ACCESS_KEY_ID: "secret:custom:AWS_ACCESS_KEY_ID",
+      },
+    });
+    expect(stored.get("secret:custom:OPENAI_API_KEY")).toBe("api-secret");
+    expect(stored.get("secret:custom:SSH_PRIVATE_KEY")).toBe("private-secret");
+    expect(stored.get("secret:custom:AWS_ACCESS_KEY_ID")).toBe("access-secret");
+    const raw = await fs.readFile(path.join(userDataDir, "settings.json"), "utf8");
+    expect(raw.includes("api-secret")).toBe(false);
+    expect(raw.includes("private-secret")).toBe(false);
+    expect(raw.includes("access-secret")).toBe(false);
+  });
+
+  it("serializes first-load migration with the first settings update", async () => {
+    await fs.writeFile(
+      path.join(userDataDir, "settings.json"),
+      JSON.stringify({
+        "agent.acpServers": [
+          {
+            id: "custom",
+            name: "Custom",
+            command: "agent",
+            args: [],
+            env: { OPENAI_API_KEY: "secret-value" },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const stored = new Map<string, string>();
+    let setCalls = 0;
+    let releaseMigration!: () => void;
+    let markMigrationStarted!: () => void;
+    const migrationRelease = new Promise<void>((resolve) => {
+      releaseMigration = resolve;
+    });
+    const migrationStarted = new Promise<void>((resolve) => {
+      markMigrationStarted = resolve;
+    });
+    const acpSecrets = {
+      async set(serverId: string, name: string, value: string) {
+        setCalls += 1;
+        markMigrationStarted();
+        await migrationRelease;
+        const reference = `secret:${serverId}:${name}`;
+        stored.set(reference, value);
+        return reference;
+      },
+      async delete(reference: string) {
+        stored.delete(reference);
+      },
+      async has(_serverId: string, _name: string, reference: string) {
+        return stored.has(reference);
+      },
+    } as AcpSecretStore;
+    const service = setup(acpSecrets);
+
+    const loading = service.invoke<Settings>(CH.settingsGetAll);
+    await migrationStarted;
+    const updating = service.invoke<Settings>(CH.settingsSet, {
+      "editor.fontSize": 18,
+    } satisfies Partial<Settings>);
+    releaseMigration();
+
+    await loading;
+    const updated = await updating;
+    expect(setCalls).toBe(1);
+    expect(updated["editor.fontSize"]).toBe(18);
+    expect(updated["agent.acpServers"][0].secretEnv).toEqual({
+      OPENAI_API_KEY: "secret:custom:OPENAI_API_KEY",
+    });
+  });
+
+  it("manages ACP secrets without deleting referenced credentials", async () => {
+    const stored = new Map<string, string>();
+    const acpSecrets = {
+      async set(
+        serverId: string,
+        name: string,
+        value: string,
+        reference?: string,
+      ) {
+        const ref = reference ?? `secret:${serverId}:${name}`;
+        stored.set(ref, value);
+        return ref;
+      },
+      async delete(reference: string) {
+        stored.delete(reference);
+      },
+      async has(_serverId: string, _name: string, reference: string) {
+        return stored.has(reference);
+      },
+    } as AcpSecretStore;
+    const service = setup(acpSecrets);
+
+    const reference = await service.invoke<string>(
+      CH.settingsSetAcpSecret,
+      "custom",
+      "OPENAI_API_KEY",
+      "secret-value",
+    );
+    expect(stored.get(reference)).toBe("secret-value");
+
+    await service.invoke<Settings>(CH.settingsSet, {
+      "agent.acpServers": [
+        {
+          id: "custom",
+          name: "Custom",
+          command: "agent",
+          args: [],
+          env: {},
+          secretEnv: { OPENAI_API_KEY: reference },
+        },
+      ],
+    } satisfies Partial<Settings>);
+    await expect(
+      service.invoke(CH.settingsDeleteAcpSecret, reference),
+    ).rejects.toThrow("ACP secret is still referenced by settings");
+
+    await service.invoke<Settings>(CH.settingsSet, { "agent.acpServers": [] });
+    await service.invoke(CH.settingsDeleteAcpSecret, reference);
+    expect(stored.has(reference)).toBe(false);
   });
 });

@@ -4,7 +4,7 @@ import { useStore } from "./state/store";
 import { notifyInfo } from "./lib/toast";
 import type { MenuAction } from "./shared/types";
 import { setupLspMonaco } from "./lib/lsp-monaco";
-import { closeTabSafely } from "./components/MonacoEditor";
+import { closeTabSafely, setupMonacoFileSync } from "./components/MonacoEditor";
 import { TitleBar } from "./components/TitleBar";
 import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
@@ -23,6 +23,7 @@ export function App() {
   useEffect(() => {
     void useStore.getState().bootstrap();
     setupLspMonaco();
+    setupMonacoFileSync();
   }, []);
 
   // Apply theme + language to the document root.

@@ -7,7 +7,9 @@ export const CH = {
   // file system (invoke)
   fsReadDir: "fs:readDir",
   fsReadFile: "fs:readFile",
+  fsReadFileSnapshot: "fs:readFileSnapshot",
   fsWriteFile: "fs:writeFile",
+  fsWriteFileConditional: "fs:writeFileConditional",
   fsStat: "fs:stat",
   fsCreateFile: "fs:createFile",
   fsCreateDir: "fs:createDir",
@@ -42,6 +44,7 @@ export const CH = {
   gitCheckout: "git:checkout",
   gitCreateBranch: "git:createBranch",
   gitDiff: "git:diff",
+  gitFileDiff: "git:fileDiff",
   gitLog: "git:log",
   gitInit: "git:init",
   gitFetch: "git:fetch",
@@ -62,15 +65,31 @@ export const CH = {
   settingsSet: "settings:set",
   settingsReset: "settings:reset",
   settingsGetPath: "settings:getPath",
+  settingsSetAcpSecret: "settings:setAcpSecret",
+  settingsDeleteAcpSecret: "settings:deleteAcpSecret",
   settingsChanged: "settings:changed", // push
 
   // agent
   agentStart: "agent:start",
   agentInterrupt: "agent:interrupt",
+  agentClose: "agent:close",
   agentRespondPermission: "agent:respondPermission",
   agentRespondAsk: "agent:respondAsk",
   agentListModels: "agent:listModels",
   agentListCommands: "agent:listCommands",
+  agentSetMode: "agent:setMode",
+  agentSetModel: "agent:setModel",
+  agentSetConfig: "agent:setConfig",
+  agentAuthenticate: "agent:authenticate",
+  agentListProviders: "agent:listProviders",
+  agentSetProvider: "agent:setProvider",
+  agentDisableProvider: "agent:disableProvider",
+  agentAuthStatus: "agent:authStatus",
+  agentLoginChatGPT: "agent:loginChatGPT",
+  agentSetOpenAIKey: "agent:setOpenAIKey",
+  agentLogoutOpenAI: "agent:logoutOpenAI",
+  agentRegistryList: "agent:registryList",
+  agentRegistryResolve: "agent:registryResolve",
   agentEvent: "agent:event", // push
 
   // language servers

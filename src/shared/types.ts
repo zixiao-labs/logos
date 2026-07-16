@@ -31,6 +31,14 @@ export interface FileStat {
   mtimeMs: number;
 }
 
+export type FileSnapshot =
+  | { exists: true; content: string; revision: string }
+  | { exists: false; revision: string };
+
+export type ConditionalWriteResult =
+  | { status: "written-optimistically"; revision: string }
+  | { status: "conflict"; current: FileSnapshot };
+
 export type FsWatchEventType = "create" | "change" | "delete" | "rename";
 
 export interface FsWatchEvent {
@@ -44,6 +52,8 @@ export interface FsWatchEvent {
 
 export interface GitFileChange {
   path: string;
+  /** Previous repository path for a rename. */
+  originalPath?: string;
   /** Single-letter index (staged) status from git, or " " when unchanged. */
   index: string;
   /** Single-letter working-tree status, or " " when unchanged. */
@@ -71,6 +81,13 @@ export interface GitLogEntry {
   message: string;
   author: string;
   date: string;
+}
+
+export interface GitFileDiff {
+  path: string;
+  staged: boolean;
+  original: string;
+  modified: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +152,14 @@ export interface Settings {
   "agent.disallowedTools": string[];
   /** Load user/project .claude settings (slash-commands, agents, etc.). */
   "agent.loadProjectSettings": boolean;
+  /** Runtime used for newly-created threads. `claude` is the built-in runtime. */
+  "agent.defaultRuntime": string;
+  /** Model used by the Logos-owned OpenAI Responses runtime. */
+  "agent.logosModel": string;
+  /** Optional OpenAI-compatible API base URL. Credentials remain in safeStorage. */
+  "agent.openaiBaseUrl": string;
+  /** Third-party agents launched over Agent Client Protocol stdio. */
+  "agent.acpServers": AcpAgentConfig[];
   "lsp.autoDownload": boolean;
   [key: string]: unknown;
 }
@@ -149,8 +174,14 @@ export type AgentPermissionMode =
   | "bypassPermissions"
   | "plan";
 
-/** Reasoning effort levels the SDK accepts (maps 1:1 to the SDK `EffortLevel`). */
-export type AgentEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+/** Reasoning effort levels exposed by the built-in model runtimes. */
+export type AgentEffortLevel =
+  | "none"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 /** Effort setting value; "" means "defer to the model default". */
 export type AgentEffortSetting = "" | AgentEffortLevel;
 /** Extended-thinking mode exposed in settings/UI. */
@@ -195,16 +226,153 @@ export interface AgentAuthContext {
 export interface AgentQuestionOption {
   label: string;
   description: string;
+  /** Protocol value when the display label differs from the submitted value. */
+  value?: string;
   /** Optional markdown/HTML preview (only when previewFormat is configured). */
   preview?: string;
 }
 
 /** One clarifying question raised by Claude's AskUserQuestion tool. */
 export interface AgentQuestion {
+  /** Stable field key for structured ACP elicitations. */
+  id?: string;
   question: string;
   header: string;
   options: AgentQuestionOption[];
   multiSelect: boolean;
+  type?: "select" | "text" | "number" | "boolean" | "url";
+  required?: boolean;
+  defaultValue?: string | number | boolean | string[];
+  url?: string;
+  allowCustom?: boolean;
+}
+
+export type AgentAnswerValue = string | string[] | number | boolean;
+
+export interface AcpAgentConfig {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  /** Environment name -> opaque reference resolved only in the main process. */
+  secretEnv?: Record<string, string>;
+  /** Registry package-runner argv that must also prefix terminal auth commands. */
+  authArgsPrefix?: string[];
+}
+
+export type AgentRuntimeConfig =
+  | { type: "logos" }
+  | { type: "claude" }
+  | { type: "acp"; server: AcpAgentConfig };
+
+export interface AgentCredentialStatus {
+  type: "none" | "api-key" | "chatgpt";
+  label?: string;
+  expiresAt?: number;
+}
+
+export type AcpRegistryDistributionKind = "binary" | "npx" | "uvx";
+
+/** A launchable entry projected from the canonical ACP Registry. */
+export interface AcpRegistryAgent {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  repository?: string;
+  website?: string;
+  icon?: string;
+  distributionKinds: AcpRegistryDistributionKind[];
+  available: boolean;
+  unavailableReason?: string;
+}
+
+export interface AgentPlanEntry {
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  priority: "high" | "medium" | "low";
+}
+
+export interface AgentModeInfo {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface AgentConfigValue {
+  value: string;
+  name: string;
+  description?: string;
+  group?: string;
+}
+
+export type AgentConfigOption =
+  | {
+      id: string;
+      name: string;
+      description?: string;
+      category?: string;
+      type: "select";
+      currentValue: string;
+      options: AgentConfigValue[];
+    }
+  | {
+      id: string;
+      name: string;
+      description?: string;
+      category?: string;
+      type: "boolean";
+      currentValue: boolean;
+    };
+
+export interface AgentAuthMethod {
+  id: string;
+  name: string;
+  description?: string;
+  type: "agent" | "terminal" | "env_var";
+  terminal?: {
+    command: string;
+    args: string[];
+    env?: Record<string, string>;
+  };
+  variables?: Array<{
+    name: string;
+    label?: string;
+    secret: boolean;
+    optional: boolean;
+  }>;
+}
+
+export interface AgentToolLocation {
+  path: string;
+  line?: number;
+}
+
+export interface AgentToolDiff {
+  path: string;
+  oldText: string;
+  newText: string;
+}
+
+export interface AgentPermissionOption {
+  id: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+}
+
+export interface AgentProviderInfo {
+  id: string;
+  required: boolean;
+  supported: string[];
+  current?: { apiType: string; baseUrl: string };
+}
+
+export interface AgentProviderConfig {
+  id: string;
+  apiType: string;
+  baseUrl: string;
+  headers?: Record<string, string>;
 }
 
 export interface AgentStartRequest {
@@ -229,19 +397,43 @@ export interface AgentStartRequest {
   apiKey?: string;
   authToken?: string;
   baseUrl?: string;
+  runtime?: AgentRuntimeConfig;
 }
 
 export type AgentEvent =
   | { kind: "system"; sessionId: string; subtype: string; data: unknown }
-  | { kind: "text-delta"; sessionId: string; messageId: string; delta: string }
-  | { kind: "text"; sessionId: string; messageId: string; text: string }
-  | { kind: "thinking"; sessionId: string; messageId: string; delta: string }
+  | {
+      kind: "text-delta";
+      sessionId: string;
+      messageId: string;
+      delta: string;
+      parentToolUseId?: string;
+    }
+  | {
+      kind: "text";
+      sessionId: string;
+      messageId: string;
+      text: string;
+      parentToolUseId?: string;
+    }
+  | {
+      kind: "thinking";
+      sessionId: string;
+      messageId: string;
+      delta: string;
+      parentToolUseId?: string;
+    }
   | {
       kind: "tool-use";
       sessionId: string;
       toolUseId: string;
       name: string;
       input: unknown;
+      parentToolUseId?: string;
+      status?: "pending" | "in_progress" | "completed" | "failed";
+      toolKind?: string;
+      locations?: AgentToolLocation[];
+      diffs?: AgentToolDiff[];
     }
   | {
       kind: "tool-result";
@@ -249,6 +441,75 @@ export type AgentEvent =
       toolUseId: string;
       isError: boolean;
       content: string;
+      parentToolUseId?: string;
+      locations?: AgentToolLocation[];
+      diffs?: AgentToolDiff[];
+    }
+  | {
+      kind: "tool-update";
+      sessionId: string;
+      toolUseId: string;
+      title?: string;
+      status?: "pending" | "in_progress" | "completed" | "failed";
+      input?: unknown;
+      output?: unknown;
+      locations?: AgentToolLocation[];
+      diffs?: AgentToolDiff[];
+    }
+  | {
+      kind: "plan";
+      sessionId: string;
+      entries: AgentPlanEntry[];
+    }
+  | {
+      kind: "subagent";
+      sessionId: string;
+      taskId: string;
+      toolUseId?: string;
+      agentType?: string;
+      description: string;
+      status: "pending" | "running" | "completed" | "failed" | "stopped";
+      summary?: string;
+    }
+  | {
+      kind: "runtime-ready";
+      sessionId: string;
+      runtimeName: string;
+      sdkSessionId: string;
+      modes: AgentModeInfo[];
+      currentModeId?: string;
+      models: AgentModelInfo[];
+      currentModelId?: string;
+      configOptions: AgentConfigOption[];
+      commands: AgentSlashCommand[];
+      authMethods: AgentAuthMethod[];
+      canConfigureProviders: boolean;
+    }
+  | {
+      kind: "mode";
+      sessionId: string;
+      modeId: string;
+    }
+  | {
+      kind: "config";
+      sessionId: string;
+      options: AgentConfigOption[];
+    }
+  | {
+      kind: "auth-required";
+      sessionId: string;
+      methods: AgentAuthMethod[];
+      message?: string;
+    }
+  | {
+      kind: "follow";
+      sessionId: string;
+      location: AgentToolLocation;
+    }
+  | {
+      kind: "session-info";
+      sessionId: string;
+      title?: string;
     }
   | {
       kind: "result";
@@ -266,6 +527,7 @@ export type AgentEvent =
       requestId: string;
       toolName: string;
       input: unknown;
+      options?: AgentPermissionOption[];
     }
   | {
       // Claude invoked the AskUserQuestion tool — present the questions and
@@ -278,7 +540,9 @@ export type AgentEvent =
 
 export interface AgentPermissionResponse {
   requestId: string;
-  behavior: "allow" | "deny";
+  behavior?: "allow" | "deny";
+  optionId?: string;
+  cancelled?: boolean;
   message?: string;
 }
 
@@ -286,9 +550,27 @@ export interface AgentPermissionResponse {
 export interface AgentAskResponse {
   requestId: string;
   /** Map of question text -> chosen label(s) / free text. */
-  answers: Record<string, string | string[]>;
+  answers: Record<string, AgentAnswerValue>;
   /** Optional free-form reply used instead of per-question answers. */
   response?: string;
+  action?: "accept" | "decline" | "cancel";
+}
+
+export interface AgentAuthRequest {
+  sessionId: string;
+  methodId: string;
+  /** Set after an IDE terminal auth command exits successfully. */
+  completed?: boolean;
+}
+
+export interface AgentAuthResult {
+  terminal?: TerminalCreateOptions;
+}
+
+export interface AgentSetConfigRequest {
+  sessionId: string;
+  configId: string;
+  value: string | boolean;
 }
 
 // ---------------------------------------------------------------------------

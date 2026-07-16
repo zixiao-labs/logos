@@ -13,11 +13,177 @@ import {
 } from "../lib/lsp-monaco";
 import { serverIdForLanguage } from "../lib/language";
 import type { DebugBreakpointState } from "../shared/dap";
+import type { FileSnapshot } from "../shared/types";
 
 /** path -> last-saved content, for dirty tracking. */
 const baselines = new Map<string, string>();
+const baselineRevisions = new Map<string, string>();
+const watchVersions = new Map<string, number>();
 const EMPTY_DEBUG_BREAKPOINTS: DebugBreakpointState[] = [];
 let themesDefined = false;
+let fileSyncSetup = false;
+
+/** Keep open Monaco models coherent with agent and external filesystem writes. */
+export function setupMonacoFileSync(): void {
+  if (fileSyncSetup) return;
+  fileSyncSetup = true;
+  window.logos.fs.onWatchEvent((event) => {
+    const version = (watchVersions.get(event.path) ?? 0) + 1;
+    watchVersions.set(event.path, version);
+    const model = monaco.editor.getModel(monaco.Uri.file(event.path));
+    if (!model) return;
+    const tabId = `file:${event.path}`;
+    if (event.type === "delete") {
+      useStore.setState((state) => ({
+        tabs: state.tabs.map((item) =>
+          item.id === tabId ? { ...item, externalChange: "deleted" } : item,
+        ),
+      }));
+      return;
+    }
+    void window.logos.fs
+      .readFileSnapshot(event.path)
+      .then((snapshot) => {
+        if (
+          watchVersions.get(event.path) !== version ||
+          monaco.editor.getModel(monaco.Uri.file(event.path)) !== model
+        ) return;
+        if (!snapshot.exists) {
+          useStore.setState((state) => ({
+            tabs: state.tabs.map((item) =>
+              item.id === tabId ? { ...item, externalChange: "deleted" } : item,
+            ),
+          }));
+          return;
+        }
+        const content = snapshot.content;
+        if (model.getValue() === content) {
+          baselines.set(event.path, content);
+          baselineRevisions.set(event.path, snapshot.revision);
+          useStore.setState((state) => ({
+            tabs: state.tabs.map((item) =>
+              item.id === tabId
+                ? { ...item, dirty: false, externalChange: undefined }
+                : item,
+            ),
+          }));
+          return;
+        }
+        const current = useStore.getState().tabs.find((item) => item.id === tabId);
+        if (current?.dirty) {
+          useStore.setState((state) => ({
+            tabs: state.tabs.map((item) =>
+              item.id === tabId ? { ...item, externalChange: "changed" } : item,
+            ),
+          }));
+          return;
+        }
+        baselines.set(event.path, content);
+        baselineRevisions.set(event.path, snapshot.revision);
+        model.setValue(content);
+        useStore.setState((state) => ({
+          tabs: state.tabs.map((item) =>
+            item.id === tabId
+              ? { ...item, dirty: false, externalChange: undefined }
+              : item,
+          ),
+        }));
+      })
+      .catch(() => undefined);
+  });
+}
+
+export async function reloadFileFromDisk(path: string): Promise<void> {
+  const version = (watchVersions.get(path) ?? 0) + 1;
+  watchVersions.set(path, version);
+  const model = monaco.editor.getModel(monaco.Uri.file(path));
+  const snapshot = await window.logos.fs.readFileSnapshot(path);
+  if (!snapshot.exists) throw new Error(`${path} no longer exists`);
+  if (
+    watchVersions.get(path) !== version ||
+    monaco.editor.getModel(monaco.Uri.file(path)) !== model
+  ) return;
+  applyDiskSnapshot(path, snapshot);
+}
+
+function applyDiskSnapshot(
+  path: string,
+  snapshot: Extract<FileSnapshot, { exists: true }>,
+): void {
+  const model = monaco.editor.getModel(monaco.Uri.file(path));
+  baselines.set(path, snapshot.content);
+  baselineRevisions.set(path, snapshot.revision);
+  model?.setValue(snapshot.content);
+  useStore.setState((state) => ({
+    tabs: state.tabs.map((item) =>
+      item.id === `file:${path}`
+        ? { ...item, dirty: false, externalChange: undefined }
+        : item,
+    ),
+  }));
+}
+
+async function confirmExternalOverwrite(path: string): Promise<string | null> {
+  let externalChange = useStore
+    .getState()
+    .tabs.find((item) => item.id === `file:${path}`)?.externalChange;
+  const snapshot = await window.logos.fs.readFileSnapshot(path);
+  const baselineRevision = baselineRevisions.get(path);
+  const baseline = baselines.get(path);
+  if (
+    snapshot.revision === baselineRevision ||
+    (baselineRevision === undefined && snapshot.exists && snapshot.content === baseline)
+  ) {
+    baselineRevisions.set(path, snapshot.revision);
+    if (externalChange) {
+      useStore.setState((state) => ({
+        tabs: state.tabs.map((item) =>
+          item.id === `file:${path}`
+            ? { ...item, externalChange: undefined }
+            : item,
+        ),
+      }));
+    }
+    return snapshot.revision;
+  }
+  externalChange = snapshot.exists ? "changed" : "deleted";
+  useStore.setState((state) => ({
+    tabs: state.tabs.map((item) =>
+      item.id === `file:${path}` ? { ...item, externalChange } : item,
+    ),
+  }));
+  const overwriteTitle = externalChange === "deleted" ? "Recreate" : "Overwrite";
+  const choice = await new Promise<{ title: string } | null>((resolve) => {
+    window.dispatchEvent(
+      new CustomEvent("logos:lsp-message-request", {
+        detail: {
+          type: 2,
+          message:
+            externalChange === "deleted"
+              ? `${path} was deleted outside Logos. Recreate it with your editor contents?`
+              : `${path} changed on disk. Overwrite the external changes?`,
+          actions: [
+            { title: overwriteTitle },
+            ...(externalChange === "changed" ? [{ title: "Reload" }] : []),
+            { title: "Cancel" },
+          ],
+          resolve,
+        },
+      }),
+    );
+  });
+  if (choice?.title === "Reload") {
+    try {
+      await reloadFileFromDisk(path);
+    } catch {
+      const latest = await window.logos.fs.readFileSnapshot(path);
+      if (!latest.exists) markExternalConflict(path, latest);
+      else throw new Error(`Failed to reload ${path}`);
+    }
+    return null;
+  }
+  return choice?.title === overwriteTitle ? snapshot.revision : null;
+}
 
 function defineThemes() {
   if (themesDefined) return;
@@ -221,15 +387,19 @@ export function MonacoEditor({
     (async () => {
       let model = monaco.editor.getModel(uri);
       if (!model) {
+        const snapshot =
+          providedContent === undefined
+            ? await window.logos.fs.readFileSnapshot(path).catch(() => null)
+            : null;
         const content =
-          providedContent ??
-          (await window.logos.fs.readFile(path).catch(() => ""));
+          providedContent ?? (snapshot?.exists ? snapshot.content : "");
         if (cancelled) return;
         model = monaco.editor.getModel(uri);
         if (!model) {
           model = monaco.editor.createModel(content, language, uri);
           if (providedContent === undefined) {
             baselines.set(path, content);
+            if (snapshot) baselineRevisions.set(path, snapshot.revision);
             let version = 1;
             model.onDidChangeContent((event) => {
               const m = model!;
@@ -345,11 +515,27 @@ async function saveCurrent(
   const model = editor.getModel();
   if (!model) return;
   const p = model.uri.fsPath;
+  const expectedRevision = await confirmExternalOverwrite(p);
+  if (!expectedRevision) return;
   await lspWillSaveDoc(p, model.getLanguageId());
   const content = model.getValue();
-  await window.logos.fs.writeFile(p, content);
+  const result = await window.logos.fs.writeFileConditional(
+    p,
+    content,
+    expectedRevision,
+  );
+  if (result.status === "conflict") {
+    markExternalConflict(p, result.current);
+    return;
+  }
   baselines.set(p, content);
+  baselineRevisions.set(p, result.revision);
   setDirty(`file:${p}`, false);
+  useStore.setState((state) => ({
+    tabs: state.tabs.map((item) =>
+      item.id === `file:${p}` ? { ...item, externalChange: undefined } : item,
+    ),
+  }));
   // F1: tell the language server the document was saved (save-time linting).
   lspSaveDoc(p, model.getLanguageId(), content);
 }
@@ -374,6 +560,21 @@ export function disposeModel(path: string) {
   lspCloseDoc(path);
   model?.dispose();
   baselines.delete(path);
+  baselineRevisions.delete(path);
+  watchVersions.set(path, (watchVersions.get(path) ?? 0) + 1);
+}
+
+function markExternalConflict(path: string, snapshot: FileSnapshot): void {
+  useStore.setState((state) => ({
+    tabs: state.tabs.map((item) =>
+      item.id === `file:${path}`
+        ? {
+            ...item,
+            externalChange: snapshot.exists ? "changed" : "deleted",
+          }
+        : item,
+    ),
+  }));
 }
 
 function updateBreakpointDecorations(
@@ -455,11 +656,29 @@ export async function closeFileEditor(path: string, dirty: boolean) {
     if (!choice) return false;
     if (choice.title === "Save" && model) {
       try {
+        const expectedRevision = await confirmExternalOverwrite(path);
+        if (!expectedRevision) return false;
         await lspWillSaveDoc(path, model.getLanguageId());
         const content = model.getValue();
-        await window.logos.fs.writeFile(path, content);
+        const result = await window.logos.fs.writeFileConditional(
+          path,
+          content,
+          expectedRevision,
+        );
+        if (result.status === "conflict") {
+          markExternalConflict(path, result.current);
+          return false;
+        }
         baselines.set(path, content);
+        baselineRevisions.set(path, result.revision);
         useStore.getState().setDirty(`file:${path}`, false);
+        useStore.setState((state) => ({
+          tabs: state.tabs.map((item) =>
+            item.id === `file:${path}`
+              ? { ...item, externalChange: undefined }
+              : item,
+          ),
+        }));
         lspSaveDoc(path, model.getLanguageId(), content);
       } catch {
         return false;

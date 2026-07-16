@@ -4,6 +4,7 @@ import type { IPty } from "node-pty";
 import { CH } from "../../shared/channels";
 import type { TerminalCreateOptions, TerminalCreated } from "../../shared/types";
 import type { ServiceContext } from "./context";
+import { augmentPath } from "./path-env";
 
 function loadPty(): typeof import("node-pty") {
   // node-pty is a native module kept external from the bundle.
@@ -32,6 +33,7 @@ export function registerTerminalService(
       if (value == null) delete env[key];
       else env[key] = value;
     }
+    augmentPath(env);
     env.TERM = "xterm-256color";
     const proc = pty.spawn(shell, opts.args ?? [], {
       name: "xterm-256color",

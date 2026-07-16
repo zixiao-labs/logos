@@ -133,6 +133,7 @@ function AgentsRail() {
               {s.name}
             </span>
             {s.status === "running" && <span className="dirty" />}
+            {s.status === "waiting" && <span className="thread-waiting">?</span>}
             <span
               className="icon-btn"
               style={{ width: 16, height: 16 }}

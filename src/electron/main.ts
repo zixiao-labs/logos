@@ -5,6 +5,7 @@ import { CH } from "../shared/channels";
 import type { WindowControl } from "../shared/types";
 import type { ServiceContext } from "./services/context";
 import { registerAgentService } from "./services/agent";
+import { registerAcpRegistryService } from "./services/acp-registry";
 import { registerDebugService } from "./services/debug";
 import { registerFsService } from "./services/fs";
 import { registerGitService } from "./services/git";
@@ -13,6 +14,7 @@ import { registerMenu } from "./services/menu";
 import { registerSettingsService } from "./services/settings";
 import { registerTerminalService } from "./services/terminal";
 import { registerWorkspaceService } from "./services/workspace";
+import { AcpSecretStore } from "./services/acp-secrets";
 import { setupAutoUpdater } from "./services/updater";
 
 let mainWindow: BrowserWindow | null = null;
@@ -110,14 +112,16 @@ async function createWindow() {
 
 app.whenReady().then(() => {
   const ctx = createContext();
+  const acpSecrets = new AcpSecretStore(ctx.userDataDir);
   registerAppHandlers();
   disposers.push(
     registerFsService(ctx),
     registerGitService(ctx),
     registerTerminalService(ctx),
-    registerSettingsService(ctx),
+    registerSettingsService(ctx, acpSecrets),
     registerWorkspaceService(ctx, dialog),
-    registerAgentService(ctx),
+    registerAcpRegistryService(ctx),
+    registerAgentService(ctx, acpSecrets),
     registerLspService(ctx),
     registerDebugService(ctx),
     registerMenu(ctx),
