@@ -130,23 +130,28 @@ describe("filesystem service", () => {
       CH.fsReadFileSnapshot,
       file,
     );
-    const concurrent = await Promise.all([
-      service.invoke<ConditionalWriteResult>(
-        CH.fsWriteFileConditional,
-        file,
-        "first",
-        nextSnapshot.revision,
-      ),
-      service.invoke<ConditionalWriteResult>(
-        CH.fsWriteFileConditional,
-        file,
-        "second",
-        nextSnapshot.revision,
-      ),
-    ]);
-    expect(
-      concurrent.filter((result) => result.status === "written-optimistically"),
-    ).toHaveLength(1);
-    expect(concurrent.filter((result) => result.status === "conflict")).toHaveLength(1);
+    const concurrent = await Promise.all(
+      ["first", "second"].map(async (payload) => ({
+        payload,
+        result: await service.invoke<ConditionalWriteResult>(
+          CH.fsWriteFileConditional,
+          file,
+          payload,
+          nextSnapshot.revision,
+        ),
+      })),
+    );
+    const winners = concurrent.filter(
+      ({ result }) => result.status === "written-optimistically",
+    );
+    const losers = concurrent.filter(({ result }) => result.status === "conflict");
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    const winner = winners[0];
+    const loser = losers[0];
+    if (!winner || !loser) throw new Error("Expected one writer and one conflict");
+    const persisted = await fs.readFile(file, "utf8");
+    expect(persisted).toBe(winner.payload);
+    expect(persisted).not.toBe(loser.payload);
   });
 });

@@ -35,40 +35,43 @@ function writeAcpSecretCleanupQueue(references: Set<string>): void {
   }
 }
 
-function mutateAcpSecretCleanup(operation: () => Promise<void>): Promise<void> {
+function mutateAcpSecretCleanup<T>(operation: () => Promise<T>): Promise<T> {
   const result = acpSecretCleanupMutation.then(operation, operation);
-  acpSecretCleanupMutation = result.catch(() => undefined);
+  acpSecretCleanupMutation = result.then(
+    () => undefined,
+    () => undefined,
+  );
   return result;
 }
 
-function enqueueAcpSecretCleanup(references: Iterable<string>): Promise<void> {
-  return mutateAcpSecretCleanup(async () => {
-    const pending = readAcpSecretCleanupQueue();
-    for (const reference of references) pending.add(reference);
-    writeAcpSecretCleanupQueue(pending);
-  });
+function enqueueAcpSecretCleanup(references: Iterable<string>): void {
+  const pending = readAcpSecretCleanupQueue();
+  for (const reference of references) pending.add(reference);
+  writeAcpSecretCleanupQueue(pending);
+}
+
+async function runAcpSecretCleanup(): Promise<void> {
+  const state = useStore.getState();
+  if (!state.ready) return;
+  const liveReferences = new Set(
+    state.settings["agent.acpServers"].flatMap((server) =>
+      Object.values(server.secretEnv ?? {}),
+    ),
+  );
+  const failed = new Set<string>();
+  for (const reference of readAcpSecretCleanupQueue()) {
+    if (liveReferences.has(reference)) continue;
+    try {
+      await window.logos.settings.deleteAcpSecret(reference);
+    } catch {
+      failed.add(reference);
+    }
+  }
+  writeAcpSecretCleanupQueue(failed);
 }
 
 function retryAcpSecretCleanup(): Promise<void> {
-  return mutateAcpSecretCleanup(async () => {
-    const state = useStore.getState();
-    if (!state.ready) return;
-    const liveReferences = new Set(
-      state.settings["agent.acpServers"].flatMap((server) =>
-        Object.values(server.secretEnv ?? {}),
-      ),
-    );
-    const failed = new Set<string>();
-    for (const reference of readAcpSecretCleanupQueue()) {
-      if (liveReferences.has(reference)) continue;
-      try {
-        await window.logos.settings.deleteAcpSecret(reference);
-      } catch {
-        failed.add(reference);
-      }
-    }
-    writeAcpSecretCleanupQueue(failed);
-  });
+  return mutateAcpSecretCleanup(runAcpSecretCleanup);
 }
 
 function acpEnvironmentDisplay(server: AcpAgentConfig): string {
@@ -211,10 +214,13 @@ function AcpServersEditor({
   }, [servers]);
 
   const update = (id: string, patch: Partial<AcpAgentConfig>) => {
-    const current = useStore.getState().settings["agent.acpServers"];
-    return onChange(
-      current.map((server) =>
-        server.id === id ? { ...server, ...patch } : server,
+    return mutateAcpSecretCleanup(() =>
+      onChange(
+        useStore
+          .getState()
+          .settings["agent.acpServers"].map((server) =>
+            server.id === id ? { ...server, ...patch } : server,
+          ),
       ),
     );
   };
@@ -223,87 +229,104 @@ function AcpServersEditor({
     serverId: string,
     value: string,
   ): Promise<Record<string, string>> {
-    const server = useStore
-      .getState()
-      .settings["agent.acpServers"].find((item) => item.id === serverId);
-    if (!server) throw new Error("ACP server is unavailable");
-    const parsed = JSON.parse(value) as Record<string, unknown>;
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-      throw new Error("ACP environment must be a JSON object");
-    }
-    const entries = Object.entries(parsed);
-    for (const [name, rawValue] of entries) {
-      if (typeof rawValue !== "string") {
-        throw new Error(`ACP environment value must be a string: ${name}`);
+    return mutateAcpSecretCleanup(async () => {
+      const server = useStore
+        .getState()
+        .settings["agent.acpServers"].find((item) => item.id === serverId);
+      if (!server) throw new Error("ACP server is unavailable");
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+        throw new Error("ACP environment must be a JSON object");
       }
-    }
-    const env: Record<string, string> = {};
-    const secretEnv: Record<string, string> = {};
-    const createdReferences: string[] = [];
-    try {
-      for (const [name, rawValue] of entries as Array<[string, string]>) {
-        const existingReference = server.secretEnv?.[name];
-        if (!existingReference && !isSensitiveEnvName(name)) {
-          env[name] = rawValue;
-          continue;
-        }
-        if (rawValue === ACP_SECRET_MASK) {
-          if (!existingReference) throw new Error(`Enter a value for ${name}`);
-          secretEnv[name] = existingReference;
-        } else {
-          const reference = await window.logos.settings.setAcpSecret(
-            server.id,
-            name,
-            rawValue,
-          );
-          secretEnv[name] = reference;
-          createdReferences.push(reference);
-          await enqueueAcpSecretCleanup([reference]);
+      const entries = Object.entries(parsed);
+      for (const [name, rawValue] of entries) {
+        if (typeof rawValue !== "string") {
+          throw new Error(`ACP environment value must be a string: ${name}`);
         }
       }
-      await enqueueAcpSecretCleanup(
-        Object.entries(server.secretEnv ?? {}).flatMap(([name, reference]) =>
-          secretEnv[name] === reference ? [] : [reference],
-        ),
-      );
-      await update(server.id, {
-        env,
-        secretEnv: Object.keys(secretEnv).length ? secretEnv : undefined,
-      });
-    } catch (error) {
-      const queued = await enqueueAcpSecretCleanup(createdReferences).then(
-        () => true,
-        () => false,
-      );
-      if (!queued) {
-        await Promise.allSettled(
-          createdReferences.map((reference) =>
-            window.logos.settings.deleteAcpSecret(reference),
+      const env: Record<string, string> = {};
+      const secretEnv: Record<string, string> = {};
+      const createdReferences: string[] = [];
+      try {
+        for (const [name, rawValue] of entries as Array<[string, string]>) {
+          const existingReference = server.secretEnv?.[name];
+          if (!existingReference && !isSensitiveEnvName(name)) {
+            env[name] = rawValue;
+            continue;
+          }
+          if (rawValue === ACP_SECRET_MASK) {
+            if (!existingReference) throw new Error(`Enter a value for ${name}`);
+            secretEnv[name] = existingReference;
+          } else {
+            const reference = await window.logos.settings.setAcpSecret(
+              server.id,
+              name,
+              rawValue,
+            );
+            secretEnv[name] = reference;
+            createdReferences.push(reference);
+            enqueueAcpSecretCleanup([reference]);
+          }
+        }
+        enqueueAcpSecretCleanup(
+          Object.entries(server.secretEnv ?? {}).flatMap(([name, reference]) =>
+            secretEnv[name] === reference ? [] : [reference],
           ),
         );
+        await onChange(
+          useStore
+            .getState()
+            .settings["agent.acpServers"].map((item) =>
+              item.id === server.id
+                ? {
+                    ...item,
+                    env,
+                    secretEnv: Object.keys(secretEnv).length
+                      ? secretEnv
+                      : undefined,
+                  }
+                : item,
+            ),
+        );
+      } catch (error) {
+        let queued = true;
+        try {
+          enqueueAcpSecretCleanup(createdReferences);
+        } catch {
+          queued = false;
+        }
+        if (!queued) {
+          await Promise.allSettled(
+            createdReferences.map((reference) =>
+              window.logos.settings.deleteAcpSecret(reference),
+            ),
+          );
+        }
+        await runAcpSecretCleanup().catch(() => undefined);
+        throw error;
       }
-      await retryAcpSecretCleanup().catch(() => undefined);
-      throw error;
-    }
-    await retryAcpSecretCleanup().catch(() => undefined);
-    return {
-      ...env,
-      ...Object.fromEntries(
-        Object.keys(secretEnv).map((name) => [name, ACP_SECRET_MASK]),
-      ),
-    };
+      await runAcpSecretCleanup().catch(() => undefined);
+      return {
+        ...env,
+        ...Object.fromEntries(
+          Object.keys(secretEnv).map((name) => [name, ACP_SECRET_MASK]),
+        ),
+      };
+    });
   }
 
   async function removeServer(server: AcpAgentConfig): Promise<void> {
     if (referencedIds.has(server.id)) return;
-    const current = useStore.getState().settings["agent.acpServers"];
-    const latest = current.find((item) => item.id === server.id) ?? server;
-    await enqueueAcpSecretCleanup(Object.values(latest.secretEnv ?? {}));
-    try {
-      await onChange(current.filter((item) => item.id !== server.id));
-    } finally {
-      await retryAcpSecretCleanup().catch(() => undefined);
-    }
+    await mutateAcpSecretCleanup(async () => {
+      const current = useStore.getState().settings["agent.acpServers"];
+      const latest = current.find((item) => item.id === server.id) ?? server;
+      enqueueAcpSecretCleanup(Object.values(latest.secretEnv ?? {}));
+      try {
+        await onChange(current.filter((item) => item.id !== server.id));
+      } finally {
+        await runAcpSecretCleanup().catch(() => undefined);
+      }
+    });
   }
 
   return (
@@ -464,16 +487,18 @@ function AcpServersEditor({
         size="sm"
         variant="secondary"
         onPress={() =>
-          void onChange([
-            ...servers,
-            {
-              id: `acp-${crypto.randomUUID()}`,
-              name: "ACP Agent",
-              command: "",
-              args: [],
-              env: {},
-            },
-          ])
+          void mutateAcpSecretCleanup(() =>
+            onChange([
+              ...useStore.getState().settings["agent.acpServers"],
+              {
+                id: `acp-${crypto.randomUUID()}`,
+                name: "ACP Agent",
+                command: "",
+                args: [],
+                env: {},
+              },
+            ]),
+          )
         }
       >
         Add ACP agent
