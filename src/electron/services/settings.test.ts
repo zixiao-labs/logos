@@ -136,4 +136,55 @@ describe("settings service", () => {
     const raw = await fs.readFile(path.join(userDataDir, "settings.json"), "utf8");
     expect(raw.includes("secret-value")).toBe(false);
   });
+
+  it("manages ACP secrets without deleting referenced credentials", async () => {
+    const stored = new Map<string, string>();
+    const acpSecrets = {
+      async set(
+        serverId: string,
+        name: string,
+        value: string,
+        reference?: string,
+      ) {
+        const ref = reference ?? `secret:${serverId}:${name}`;
+        stored.set(ref, value);
+        return ref;
+      },
+      async delete(reference: string) {
+        stored.delete(reference);
+      },
+      async has(_serverId: string, _name: string, reference: string) {
+        return stored.has(reference);
+      },
+    } as AcpSecretStore;
+    const service = setup(acpSecrets);
+
+    const reference = await service.invoke<string>(
+      CH.settingsSetAcpSecret,
+      "custom",
+      "OPENAI_API_KEY",
+      "secret-value",
+    );
+    expect(stored.get(reference)).toBe("secret-value");
+
+    await service.invoke<Settings>(CH.settingsSet, {
+      "agent.acpServers": [
+        {
+          id: "custom",
+          name: "Custom",
+          command: "agent",
+          args: [],
+          env: {},
+          secretEnv: { OPENAI_API_KEY: reference },
+        },
+      ],
+    } satisfies Partial<Settings>);
+    await expect(
+      service.invoke(CH.settingsDeleteAcpSecret, reference),
+    ).rejects.toThrow("ACP secret is still referenced by settings");
+
+    await service.invoke<Settings>(CH.settingsSet, { "agent.acpServers": [] });
+    await service.invoke(CH.settingsDeleteAcpSecret, reference);
+    expect(stored.has(reference)).toBe(false);
+  });
 });
