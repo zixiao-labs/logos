@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { useStore } from "../state/store";
+import { useT } from "../i18n";
 
 interface GitDiffEditorProps {
   path: string;
@@ -17,6 +18,8 @@ function clearDiffModels(editor: monaco.editor.IStandaloneDiffEditor) {
 }
 
 export function GitDiffEditor({ path, staged, language }: GitDiffEditorProps) {
+  const t = useT();
+  const diffLoadFailed = t("git.diffLoadFailed");
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
   const [loading, setLoading] = useState(true);
@@ -71,13 +74,13 @@ export function GitDiffEditor({ path, staged, language }: GitDiffEditorProps) {
         if (cancelled || !editorRef.current) return;
         clearDiffModels(editorRef.current);
         const message = reason instanceof Error ? reason.message : String(reason);
-        setError(message || "Failed to load diff.");
+        setError(message || diffLoadFailed);
         setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [git, language, path, reloadVersion, root, staged]);
+  }, [diffLoadFailed, git, language, path, reloadVersion, root, staged]);
 
   return (
     <>
@@ -93,7 +96,7 @@ export function GitDiffEditor({ path, staged, language }: GitDiffEditorProps) {
           }}
         >
           {loading ? (
-            <span>Loading diff...</span>
+            <span>{t("git.diffLoading")}</span>
           ) : (
             <>
               <span>{error}</span>
@@ -103,7 +106,7 @@ export function GitDiffEditor({ path, staged, language }: GitDiffEditorProps) {
                 style={{ width: "auto" }}
                 onClick={() => setReloadVersion((version) => version + 1)}
               >
-                Retry
+                {t("common.retry")}
               </button>
             </>
           )}

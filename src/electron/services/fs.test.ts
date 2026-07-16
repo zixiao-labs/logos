@@ -94,7 +94,7 @@ describe("filesystem service", () => {
     await expect(service.invoke(CH.fsCreateFile, file, "replace")).rejects.toThrow();
   });
 
-  it("writes only when the on-disk revision still matches", async () => {
+  it("optimistically detects conflicts and serializes local writes", async () => {
     const file = path.join(root, "conditional.txt");
     await fs.writeFile(file, "initial");
     if (process.platform !== "win32") await fs.chmod(file, 0o755);
@@ -120,7 +120,7 @@ describe("filesystem service", () => {
       "editor",
       conflict.current.revision,
     );
-    expect(written.status).toBe("written");
+    expect(written.status).toBe("written-optimistically");
     expect(await fs.readFile(file, "utf8")).toBe("editor");
     if (process.platform !== "win32") {
       expect((await fs.stat(file)).mode & 0o777).toBe(0o755);
@@ -144,7 +144,9 @@ describe("filesystem service", () => {
         nextSnapshot.revision,
       ),
     ]);
-    expect(concurrent.filter((result) => result.status === "written")).toHaveLength(1);
+    expect(
+      concurrent.filter((result) => result.status === "written-optimistically"),
+    ).toHaveLength(1);
     expect(concurrent.filter((result) => result.status === "conflict")).toHaveLength(1);
   });
 });

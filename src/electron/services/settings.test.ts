@@ -123,18 +123,91 @@ describe("settings service", () => {
           name: "Custom",
           command: "agent",
           args: [],
-          env: { OPENAI_API_KEY: "secret-value", LOG_LEVEL: "debug" },
+          env: {
+            OPENAI_API_KEY: "api-secret",
+            SSH_PRIVATE_KEY: "private-secret",
+            AWS_ACCESS_KEY_ID: "access-secret",
+            LOG_LEVEL: "debug",
+          },
         },
       ],
     } satisfies Partial<Settings>);
 
     expect(settings["agent.acpServers"][0]).toMatchObject({
       env: { LOG_LEVEL: "debug" },
-      secretEnv: { OPENAI_API_KEY: "secret:custom:OPENAI_API_KEY" },
+      secretEnv: {
+        OPENAI_API_KEY: "secret:custom:OPENAI_API_KEY",
+        SSH_PRIVATE_KEY: "secret:custom:SSH_PRIVATE_KEY",
+        AWS_ACCESS_KEY_ID: "secret:custom:AWS_ACCESS_KEY_ID",
+      },
     });
-    expect(stored.get("secret:custom:OPENAI_API_KEY")).toBe("secret-value");
+    expect(stored.get("secret:custom:OPENAI_API_KEY")).toBe("api-secret");
+    expect(stored.get("secret:custom:SSH_PRIVATE_KEY")).toBe("private-secret");
+    expect(stored.get("secret:custom:AWS_ACCESS_KEY_ID")).toBe("access-secret");
     const raw = await fs.readFile(path.join(userDataDir, "settings.json"), "utf8");
-    expect(raw.includes("secret-value")).toBe(false);
+    expect(raw.includes("api-secret")).toBe(false);
+    expect(raw.includes("private-secret")).toBe(false);
+    expect(raw.includes("access-secret")).toBe(false);
+  });
+
+  it("serializes first-load migration with the first settings update", async () => {
+    await fs.writeFile(
+      path.join(userDataDir, "settings.json"),
+      JSON.stringify({
+        "agent.acpServers": [
+          {
+            id: "custom",
+            name: "Custom",
+            command: "agent",
+            args: [],
+            env: { OPENAI_API_KEY: "secret-value" },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const stored = new Map<string, string>();
+    let setCalls = 0;
+    let releaseMigration!: () => void;
+    let markMigrationStarted!: () => void;
+    const migrationRelease = new Promise<void>((resolve) => {
+      releaseMigration = resolve;
+    });
+    const migrationStarted = new Promise<void>((resolve) => {
+      markMigrationStarted = resolve;
+    });
+    const acpSecrets = {
+      async set(serverId: string, name: string, value: string) {
+        setCalls += 1;
+        markMigrationStarted();
+        await migrationRelease;
+        const reference = `secret:${serverId}:${name}`;
+        stored.set(reference, value);
+        return reference;
+      },
+      async delete(reference: string) {
+        stored.delete(reference);
+      },
+      async has(_serverId: string, _name: string, reference: string) {
+        return stored.has(reference);
+      },
+    } as AcpSecretStore;
+    const service = setup(acpSecrets);
+
+    const loading = service.invoke<Settings>(CH.settingsGetAll);
+    await migrationStarted;
+    const updating = service.invoke<Settings>(CH.settingsSet, {
+      "editor.fontSize": 18,
+    } satisfies Partial<Settings>);
+    releaseMigration();
+
+    await loading;
+    const updated = await updating;
+    expect(setCalls).toBe(1);
+    expect(updated["editor.fontSize"]).toBe(18);
+    expect(updated["agent.acpServers"][0].secretEnv).toEqual({
+      OPENAI_API_KEY: "secret:custom:OPENAI_API_KEY",
+    });
   });
 
   it("manages ACP secrets without deleting referenced credentials", async () => {

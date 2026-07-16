@@ -100,6 +100,8 @@ const en: Dict = {
   "git.commitFailed": "Commit failed",
   "git.unstageAll": "Unstage All",
   "git.lastCommit": "Last Commit",
+  "git.diffLoading": "Loading diff...",
+  "git.diffLoadFailed": "Failed to load diff.",
 
   "agent.title": "Agent",
   "agent.searchAgents": "Search Agents...",
@@ -228,6 +230,7 @@ const en: Dict = {
   "common.cancel": "Cancel",
   "common.confirm": "Confirm",
   "common.create": "Create",
+  "common.retry": "Retry",
 };
 
 const zh: Dict = {
@@ -328,6 +331,8 @@ const zh: Dict = {
   "git.commitFailed": "提交失败",
   "git.unstageAll": "全部取消暂存",
   "git.lastCommit": "最近提交",
+  "git.diffLoading": "正在加载差异...",
+  "git.diffLoadFailed": "无法加载差异。",
 
   "agent.title": "智能体",
   "agent.searchAgents": "搜索智能体...",
@@ -456,6 +461,7 @@ const zh: Dict = {
   "common.cancel": "取消",
   "common.confirm": "确认",
   "common.create": "创建",
+  "common.retry": "重试",
 };
 
 const dicts: Record<LanguageCode, Dict> = { en, zh };

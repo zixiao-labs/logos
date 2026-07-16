@@ -101,7 +101,7 @@ export function registerSettingsService(
     return next;
   }
 
-  ipcMain.handle(CH.settingsGetAll, () => load());
+  ipcMain.handle(CH.settingsGetAll, () => mutate(load));
 
   ipcMain.handle(
     CH.settingsSet,
@@ -134,18 +134,20 @@ export function registerSettingsService(
     },
   );
 
-  ipcMain.handle(CH.settingsDeleteAcpSecret, async (_event, reference: string) => {
-    if (!acpSecrets) throw new Error("ACP secret storage is unavailable");
-    await load();
-    if (
-      current["agent.acpServers"].some((server) =>
-        Object.values(server.secretEnv ?? {}).includes(reference),
-      )
-    ) {
-      throw new Error("ACP secret is still referenced by settings");
-    }
-    return acpSecrets.delete(reference);
-  });
+  ipcMain.handle(CH.settingsDeleteAcpSecret, (_event, reference: string) =>
+    mutate(async () => {
+      if (!acpSecrets) throw new Error("ACP secret storage is unavailable");
+      await load();
+      if (
+        current["agent.acpServers"].some((server) =>
+          Object.values(server.secretEnv ?? {}).includes(reference),
+        )
+      ) {
+        throw new Error("ACP secret is still referenced by settings");
+      }
+      return acpSecrets.delete(reference);
+    }),
+  );
 
   return () => undefined;
 }

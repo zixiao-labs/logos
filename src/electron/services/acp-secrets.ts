@@ -13,6 +13,14 @@ interface AcpSecretFile {
   secrets: Record<string, StoredAcpSecret>;
 }
 
+function isSecureStorageAvailable(): boolean {
+  return (
+    safeStorage.isEncryptionAvailable() &&
+    (process.platform !== "linux" ||
+      safeStorage.getSelectedStorageBackend() !== "basic_text")
+  );
+}
+
 export class AcpSecretStore {
   private readonly file: string;
   private secrets: Record<string, StoredAcpSecret> | null = null;
@@ -83,11 +91,11 @@ export class AcpSecretStore {
     if (this.secrets) return this.secrets;
     if (!this.loadPromise) {
       this.loadPromise = (async () => {
+        if (!isSecureStorageAvailable()) {
+          throw new Error("OS secure storage is unavailable");
+        }
         try {
           const encrypted = await fs.readFile(this.file);
-          if (!safeStorage.isEncryptionAvailable()) {
-            throw new Error("OS secure storage is unavailable");
-          }
           const parsed = JSON.parse(safeStorage.decryptString(encrypted)) as AcpSecretFile;
           if (parsed.version !== 1 || !parsed.secrets) {
             throw new Error("Invalid ACP credential file");
@@ -117,7 +125,7 @@ export class AcpSecretStore {
   }
 
   private async persist(secrets: Record<string, StoredAcpSecret>): Promise<void> {
-    if (!safeStorage.isEncryptionAvailable()) {
+    if (!isSecureStorageAvailable()) {
       throw new Error("OS secure storage is unavailable; credentials were not saved");
     }
     const encrypted = safeStorage.encryptString(

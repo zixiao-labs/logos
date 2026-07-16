@@ -7,6 +7,88 @@ import { DEFAULT_SETTINGS } from "../shared/defaults";
 import { ACP_SECRET_MASK, isSensitiveEnvName } from "../shared/acp-env";
 import type { AcpAgentConfig, Settings } from "../shared/types";
 
+const ACP_SECRET_CLEANUP_KEY = "logos.acpSecretCleanup.v1";
+let acpSecretCleanupMutation: Promise<void> = Promise.resolve();
+
+function readAcpSecretCleanupQueue(): Set<string> {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(ACP_SECRET_CLEANUP_KEY) ?? "[]",
+    );
+    return new Set(
+      Array.isArray(parsed)
+        ? parsed.filter(
+            (reference): reference is string => typeof reference === "string",
+          )
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeAcpSecretCleanupQueue(references: Set<string>): void {
+  if (references.size) {
+    localStorage.setItem(ACP_SECRET_CLEANUP_KEY, JSON.stringify([...references]));
+  } else {
+    localStorage.removeItem(ACP_SECRET_CLEANUP_KEY);
+  }
+}
+
+function mutateAcpSecretCleanup(operation: () => Promise<void>): Promise<void> {
+  const result = acpSecretCleanupMutation.then(operation, operation);
+  acpSecretCleanupMutation = result.catch(() => undefined);
+  return result;
+}
+
+function enqueueAcpSecretCleanup(references: Iterable<string>): Promise<void> {
+  return mutateAcpSecretCleanup(async () => {
+    const pending = readAcpSecretCleanupQueue();
+    for (const reference of references) pending.add(reference);
+    writeAcpSecretCleanupQueue(pending);
+  });
+}
+
+function retryAcpSecretCleanup(): Promise<void> {
+  return mutateAcpSecretCleanup(async () => {
+    const state = useStore.getState();
+    if (!state.ready) return;
+    const liveReferences = new Set(
+      state.settings["agent.acpServers"].flatMap((server) =>
+        Object.values(server.secretEnv ?? {}),
+      ),
+    );
+    const failed = new Set<string>();
+    for (const reference of readAcpSecretCleanupQueue()) {
+      if (liveReferences.has(reference)) continue;
+      try {
+        await window.logos.settings.deleteAcpSecret(reference);
+      } catch {
+        failed.add(reference);
+      }
+    }
+    writeAcpSecretCleanupQueue(failed);
+  });
+}
+
+function acpEnvironmentDisplay(server: AcpAgentConfig): string {
+  return JSON.stringify(
+    {
+      ...server.env,
+      ...Object.fromEntries(
+        Object.keys(server.secretEnv ?? {}).map((name) => [name, ACP_SECRET_MASK]),
+      ),
+    },
+    null,
+    2,
+  );
+}
+
+interface AcpDraft {
+  canonical: string;
+  value: string;
+}
+
 function Switch({
   on,
   onChange,
@@ -84,7 +166,50 @@ function AcpServersEditor({
   referencedIds: Set<string>;
   onChange: (servers: AcpAgentConfig[]) => Promise<void>;
 }) {
+  const settingsReady = useStore((state) => state.ready);
   const [busyServerId, setBusyServerId] = useState<string | null>(null);
+  const [argumentDrafts, setArgumentDrafts] = useState<Record<string, AcpDraft>>(
+    {},
+  );
+  const [environmentDrafts, setEnvironmentDrafts] = useState<
+    Record<string, AcpDraft>
+  >({});
+
+  useEffect(() => {
+    void retryAcpSecretCleanup().catch(() => undefined);
+  }, [servers, settingsReady]);
+
+  useEffect(() => {
+    setArgumentDrafts((drafts) =>
+      Object.fromEntries(
+        servers.map((server) => {
+          const canonical = JSON.stringify(server.args);
+          const current = drafts[server.id];
+          return [
+            server.id,
+            current?.canonical === canonical
+              ? current
+              : { canonical, value: canonical },
+          ];
+        }),
+      ),
+    );
+    setEnvironmentDrafts((drafts) =>
+      Object.fromEntries(
+        servers.map((server) => {
+          const canonical = JSON.stringify([server.env, server.secretEnv ?? {}]);
+          const current = drafts[server.id];
+          return [
+            server.id,
+            current?.canonical === canonical
+              ? current
+              : { canonical, value: acpEnvironmentDisplay(server) },
+          ];
+        }),
+      ),
+    );
+  }, [servers]);
+
   const update = (id: string, patch: Partial<AcpAgentConfig>) => {
     const current = useStore.getState().settings["agent.acpServers"];
     return onChange(
@@ -95,9 +220,13 @@ function AcpServersEditor({
   };
 
   async function updateEnvironment(
-    server: AcpAgentConfig,
+    serverId: string,
     value: string,
   ): Promise<Record<string, string>> {
+    const server = useStore
+      .getState()
+      .settings["agent.acpServers"].find((item) => item.id === serverId);
+    if (!server) throw new Error("ACP server is unavailable");
     const parsed = JSON.parse(value) as Record<string, unknown>;
     if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
       throw new Error("ACP environment must be a JSON object");
@@ -129,27 +258,34 @@ function AcpServersEditor({
           );
           secretEnv[name] = reference;
           createdReferences.push(reference);
+          await enqueueAcpSecretCleanup([reference]);
         }
       }
+      await enqueueAcpSecretCleanup(
+        Object.entries(server.secretEnv ?? {}).flatMap(([name, reference]) =>
+          secretEnv[name] === reference ? [] : [reference],
+        ),
+      );
       await update(server.id, {
         env,
         secretEnv: Object.keys(secretEnv).length ? secretEnv : undefined,
       });
     } catch (error) {
-      await Promise.all(
-        createdReferences.map((reference) =>
-          window.logos.settings.deleteAcpSecret(reference),
-        ),
+      const queued = await enqueueAcpSecretCleanup(createdReferences).then(
+        () => true,
+        () => false,
       );
+      if (!queued) {
+        await Promise.allSettled(
+          createdReferences.map((reference) =>
+            window.logos.settings.deleteAcpSecret(reference),
+          ),
+        );
+      }
+      await retryAcpSecretCleanup().catch(() => undefined);
       throw error;
     }
-    await Promise.all(
-      Object.entries(server.secretEnv ?? {}).flatMap(([name, reference]) =>
-        secretEnv[name] === reference
-          ? []
-          : [window.logos.settings.deleteAcpSecret(reference)],
-      ),
-    );
+    await retryAcpSecretCleanup().catch(() => undefined);
     return {
       ...env,
       ...Object.fromEntries(
@@ -161,12 +297,13 @@ function AcpServersEditor({
   async function removeServer(server: AcpAgentConfig): Promise<void> {
     if (referencedIds.has(server.id)) return;
     const current = useStore.getState().settings["agent.acpServers"];
-    await onChange(current.filter((item) => item.id !== server.id));
-    await Promise.all(
-      Object.values(server.secretEnv ?? {}).map((reference) =>
-        window.logos.settings.deleteAcpSecret(reference),
-      ),
-    );
+    const latest = current.find((item) => item.id === server.id) ?? server;
+    await enqueueAcpSecretCleanup(Object.values(latest.secretEnv ?? {}));
+    try {
+      await onChange(current.filter((item) => item.id !== server.id));
+    } finally {
+      await retryAcpSecretCleanup().catch(() => undefined);
+    }
   }
 
   return (
@@ -213,58 +350,107 @@ function AcpServersEditor({
             <input
               className="field"
               aria-label="Agent arguments"
-              placeholder="acp"
+              placeholder='["acp"]'
               disabled={busyServerId === server.id}
-              value={server.args.join(" ")}
-              onChange={(event) =>
-                void update(server.id, {
-                  args: event.target.value.split(/\s+/).filter(Boolean),
-                })
+              value={
+                argumentDrafts[server.id]?.value ?? JSON.stringify(server.args)
               }
+              onChange={(event) =>
+                setArgumentDrafts((drafts) => ({
+                  ...drafts,
+                  [server.id]: {
+                    canonical: JSON.stringify(server.args),
+                    value: event.target.value,
+                  },
+                }))
+              }
+              onBlur={(event) => {
+                try {
+                  const args = JSON.parse(event.currentTarget.value) as unknown;
+                  if (
+                    !Array.isArray(args) ||
+                    args.some((arg) => typeof arg !== "string")
+                  ) {
+                    throw new Error("Agent arguments must be a JSON string array");
+                  }
+                  void update(server.id, { args }).catch(() => {
+                    setArgumentDrafts((drafts) => ({
+                      ...drafts,
+                      [server.id]: {
+                        canonical: JSON.stringify(server.args),
+                        value: JSON.stringify(server.args),
+                      },
+                    }));
+                  });
+                } catch {
+                  setArgumentDrafts((drafts) => ({
+                    ...drafts,
+                    [server.id]: {
+                      canonical: JSON.stringify(server.args),
+                      value: JSON.stringify(server.args),
+                    },
+                  }));
+                }
+              }}
             />
             <textarea
               className="field acp-env"
               aria-label="Agent environment"
               placeholder='{"OPENAI_API_KEY":"..."}'
               disabled={busyServerId === server.id}
-              defaultValue={JSON.stringify(
-                {
-                  ...server.env,
-                  ...Object.fromEntries(
-                    Object.keys(server.secretEnv ?? {}).map((name) => [
-                      name,
-                      ACP_SECRET_MASK,
-                    ]),
-                  ),
-                },
-                null,
-                2,
-              )}
+              value={
+                environmentDrafts[server.id]?.value ?? acpEnvironmentDisplay(server)
+              }
+              onChange={(event) =>
+                setEnvironmentDrafts((drafts) => ({
+                  ...drafts,
+                  [server.id]: {
+                    canonical: JSON.stringify([server.env, server.secretEnv ?? {}]),
+                    value: event.target.value,
+                  },
+                }))
+              }
               onBlur={(event) => {
-                const target = event.currentTarget;
                 setBusyServerId(server.id);
-                target.disabled = true;
-                void updateEnvironment(server, target.value)
+                void updateEnvironment(server.id, event.currentTarget.value)
                   .then((displayEnv) => {
-                    target.value = JSON.stringify(displayEnv, null, 2);
+                    const value = JSON.stringify(displayEnv, null, 2);
+                    const latest = useStore
+                      .getState()
+                      .settings["agent.acpServers"].find(
+                        (item) => item.id === server.id,
+                      );
+                    setEnvironmentDrafts((drafts) => ({
+                      ...drafts,
+                      [server.id]: {
+                        canonical: JSON.stringify([
+                          latest?.env ?? server.env,
+                          latest?.secretEnv ?? server.secretEnv ?? {},
+                        ]),
+                        value,
+                      },
+                    }));
                   })
                   .catch(() => {
-                    target.value = JSON.stringify(
-                      {
-                        ...server.env,
-                        ...Object.fromEntries(
-                          Object.keys(server.secretEnv ?? {}).map((name) => [
-                            name,
-                            ACP_SECRET_MASK,
+                    const latest = useStore
+                      .getState()
+                      .settings["agent.acpServers"].find(
+                        (item) => item.id === server.id,
+                      );
+                    if (latest) {
+                      setEnvironmentDrafts((drafts) => ({
+                        ...drafts,
+                        [server.id]: {
+                          canonical: JSON.stringify([
+                            latest.env,
+                            latest.secretEnv ?? {},
                           ]),
-                        ),
-                      },
-                      null,
-                      2,
-                    );
+                          value: acpEnvironmentDisplay(latest),
+                        },
+                      }));
+                    }
                   })
                   .finally(() => {
-                    target.disabled = false;
                     setBusyServerId((current) =>
                       current === server.id ? null : current,
                     );

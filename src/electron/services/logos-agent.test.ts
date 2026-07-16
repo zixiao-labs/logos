@@ -541,14 +541,34 @@ describe("Logos agent runtime", () => {
       }),
     } as unknown as OpenAIAuthStore;
     let calls = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstRelease = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
     globalThis.fetch = (async () => {
-      calls += 1;
-      return responseStream([
-        {
-          type: "response.completed",
-          response: { id: `response-${calls}`, output: [] },
-        },
-      ]);
+      const call = ++calls;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        if (call === 1) {
+          markFirstStarted();
+          await firstRelease;
+        }
+        return responseStream([
+          {
+            type: "response.completed",
+            response: { id: `response-${call}`, output: [] },
+          },
+        ]);
+      } finally {
+        inFlight -= 1;
+      }
     }) as typeof globalThis.fetch;
     const runtime = await LogosAgentRuntime.create(
       request(root),
@@ -560,9 +580,17 @@ describe("Logos agent runtime", () => {
     await runtime.prompt("second");
     authenticated = true;
 
-    await runtime.credentialsChanged();
+    const draining = runtime.credentialsChanged();
+    await firstStarted;
+    try {
+      expect(calls).toBe(1);
+    } finally {
+      releaseFirst();
+    }
+    await draining;
 
     expect(calls).toBe(2);
+    expect(maxInFlight).toBe(1);
     expect(events.filter((event) => event.kind === "result").length).toBe(2);
   });
 

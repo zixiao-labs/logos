@@ -132,7 +132,7 @@ export function registerFsService(ctx: ServiceContext): () => void {
           }
           await fs.rename(temp, target);
           return {
-            status: "written",
+            status: "written-optimistically",
             revision: fileRevision(content),
           } as const;
         } finally {

@@ -621,44 +621,48 @@ function mergeAgentTranscriptItems(
 function openAgentTranscriptDb(): Promise<IDBDatabase | null> {
   if (transcriptDbPromise) return transcriptDbPromise;
   if (typeof indexedDB === "undefined") return Promise.resolve(null);
-  transcriptDbPromise = new Promise((resolve) => {
-    let settled = false;
-    const finish = (db: IDBDatabase | null) => {
-      if (settled) {
-        db?.close();
-        return;
-      }
-      settled = true;
-      resolve(db);
-    };
-    try {
-      const request = indexedDB.open(AGENT_TRANSCRIPT_DB, 1);
-      request.onupgradeneeded = () => {
-        try {
-          if (!request.result.objectStoreNames.contains(AGENT_TRANSCRIPT_STORE)) {
-            request.result.createObjectStore(AGENT_TRANSCRIPT_STORE, {
-              keyPath: "id",
-            });
-          }
-        } catch {
-          request.transaction?.abort();
-        }
-      };
-      request.onsuccess = () => {
-        const db = request.result;
-        db.onversionchange = () => {
-          db.close();
-          transcriptDbPromise = null;
-        };
-        finish(db);
-      };
-      request.onerror = () => finish(null);
-      request.onblocked = () => finish(null);
-    } catch {
-      finish(null);
-    }
+  let resolveOpening!: (db: IDBDatabase | null) => void;
+  const opening = new Promise<IDBDatabase | null>((resolve) => {
+    resolveOpening = resolve;
   });
-  return transcriptDbPromise;
+  transcriptDbPromise = opening;
+  let settled = false;
+  const finish = (db: IDBDatabase | null) => {
+    if (settled) {
+      db?.close();
+      return;
+    }
+    settled = true;
+    if (!db && transcriptDbPromise === opening) transcriptDbPromise = null;
+    resolveOpening(db);
+  };
+  try {
+    const request = indexedDB.open(AGENT_TRANSCRIPT_DB, 1);
+    request.onupgradeneeded = () => {
+      try {
+        if (!request.result.objectStoreNames.contains(AGENT_TRANSCRIPT_STORE)) {
+          request.result.createObjectStore(AGENT_TRANSCRIPT_STORE, {
+            keyPath: "id",
+          });
+        }
+      } catch {
+        request.transaction?.abort();
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        if (transcriptDbPromise === opening) transcriptDbPromise = null;
+      };
+      finish(db);
+    };
+    request.onerror = () => finish(null);
+    request.onblocked = () => finish(null);
+  } catch {
+    finish(null);
+  }
+  return opening;
 }
 
 async function loadAgentTranscripts(): Promise<{
@@ -1407,10 +1411,12 @@ export const useStore = create<LogosState>((set, get) => ({
     set({ agentCommands: commands });
   },
   async loadAgentRegistry(forceRefresh) {
-    const agents = await window.logos.agent
-      .listRegistry(forceRefresh)
-      .catch(() => []);
-    if (agents.length) set({ agentRegistry: agents });
+    try {
+      const agents = await window.logos.agent.listRegistry(forceRefresh);
+      set({ agentRegistry: agents });
+    } catch {
+      // Keep the last successful registry when refresh fails.
+    }
   },
   async refreshAgentAuth() {
     const status = await window.logos.agent.authStatus();

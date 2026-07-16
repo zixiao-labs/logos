@@ -36,7 +36,7 @@ export type FileSnapshot =
   | { exists: false; revision: string };
 
 export type ConditionalWriteResult =
-  | { status: "written"; revision: string }
+  | { status: "written-optimistically"; revision: string }
   | { status: "conflict"; current: FileSnapshot };
 
 export type FsWatchEventType = "create" | "change" | "delete" | "rename";

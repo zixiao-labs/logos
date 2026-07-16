@@ -45,6 +45,36 @@ const importAcp = new Function(
 ) as () => Promise<AcpSdk>;
 
 const ACP_SETUP_TIMEOUT_MS = 30_000;
+const MAX_ACP_FILE_BYTES = 1024 * 1024;
+
+async function readBoundedTextFile(filePath: string): Promise<string> {
+  const handle = await fs.open(filePath, "r");
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("ACP file read requires a regular file");
+    if (stat.size > MAX_ACP_FILE_BYTES) {
+      throw new Error(`ACP file exceeds ${MAX_ACP_FILE_BYTES} byte limit`);
+    }
+    const buffer = Buffer.alloc(MAX_ACP_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        buffer.length - offset,
+        null,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_ACP_FILE_BYTES) {
+      throw new Error(`ACP file exceeds ${MAX_ACP_FILE_BYTES} byte limit`);
+    }
+    return buffer.toString("utf8", 0, offset);
+  } finally {
+    await handle.close();
+  }
+}
 
 async function withSetupTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -798,7 +828,7 @@ function createClient(
     },
     async readTextFile(input) {
       const filePath = await resolveWorkspacePath(request.cwd, input.path, true);
-      const source = await fs.readFile(filePath, "utf8");
+      const source = await readBoundedTextFile(filePath);
       const lines = source.split("\n");
       const start = Math.max((input.line ?? 1) - 1, 0);
       return {

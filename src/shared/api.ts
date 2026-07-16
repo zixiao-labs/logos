@@ -64,6 +64,11 @@ export interface LogosAPI {
     readFile(path: string): Promise<string>;
     readFileSnapshot(path: string): Promise<FileSnapshot>;
     writeFile(path: string, content: string): Promise<void>;
+    /**
+     * Detects conflicts before an atomic replacement. Portable filesystems do
+     * not provide compare-and-swap for an existing path, so success is
+     * explicitly optimistic with respect to external writers.
+     */
     writeFileConditional(
       path: string,
       content: string,

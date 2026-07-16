@@ -1,5 +1,21 @@
-import { describe, expect, it } from "@lightning-js/lightning";
+import { afterEach, describe, expect, it } from "@lightning-js/lightning";
+import type { AcpRegistryAgent } from "../shared/types";
 import { type AgentThread, useStore } from "./store";
+
+const initialStoreState = useStore.getInitialState();
+const initialWindowDescriptor = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "window",
+);
+
+afterEach(() => {
+  useStore.setState(initialStoreState, true);
+  if (initialWindowDescriptor) {
+    Object.defineProperty(globalThis, "window", initialWindowDescriptor);
+  } else {
+    Reflect.deleteProperty(globalThis, "window");
+  }
+});
 
 function agentThread(id = "agent"): AgentThread {
   return {
@@ -62,7 +78,6 @@ describe("agent store", () => {
   });
 
   it("returns a running session to idle when agent start rejects", async () => {
-    const originalWindow = globalThis.window;
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: {
@@ -79,20 +94,13 @@ describe("agent store", () => {
       activeAgentId: "agent",
     });
 
-    try {
-      await useStore.getState().sendAgentPrompt("hello");
-      const thread = useStore.getState().agentSessions[0];
-      expect(thread.status).toBe("idle");
-      expect(thread.items.at(-1)).toMatchObject({
-        kind: "error",
-        message: "start failed",
-      });
-    } finally {
-      Object.defineProperty(globalThis, "window", {
-        configurable: true,
-        value: originalWindow,
-      });
-    }
+    await useStore.getState().sendAgentPrompt("hello");
+    const thread = useStore.getState().agentSessions[0];
+    expect(thread.status).toBe("idle");
+    expect(thread.items.at(-1)).toMatchObject({
+      kind: "error",
+      message: "start failed",
+    });
   });
 
   it("does not duplicate an error event when agent start also rejects", async () => {
@@ -100,7 +108,6 @@ describe("agent store", () => {
     const start = new Promise<void>((_resolve, reject) => {
       rejectStart = reject;
     });
-    const originalWindow = globalThis.window;
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: { logos: { agent: { start: () => start } } },
@@ -111,26 +118,50 @@ describe("agent store", () => {
       activeAgentId: "agent",
     });
 
-    try {
-      const sending = useStore.getState().sendAgentPrompt("hello");
-      useStore.getState().applyAgentEvent({
-        kind: "error",
-        sessionId: "agent",
-        message: "main process failed",
-      });
-      rejectStart(new Error("start failed"));
-      await sending;
+    const sending = useStore.getState().sendAgentPrompt("hello");
+    useStore.getState().applyAgentEvent({
+      kind: "error",
+      sessionId: "agent",
+      message: "main process failed",
+    });
+    rejectStart(new Error("start failed"));
+    await sending;
 
-      const errors = useStore
-        .getState()
-        .agentSessions[0].items.filter((item) => item.kind === "error");
-      expect(errors).toHaveLength(1);
-      expect(errors[0]).toMatchObject({ message: "main process failed" });
-    } finally {
-      Object.defineProperty(globalThis, "window", {
-        configurable: true,
-        value: originalWindow,
-      });
-    }
+    const errors = useStore
+      .getState()
+      .agentSessions[0].items.filter((item) => item.kind === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: "main process failed" });
+  });
+
+  it("replaces a successful empty registry and preserves it on failure", async () => {
+    const registryAgent: AcpRegistryAgent = {
+      id: "agent",
+      name: "Agent",
+      description: "Test agent",
+      version: "1.0.0",
+      distributionKinds: ["npx"],
+      available: true,
+    };
+    let fail = true;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        logos: {
+          agent: {
+            listRegistry: () =>
+              fail ? Promise.reject(new Error("offline")) : Promise.resolve([]),
+          },
+        },
+      },
+    });
+    useStore.setState({ agentRegistry: [registryAgent] });
+
+    await useStore.getState().loadAgentRegistry();
+    expect(useStore.getState().agentRegistry).toEqual([registryAgent]);
+
+    fail = false;
+    await useStore.getState().loadAgentRegistry();
+    expect(useStore.getState().agentRegistry).toEqual([]);
   });
 });

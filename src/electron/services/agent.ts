@@ -158,6 +158,7 @@ interface ClaudeSession {
   kind: "claude";
   input: InputQueue;
   query: Query;
+  closed: boolean;
   /** Current assistant message per root/subagent stream. */
   currentMessageIds: Map<string, string>;
 }
@@ -511,6 +512,7 @@ export function registerAgentService(
       kind: "claude",
       input,
       query,
+      closed: false,
       currentMessageIds: new Map(),
     };
     // Consume the message stream for the lifetime of the session.
@@ -524,6 +526,7 @@ export function registerAgentService(
           message: err instanceof Error ? err.message : String(err),
         });
       } finally {
+        session.closed = true;
         if (sessions.get(req.sessionId) === session) {
           sessions.delete(req.sessionId);
         }
@@ -717,6 +720,10 @@ export function registerAgentService(
           shuttingDown ||
           (sessionGenerations.get(req.sessionId) ?? 0) !== generation
         ) {
+          await disposeSession(session, true);
+          throw new SessionStartCancelled();
+        }
+        if (session.kind === "claude" && session.closed) {
           await disposeSession(session, true);
           throw new SessionStartCancelled();
         }
