@@ -113,8 +113,8 @@ export function augmentPath(env: NodeJS.ProcessEnv): void {
     .resourcesPath;
   const entries = [
     ...(resourcesPath ? [path.join(resourcesPath, "bin")] : []),
-    ...existingPath.split(separator),
     ...nvmBinEntries(env),
+    ...existingPath.split(separator),
     ...(process.platform === "win32" ? [] : systemPathFallbacks(env)),
   ].filter(Boolean);
   const seen = new Set<string>();

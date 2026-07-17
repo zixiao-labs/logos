@@ -878,6 +878,15 @@ describe("debug service", () => {
     const rootSocket = createSocket(false);
     const rendererSocket = createSocket(true);
     const sockets = [rootSocket.socket, rendererSocket.socket];
+    let connectionCount = 0;
+    let rendererConnectionStarted!: () => void;
+    const rendererConnecting = new Promise<void>((resolve) => {
+      rendererConnectionStarted = resolve;
+    });
+    let releaseRendererConnection!: () => void;
+    const rendererConnectionReleased = new Promise<void>((resolve) => {
+      releaseRendererConnection = resolve;
+    });
     const spawnProcess = (() => {
       queueMicrotask(() => fake.proc.emit("spawn"));
       return fake.proc;
@@ -894,12 +903,16 @@ describe("debug service", () => {
         connectSocket: async () => {
           const socket = sockets.shift();
           if (!socket) throw new Error("Unexpected adapter connection");
+          if (connectionCount++ === 1) {
+            rendererConnectionStarted();
+            await rendererConnectionReleased;
+          }
           return socket;
         },
       },
     );
 
-    const root = await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+    const rootStart = ipc.invoke<DebugSessionInfo>(CH.debugStart, {
       sessionId: "electron-root",
       configuration: {
         name: "Electron: Development",
@@ -926,6 +939,15 @@ describe("debug service", () => {
       },
       initialBreakpoints: { "/workspace/renderer.ts": [{ line: 12 }] },
     });
+    await rendererConnecting;
+    await ipc.invoke(
+      CH.debugSetBreakpoints,
+      "electron-root",
+      "/workspace/renderer.ts",
+      [{ line: 24 }],
+    );
+    releaseRendererConnection();
+    const root = await rootStart;
 
     expect(root).toMatchObject({ id: "electron-root", status: "running" });
     expect(rootLaunchArguments).toMatchObject({
@@ -951,12 +973,6 @@ describe("debug service", () => {
       request: "attach",
       status: "running",
     });
-    await ipc.invoke(
-      CH.debugSetBreakpoints,
-      "electron-root",
-      "/workspace/renderer.ts",
-      [{ line: 24 }],
-    );
     expect(rootBreakpointLines).toContain(24);
     expect(rendererBreakpointLines).toContain(24);
 

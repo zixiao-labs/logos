@@ -25,9 +25,7 @@ describe("path environment", () => {
       };
       augmentPath(env);
       const entries = env.PATH!.split(":");
-      expect(entries.indexOf(defaultBin)).toBeGreaterThan(
-        entries.indexOf("/custom/bin"),
-      );
+      expect(entries.indexOf(defaultBin)).toBeLessThan(entries.indexOf("/usr/bin"));
       expect(entries.indexOf(defaultBin)).toBeLessThan(entries.indexOf(newestBin));
       expect(entries.filter((entry) => entry === "/usr/bin")).toHaveLength(1);
     } finally {

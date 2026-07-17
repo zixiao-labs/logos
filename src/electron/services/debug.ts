@@ -999,7 +999,6 @@ export function registerDebugService(
     const child = await startSession(
       {
         configuration: childConfiguration,
-        initialBreakpoints: Object.fromEntries(parent.breakpoints),
         exceptionBreakpoints: parent.exceptionBreakpoints,
       },
       { type: "server", ...parent.adapterEndpoint },
@@ -1268,7 +1267,9 @@ export function registerDebugService(
         socket: transport.socket,
         terminalProcesses: new Set(),
         terminalIds: new Set(),
-        breakpoints: new Map(Object.entries(request.initialBreakpoints ?? {})),
+        breakpoints: parentSession
+          ? new Map(parentSession.breakpoints)
+          : new Map(Object.entries(request.initialBreakpoints ?? {})),
         breakpointVersions: new Map(),
         exceptionBreakpoints: request.exceptionBreakpoints ?? [],
         readyForBreakpoints: false,
@@ -1380,7 +1381,6 @@ export function registerDebugService(
         await startSession(
           {
             configuration: rendererConfiguration,
-            initialBreakpoints: Object.fromEntries(activeSession.breakpoints),
             exceptionBreakpoints: activeSession.exceptionBreakpoints,
           },
           { type: "server", ...activeSession.adapterEndpoint },
