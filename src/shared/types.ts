@@ -83,6 +83,20 @@ export interface GitLogEntry {
   date: string;
 }
 
+export interface GitBlameLine {
+  hash: string;
+  shortHash: string;
+  message: string;
+  author: string;
+  authorEmail: string;
+  date: string;
+  /** Repository-relative path. */
+  path: string;
+  originalLine: number;
+  finalLine: number;
+  uncommitted: boolean;
+}
+
 export interface GitFileDiff {
   path: string;
   staged: boolean;
@@ -130,6 +144,8 @@ export interface Settings {
   "editor.wordWrap": "on" | "off";
   "editor.minimap": boolean;
   "editor.lineNumbers": "on" | "off" | "relative";
+  "git.blame.inline.enabled": boolean;
+  "git.blame.statusBar.enabled": boolean;
   "terminal.fontSize": number;
   "terminal.shell": string;
   "agent.model": string;

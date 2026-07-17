@@ -14,6 +14,8 @@ export const DEFAULT_SETTINGS: Settings = {
   "editor.wordWrap": "off",
   "editor.minimap": true,
   "editor.lineNumbers": "on",
+  "git.blame.inline.enabled": true,
+  "git.blame.statusBar.enabled": true,
   "terminal.fontSize": 12,
   "terminal.shell": "",
   "agent.model": "",

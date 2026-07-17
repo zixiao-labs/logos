@@ -46,6 +46,7 @@ export const CH = {
   gitDiff: "git:diff",
   gitFileDiff: "git:fileDiff",
   gitLog: "git:log",
+  gitBlame: "git:blame",
   gitInit: "git:init",
   gitFetch: "git:fetch",
   gitPull: "git:pull",

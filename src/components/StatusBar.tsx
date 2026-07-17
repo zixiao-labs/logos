@@ -1,6 +1,10 @@
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
 import { serverIdForLanguage } from "../lib/language";
+import {
+  formatBlameTooltip,
+  formatStatusBarBlame,
+} from "../lib/git-blame";
 import { Icon, type IconName } from "./Icon";
 
 export function StatusBar() {
@@ -20,6 +24,10 @@ export function StatusBar() {
   const togglePanel = useStore((s) => s.togglePanel);
   const openSpecial = useStore((s) => s.openSpecial);
   const tabSize = useStore((s) => s.settings["editor.tabSize"]);
+  const statusBarBlameEnabled = useStore(
+    (s) => s.settings["git.blame.statusBar.enabled"],
+  );
+  const currentLineBlame = useStore((s) => s.currentLineBlame);
 
   const active = tabs.find((tb) => tb.id === activeTabId);
 
@@ -60,6 +68,13 @@ export function StatusBar() {
 
   const agentRunning = agentSessions.some((a) => a.status === "running");
   const workDone = Object.values(lspWorkDone);
+  const visibleBlame = currentLineBlame &&
+    statusBarBlameEnabled &&
+    active?.kind === "file" &&
+    active.path === currentLineBlame.path &&
+    cursor.line === currentLineBlame.line
+      ? currentLineBlame.blame
+      : null;
 
   return (
     <div className="statusbar">
@@ -85,6 +100,15 @@ export function StatusBar() {
         </button>
       )}
       <div className="spacer" />
+      {visibleBlame && (
+        <span
+          className="si git-blame-status"
+          title={formatBlameTooltip(visibleBlame, language)}
+        >
+          <Icon name="commit" size={13} />
+          {formatStatusBarBlame(visibleBlame, language)}
+        </span>
+      )}
       {workDone.map((progress) => (
         <button
           key={`${progress.serverId}:${typeof progress.token}:${progress.token}`}

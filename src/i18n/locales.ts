@@ -102,6 +102,8 @@ const en: Dict = {
   "git.lastCommit": "Last Commit",
   "git.diffLoading": "Loading diff...",
   "git.diffLoadFailed": "Failed to load diff.",
+  "git.blame.you": "You",
+  "git.blame.uncommitted": "Uncommitted changes",
 
   "agent.title": "Agent",
   "agent.searchAgents": "Search Agents...",
@@ -144,6 +146,8 @@ const en: Dict = {
   "settings.wordWrap": "Word Wrap",
   "settings.minimap": "Minimap",
   "settings.lineNumbers": "Line Numbers",
+  "settings.inlineBlame": "Inline Blame",
+  "settings.statusBarBlame": "Status Bar Blame",
   "settings.terminalFontSize": "Terminal Font Size",
   "settings.autoDownloadLsp": "Auto-download language servers",
   "settings.reset": "Reset to Defaults",
@@ -176,6 +180,8 @@ const en: Dict = {
   "cmd.openSettings": "Preferences: Open Settings",
   "cmd.newAgent": "Agent: New Agent",
   "cmd.markdownPreview": "Markdown: Open Preview",
+  "cmd.toggleInlineBlame": "Git: Toggle Inline Blame",
+  "cmd.toggleStatusBarBlame": "Git: Toggle Status Bar Blame",
 
   "status.layout.vscode": "VS Code Layout",
   "status.layout.cursor": "Cursor Layout",
@@ -333,6 +339,8 @@ const zh: Dict = {
   "git.lastCommit": "最近提交",
   "git.diffLoading": "正在加载差异...",
   "git.diffLoadFailed": "无法加载差异。",
+  "git.blame.you": "你",
+  "git.blame.uncommitted": "未提交的更改",
 
   "agent.title": "智能体",
   "agent.searchAgents": "搜索智能体...",
@@ -375,6 +383,8 @@ const zh: Dict = {
   "settings.wordWrap": "自动换行",
   "settings.minimap": "缩略图",
   "settings.lineNumbers": "行号",
+  "settings.inlineBlame": "行内追溯信息",
+  "settings.statusBarBlame": "状态栏追溯信息",
   "settings.terminalFontSize": "终端字号",
   "settings.autoDownloadLsp": "自动下载语言服务器",
   "settings.reset": "恢复默认",
@@ -407,6 +417,8 @@ const zh: Dict = {
   "cmd.openSettings": "首选项：打开设置",
   "cmd.newAgent": "智能体：新建智能体",
   "cmd.markdownPreview": "Markdown：打开预览",
+  "cmd.toggleInlineBlame": "Git：切换行内追溯信息",
+  "cmd.toggleStatusBarBlame": "Git：切换状态栏追溯信息",
 
   "status.layout.vscode": "VS Code 布局",
   "status.layout.cursor": "Cursor 布局",

@@ -169,6 +169,7 @@ const api: LogosAPI = {
     fileDiff: (root, p, staged) =>
       ipcRenderer.invoke(CH.gitFileDiff, root, p, staged),
     log: (root, limit) => ipcRenderer.invoke(CH.gitLog, root, limit),
+    blame: (root, p, line) => ipcRenderer.invoke(CH.gitBlame, root, p, line),
     init: (root) => ipcRenderer.invoke(CH.gitInit, root),
     fetch: (root) => ipcRenderer.invoke(CH.gitFetch, root),
     pull: (root) => ipcRenderer.invoke(CH.gitPull, root),

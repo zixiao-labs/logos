@@ -679,6 +679,24 @@ export function SettingsView() {
               <option value="relative">Relative</option>
             </select>
           </Row>
+          <Row
+            name={t("settings.inlineBlame")}
+            settingKey="git.blame.inline.enabled"
+          >
+            <Switch
+              on={settings["git.blame.inline.enabled"]}
+              onChange={(v) => set("git.blame.inline.enabled", v)}
+            />
+          </Row>
+          <Row
+            name={t("settings.statusBarBlame")}
+            settingKey="git.blame.statusBar.enabled"
+          >
+            <Switch
+              on={settings["git.blame.statusBar.enabled"]}
+              onChange={(v) => set("git.blame.statusBar.enabled", v)}
+            />
+          </Row>
           <Row name={t("settings.terminalFontSize")} settingKey="terminal.fontSize">
             <input
               className="field"

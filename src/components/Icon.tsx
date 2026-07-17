@@ -46,6 +46,7 @@ export type IconName =
   | "win-max"
   | "win-close"
   | "branch"
+  | "commit"
   | "discard"
   | "download"
   | "upload"
@@ -106,6 +107,7 @@ const PATHS: Record<IconName, string> = {
   "win-max": "M5 5h14v14H5z",
   "win-close": "M18 6L6 18M6 6l12 12",
   branch: "M6 3v12M18 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a9 9 0 0 0 9-9",
+  commit: "M3 12h6M15 12h6M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
   discard: "M3 12a9 9 0 1 0 9-9 9 9 0 0 0-7 3.3M3 4v3.3h3.3",
   download: "M12 3v12M7 10l5 5 5-5M5 21h14",
   upload: "M12 21V9M7 14l5-5 5 5M5 3h14",
