@@ -12,11 +12,15 @@ import {
 describe("Logos agent contract", () => {
   it("publishes a unique, complete tool list", () => {
     expect(LOGOS_AGENT_TOOLS.map((tool) => tool.name)).toEqual([
-      "read_file",
-      "list_directory",
-      "search",
-      "write_file",
-      "run_command",
+      "Read",
+      "Glob",
+      "Grep",
+      "Write",
+      "Bash",
+      "Skill",
+      "MCP",
+      "DAP_REPL",
+      "Finish",
     ]);
     expect(new Set(LOGOS_AGENT_TOOLS.map((tool) => tool.name)).size).toBe(
       LOGOS_AGENT_TOOLS.length,
@@ -42,7 +46,8 @@ describe("Logos agent contract", () => {
   it("makes plan mode explicitly read-only", () => {
     const prompt = buildLogosAgentSystemPrompt({ workspace: "/workspace", mode: "plan" });
     expect(prompt).toContain("Plan mode is read-only");
-    expect(prompt).toContain("Do not call write_file or run_command");
+    expect(prompt).toContain("Do not call Write, Bash, MCP, or DAP_REPL");
+    expect(prompt).toContain("Finish is the only way to end the loop");
   });
 
   it("publishes the GPT-5.6 series, modes, and effort capabilities", () => {

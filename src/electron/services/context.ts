@@ -3,6 +3,11 @@ import type {
   TerminalCreateOptions,
   TerminalCreated,
 } from "../../shared/types";
+import type {
+  DapArguments,
+  DapResponse,
+  DebugSessionInfo,
+} from "../../shared/dap";
 
 /**
  * Passed to every service's `register` function. Keeps services decoupled from
@@ -21,5 +26,14 @@ export interface ServiceContext {
   terminal?: {
     create(options: TerminalCreateOptions): TerminalCreated;
     kill(id: string): void;
+  };
+  debug?: {
+    list(): DebugSessionInfo[];
+    generation(sessionId: string): string | undefined;
+    request<T = unknown>(
+      sessionId: string,
+      command: string,
+      args?: DapArguments,
+    ): Promise<DapResponse<T>>;
   };
 }

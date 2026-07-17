@@ -33,6 +33,7 @@ import { augmentPath } from "./path-env";
 type SpawnProcess = typeof spawn;
 
 interface DebugSession {
+  agentGeneration: string;
   info: DebugSessionInfo;
   configuration: DebugLaunchConfiguration;
   dapType: string;
@@ -1257,6 +1258,7 @@ export function registerDebugService(
       if (signal.aborted) throw new Error("Debug session start cancelled");
 
       const activeSession: DebugSession = {
+        agentGeneration: randomUUID(),
         info,
         configuration: request.configuration,
         dapType,
@@ -1506,51 +1508,61 @@ export function registerDebugService(
     return shutdown;
   };
 
-  ipcMain.handle(CH.debugList, () =>
-    Array.from(sessions.values(), cloneInfo),
-  );
+  const listSessions = () => Array.from(sessions.values(), cloneInfo);
+  const requestSession = async <T = unknown>(
+    sessionId: string,
+    command: string,
+    args?: DapArguments,
+  ): Promise<DapResponse<T>> => {
+    const session = sessions.get(sessionId);
+    if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
+    const executionEventCounter = session.executionEventCounter;
+    const response = await session.connection.sendRequest<T>(command, args, 30_000);
+    if (
+      (command === "continue" ||
+        command === "next" ||
+        command === "stepIn" ||
+        command === "stepOut") &&
+      !session.disposed &&
+      session.executionEventCounter === executionEventCounter
+    ) {
+      const responseBody = asArguments(response.body);
+      handleEvent(session, {
+        seq: 0,
+        type: "event",
+        event: "continued",
+        body: {
+          threadId: typeof args?.threadId === "number" ? args.threadId : 0,
+          allThreadsContinued:
+            command === "continue"
+              ? responseBody.allThreadsContinued !== false
+              : args?.singleThread === true
+                ? false
+                : true,
+        },
+      });
+    }
+    return response;
+  };
+  ctx.debug = {
+    list: listSessions,
+    generation: (sessionId) => sessions.get(sessionId)?.agentGeneration,
+    request: requestSession,
+  };
+
+  ipcMain.handle(CH.debugList, listSessions);
   ipcMain.handle(CH.debugListAdapters, () => adapterInfo(ctx));
   ipcMain.handle(CH.debugStart, (_event, request: DebugStartRequest) =>
     startSession(request),
   );
   ipcMain.handle(
     CH.debugRequest,
-    async (
+    (
       _event,
       sessionId: string,
       command: string,
       args?: DapArguments,
-    ): Promise<DapResponse> => {
-      const session = sessions.get(sessionId);
-      if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
-      const executionEventCounter = session.executionEventCounter;
-      const response = await session.connection.sendRequest(command, args, 30_000);
-      if (
-        (command === "continue" ||
-          command === "next" ||
-          command === "stepIn" ||
-          command === "stepOut") &&
-        !session.disposed &&
-        session.executionEventCounter === executionEventCounter
-      ) {
-        const responseBody = asArguments(response.body);
-        handleEvent(session, {
-          seq: 0,
-          type: "event",
-          event: "continued",
-          body: {
-            threadId: typeof args?.threadId === "number" ? args.threadId : 0,
-            allThreadsContinued:
-              command === "continue"
-                ? responseBody.allThreadsContinued !== false
-                : args?.singleThread === true
-                  ? false
-                  : true,
-          },
-        });
-      }
-      return response;
-    },
+    ): Promise<DapResponse> => requestSession(sessionId, command, args),
   );
   ipcMain.handle(
     CH.debugSetBreakpoints,
@@ -1580,6 +1592,7 @@ export function registerDebugService(
   );
 
   return () => {
+    if (ctx.debug?.request === requestSession) ctx.debug = undefined;
     for (const pendingStart of pendingStarts.values()) {
       cancelPendingStart(pendingStart);
     }

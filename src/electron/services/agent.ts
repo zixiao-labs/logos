@@ -206,7 +206,7 @@ function stringifyContent(content: unknown): string {
 export function registerAgentService(
   ctx: ServiceContext,
   acpSecrets?: AcpSecretStore,
-): () => void {
+): () => Promise<void> {
   const { ipcMain } = ctx;
   const sessions = new Map<string, Session>();
   const startingSessions = new Map<string, Promise<Session>>();
@@ -620,7 +620,12 @@ export function registerAgentService(
 
   const logosHooks = {
     emit,
-    requestPermission(sessionId: string, toolName: string, input: unknown) {
+    requestPermission(
+      sessionId: string,
+      toolName: string,
+      input: unknown,
+      options?: AgentPermissionOption[],
+    ) {
       const requestId = `req-${++permCounter}`;
       return new Promise<boolean>((resolve) => {
         pendingPerms.set(requestId, {
@@ -634,9 +639,11 @@ export function registerAgentService(
           requestId,
           toolName,
           input,
+          options,
         });
       });
     },
+    debug: ctx.debug,
     closed(sessionId: string) {
       cancelPending(sessionId);
       sessions.delete(sessionId);
@@ -775,7 +782,10 @@ export function registerAgentService(
       ) return;
       if (session.kind === "claude") session.input.push(req.prompt);
       else {
-        if (session.kind === "logos") session.runtime.setEffort(req.effort);
+        if (session.kind === "logos") {
+          session.runtime.setEffort(req.effort);
+          session.runtime.setToolPolicy(req.allowedTools, req.disallowedTools);
+        }
         await session.runtime.prompt(req.prompt);
       }
     } catch (err) {
@@ -1069,7 +1079,7 @@ export function registerAgentService(
       .catch(() => [] as AgentSlashCommand[]),
   );
 
-  return () => {
+  return async () => {
     shuttingDown = true;
     for (const sessionId of startingSessions.keys()) {
       sessionGenerations.set(
@@ -1077,12 +1087,16 @@ export function registerAgentService(
         (sessionGenerations.get(sessionId) ?? 0) + 1,
       );
     }
+    const starting = [...startingSessions.values()];
     startingSessions.clear();
     startingFingerprints.clear();
-    for (const s of sessions.values()) {
-      void disposeSession(s);
-    }
+    const active = [...sessions.entries()];
     sessions.clear();
+    for (const [sessionId] of active) cancelPending(sessionId);
+    await Promise.allSettled([
+      ...active.map(([, session]) => disposeSession(session)),
+      ...starting,
+    ]);
     pendingPerms.clear();
   };
 }

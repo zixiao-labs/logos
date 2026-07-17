@@ -188,39 +188,67 @@ export interface LogosAgentToolInfo {
 
 export const LOGOS_AGENT_TOOLS: readonly LogosAgentToolInfo[] = [
   {
-    name: "read_file",
-    title: "Read file",
+    name: "Read",
+    title: "Read",
     description: "Read a UTF-8 text file with stable, numbered lines.",
     mutating: false,
     constraints: "Workspace only; maximum 1 MiB per file and 4,000 lines per call.",
   },
   {
-    name: "list_directory",
-    title: "List directory",
+    name: "Glob",
+    title: "Glob",
     description: "List the immediate files and directories at a workspace path.",
     mutating: false,
     constraints: "Workspace only; returns at most 500 entries.",
   },
   {
-    name: "search",
-    title: "Search workspace",
-    description: "Search workspace text files for a literal string.",
+    name: "Grep",
+    title: "Grep",
+    description: "Search workspace text files with a regular expression.",
     mutating: false,
-    constraints: "Skips generated/dependency directories and returns at most 100 matches.",
+    constraints: "Workspace only; supports a file glob and returns at most 100 matches.",
   },
   {
-    name: "write_file",
-    title: "Write file",
+    name: "Write",
+    title: "Write",
     description: "Create or completely replace a UTF-8 text file.",
     mutating: true,
     constraints: "Workspace only; approval may be required; maximum output size is 5 MiB.",
   },
   {
-    name: "run_command",
-    title: "Run command",
-    description: "Run one executable with an argv array and no shell interpolation.",
+    name: "Bash",
+    title: "Bash",
+    description: "Run a shell command and capture its combined output.",
     mutating: true,
-    constraints: "Workspace only; approval may be required; timeout is capped at 120 seconds.",
+    constraints: "Workspace only; every command requires one-time approval; timeout is capped at 120 seconds; Windows requires an installed bash.exe.",
+  },
+  {
+    name: "Skill",
+    title: "Skill",
+    description: "List or load project and user Agent Skills.",
+    mutating: false,
+    constraints: "Reads only files inside discovered skill directories; maximum 1 MiB per call.",
+  },
+  {
+    name: "MCP",
+    title: "MCP",
+    description: "List and call tools from MCP servers configured in workspace .mcp.json.",
+    mutating: true,
+    constraints: "Servers start lazily; connections and calls require one-time approval.",
+  },
+  {
+    name: "DAP_REPL",
+    title: "DAP REPL",
+    description: "Evaluate an expression in a running Debug Adapter Protocol session.",
+    mutating: true,
+    constraints: "Every expression requires one-time approval because evaluation may have side effects.",
+  },
+  {
+    name: "Finish",
+    title: "Finish",
+    description: "Explicitly mark the current task complete after work and verification are done.",
+    mutating: false,
+    constraints: "Required to end the agent loop; do not call it while work remains.",
   },
 ] as const;
 
@@ -230,13 +258,13 @@ export function buildLogosAgentSystemPrompt(input: {
 }): string {
   const modeInstruction: Record<AgentPermissionMode, string> = {
     default:
-      "Ask for client approval before write_file or run_command. Read-only inspection does not require approval.",
+      "Ask for client approval before Write. Bash, MCP execution, and DAP_REPL always require one-time approval. Read-only inspection does not require approval.",
     acceptEdits:
-      "File edits are pre-approved, but run_command still requires client approval.",
+      "File edits are pre-approved, but Bash, MCP execution, and DAP_REPL still require one-time approval.",
     bypassPermissions:
-      "The user explicitly enabled bypassPermissions. Mutating tools may run without an approval prompt, but all safety and workspace rules still apply.",
+      "The user explicitly enabled bypassPermissions. Write may run without approval, but Bash, MCP execution, and DAP_REPL still require one-time approval. All safety and workspace rules still apply.",
     plan:
-      "Plan mode is read-only. Do not call write_file or run_command and do not claim that changes were applied.",
+      "Plan mode is read-only. Do not call Write, Bash, MCP, or DAP_REPL and do not claim that changes were applied.",
   };
   const toolContract = LOGOS_AGENT_TOOLS.map(
     (tool) =>
@@ -255,17 +283,17 @@ ${modeInstruction[input.mode]}
 
 # Workflow
 1. Inspect relevant files before proposing or applying changes. Do not guess the repository structure.
-2. For a multi-step task, state a short plan and update it as work progresses.
+2. For a multi-step task, state a short plan and immediately begin the first tool action in the same response. A plan alone is not progress.
 3. Prefer the smallest correct change and preserve existing project conventions.
 4. Read a file before replacing it. Do not erase content you have not inspected.
 5. After edits, run the narrowest useful test, typecheck, or build command when available.
 6. If a tool fails, use its actual error to adjust the approach. Never report an action as successful unless the tool result confirms it.
-7. Finish with a concise summary of changed behavior and verification performed.
+7. Continue the tool loop until all requested work and verification are complete. Then provide a concise summary and call Finish in that same response. Finish is the only way to end the loop.
 
 # Tool Contract
 ${toolContract}
 
-Call tools only with valid JSON matching their schemas. run_command receives an executable and a separate args array; never embed shell pipelines, redirections, or chained commands in the executable field. search is literal text search, not a regular-expression engine. write_file replaces the whole file, so preserve all intended existing content.
+Call tools only with valid JSON matching their schemas. Write replaces the whole file, so preserve all intended existing content. Grep uses JavaScript regular-expression syntax. MCP servers are discovered from .mcp.json and must be listed before use. Skill with no name lists available skills; load a relevant skill before following it. DAP_REPL targets an existing debug session and can execute code in the debuggee.
 
 # Communication
 Be direct and factual. Distinguish observations, actions, and unverified assumptions. Ask one focused question only when a missing decision blocks safe progress.`;

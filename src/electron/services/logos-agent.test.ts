@@ -6,15 +6,48 @@ import {
   it,
 } from "@lightning-js/lightning";
 import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import type { AgentEvent, AgentStartRequest } from "../../shared/types";
 import { LogosAgentRuntime, type LogosAgentHooks } from "./logos-agent";
 import type { OpenAIAuthStore } from "./openai-auth";
 
-function responseStream(events: unknown[], lineEnding = "\n"): Response {
+function responseStream(
+  events: unknown[],
+  lineEnding = "\n",
+  autoFinish = true,
+): Response {
+  const normalized = events.map((value) => {
+    if (!autoFinish || !value || typeof value !== "object") return value;
+    const event = value as {
+      type?: string;
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    const output = event.response?.output;
+    if (
+      event.type !== "response.completed" ||
+      !Array.isArray(output) ||
+      output.some((item) => item.type === "function_call")
+    ) return value;
+    return {
+      ...event,
+      response: {
+        ...event.response,
+        output: [
+          ...output,
+          {
+            type: "function_call",
+            call_id: `finish-${crypto.randomUUID()}`,
+            name: "Finish",
+            arguments: JSON.stringify({ summary: "Test complete" }),
+          },
+        ],
+      },
+    };
+  });
   return new Response(
-    events
+    normalized
       .map((event) => `data: ${JSON.stringify(event)}${lineEnding}${lineEnding}`)
       .join("") +
       `data: [DONE]${lineEnding}${lineEnding}`,
@@ -163,6 +196,7 @@ describe("Logos agent runtime", () => {
 
     expect(bodies[0]).toMatchObject({
       model: "gpt-5.6-sol",
+      tool_choice: "required",
       reasoning: { effort: "max", mode: "pro", summary: "auto" },
       text: { verbosity: "low" },
     });
@@ -180,6 +214,31 @@ describe("Logos agent runtime", () => {
       model: "gpt-5.6-terra",
       reasoning: { effort: "medium", summary: "auto" },
     });
+  });
+
+  it("honors persisted legacy tool names in policy settings", async () => {
+    let body: { tools?: Array<{ name: string }> } | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      body = JSON.parse(String(init?.body)) as typeof body;
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "response-policy", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root, { disallowedTools: ["write_file", "run_command"] }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("inspect only");
+
+    expect(body?.tools?.some((tool) => tool.name === "Write")).toBe(false);
+    expect(body?.tools?.some((tool) => tool.name === "Bash")).toBe(false);
+    expect(body?.tools?.some((tool) => tool.name === "Finish")).toBe(true);
   });
 
   it("streams text, emits debug trace, and persists a resumable session", async () => {
@@ -223,7 +282,164 @@ describe("Logos agent runtime", () => {
     const saved = JSON.parse(
       await fs.readFile(path.join(sessionsDir, `${result.sdkSessionId}.json`), "utf8"),
     ) as { history: unknown[] };
-    expect(saved.history.length).toBe(2);
+    expect(saved.history.length).toBe(4);
+  });
+
+  it("continues after assistant-only output until Finish is called", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream(
+          [
+            { type: "response.output_text.delta", delta: "I will inspect the project." },
+            {
+              type: "response.completed",
+              response: {
+                id: "resp-plan-only",
+                output: [
+                  {
+                    type: "message",
+                    id: "plan-only",
+                    role: "assistant",
+                    content: [
+                      { type: "output_text", text: "I will inspect the project." },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+          "\n",
+          false,
+        );
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-finished", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("complete a task");
+
+    expect(calls).toBe(2);
+    expect(
+      events.some(
+        (event) => event.kind === "system" && event.subtype === "logos-continue",
+      ),
+    ).toBe(true);
+    expect(events.at(-1)).toMatchObject({ kind: "result", isError: false });
+  });
+
+  it("rejects an invalid Finish call and keeps the loop running", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream(
+          [
+            {
+              type: "response.completed",
+              response: {
+                id: "resp-invalid-finish",
+                output: [
+                  {
+                    type: "function_call",
+                    call_id: "invalid-finish",
+                    name: "Finish",
+                    arguments: JSON.stringify({ summary: "" }),
+                  },
+                ],
+              },
+            },
+          ],
+          "\n",
+          false,
+        );
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-valid-finish", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("finish correctly");
+
+    expect(calls).toBe(2);
+    expect(
+      events.some(
+        (event) =>
+          event.kind === "system" &&
+          event.subtype === "logos-finish" &&
+          (event.data as { accepted?: boolean }).accepted === false,
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps streamed function calls when response.completed has empty output", async () => {
+    await fs.writeFile(path.join(root, "streamed.txt"), "streamed call", "utf8");
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        const call = {
+          type: "function_call",
+          id: "stream-item",
+          call_id: "stream-call",
+          name: "Read",
+          arguments: JSON.stringify({ path: "streamed.txt" }),
+        };
+        return responseStream(
+          [
+            { type: "response.output_item.added", output_index: 0, item: call },
+            { type: "response.output_item.done", output_index: 0, item: call },
+            {
+              type: "response.completed",
+              response: { id: "resp-stream-call", output: [] },
+            },
+          ],
+          "\n",
+          false,
+        );
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-after-stream-call", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("read the file");
+
+    expect(calls).toBe(2);
+    expect(
+      events.find(
+        (event) => event.kind === "tool-result" && event.toolUseId === "stream-call",
+      ),
+    ).toMatchObject({ kind: "tool-result", isError: false });
   });
 
   it("executes an approved write tool and continues the model loop", async () => {
@@ -245,14 +461,14 @@ describe("Logos agent runtime", () => {
                   type: "function_call",
                   id: "item-1",
                   call_id: "call-1",
-                  name: "write_file",
+                  name: "Write",
                   arguments: JSON.stringify({ path: "created.txt", content: "created" }),
                 },
                 {
                   type: "function_call",
                   id: "item-2",
                   call_id: "call-2",
-                  name: "write_file",
+                  name: "Write",
                   arguments: JSON.stringify({ path: "target-dir", content: "blocked" }),
                 },
               ],
@@ -293,7 +509,7 @@ describe("Logos agent runtime", () => {
     }
     expect((await fs.readdir(root)).some((name) => name.endsWith(".tmp"))).toBe(false);
     expect(calls).toBe(2);
-    expect(events.some((event) => event.kind === "tool-use" && event.name === "write_file")).toBe(true);
+    expect(events.some((event) => event.kind === "tool-use" && event.name === "Write")).toBe(true);
     expect(
       events.some(
         (event) =>
@@ -334,7 +550,7 @@ describe("Logos agent runtime", () => {
                 {
                   type: "function_call",
                   call_id: "read-1",
-                  name: "read_file",
+                    name: "Read",
                   arguments: JSON.stringify({
                     path: "src/sample.txt",
                     start_line: 2,
@@ -344,23 +560,22 @@ describe("Logos agent runtime", () => {
                 {
                   type: "function_call",
                   call_id: "list-1",
-                  name: "list_directory",
+                    name: "Glob",
                   arguments: JSON.stringify({ path: "src" }),
                 },
                 {
                   type: "function_call",
                   call_id: "search-1",
-                  name: "search",
-                  arguments: JSON.stringify({ query: "needle", path: "src" }),
+                    name: "Grep",
+                    arguments: JSON.stringify({ pattern: "n[e]{2}dle", path: "src" }),
                 },
                 {
                   type: "function_call",
                   call_id: "command-1",
-                  name: "run_command",
-                  arguments: JSON.stringify({
-                    command: process.execPath,
-                    args: ["-e", "process.stdout.write('command-ok')"],
-                  }),
+                    name: "Bash",
+                    arguments: JSON.stringify({
+                      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.stdout.write('command-ok')")}`,
+                    }),
                 },
               ],
             },
@@ -405,8 +620,341 @@ describe("Logos agent runtime", () => {
     expect(result("list-1")?.content).toContain("sample.txt");
     expect(result("search-1")?.content).toContain("src/sample.txt:2:needle line");
     expect(result("command-1")?.content).toContain("command-ok");
-    expect(approvals).toEqual(["run_command"]);
+    expect(approvals).toEqual(["Bash"]);
     expect(calls).toBe(2);
+  });
+
+  it("loads project skills through the Skill tool", async () => {
+    const skillDir = path.join(root, ".agents", "skills", "review");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      "# Review\n\nCheck behavior before style.",
+      "utf8",
+    );
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream([
+          {
+            type: "response.completed",
+            response: {
+              id: "resp-skill",
+              output: [
+                {
+                  type: "function_call",
+                  call_id: "skill-list",
+                  name: "Skill",
+                  arguments: "{}",
+                },
+                {
+                  type: "function_call",
+                  call_id: "skill-load",
+                  name: "Skill",
+                  arguments: JSON.stringify({ name: "review" }),
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-skill-done", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root, { settingSources: ["project"] }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("load the review skill");
+
+    const results = events.filter((event) => event.kind === "tool-result");
+    expect(results.find((event) => event.toolUseId === "skill-list")?.content).toContain(
+      "review",
+    );
+    expect(results.find((event) => event.toolUseId === "skill-load")?.content).toContain(
+      "Check behavior before style",
+    );
+  });
+
+  it("requires one-time approval for DAP REPL even in bypass mode", async () => {
+    const approvals: Array<{ name: string; options: unknown }> = [];
+    hooks.requestPermission = async (_sessionId, name, _input, options) => {
+      approvals.push({ name, options });
+      return true;
+    };
+    const debugRequests: unknown[] = [];
+    hooks.debug = {
+      list: () => [
+        {
+          id: "debug-1",
+          name: "Node",
+          debugType: "node",
+          request: "launch",
+          status: "stopped",
+          capabilities: {},
+        },
+      ],
+      generation: () => "debug-generation-1",
+      request: async <T = unknown>(sessionId: string, command: string, args?: Record<string, unknown>) => {
+        debugRequests.push({ sessionId, command, args });
+        return {
+          seq: 1,
+          type: "response",
+          request_seq: 1,
+          success: true,
+          command,
+          body: { result: "42", variablesReference: 0 } as T,
+        };
+      },
+    };
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream([
+          {
+            type: "response.completed",
+            response: {
+              id: "resp-dap",
+              output: [
+                {
+                  type: "function_call",
+                  call_id: "dap-1",
+                  name: "DAP_REPL",
+                  arguments: JSON.stringify({ expression: "6 * 7", frame_id: 3 }),
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-dap-done", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root, { permissionMode: "bypassPermissions" }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("evaluate the expression");
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.name).toBe("DAP_REPL");
+    expect(approvals[0]?.options).toHaveLength(2);
+    expect(debugRequests).toEqual([
+      {
+        sessionId: "debug-1",
+        command: "evaluate",
+        args: { expression: "6 * 7", context: "repl", frameId: 3 },
+      },
+    ]);
+  });
+
+  it("lists and calls a workspace MCP server behind one-time approvals", async () => {
+    const require = createRequire(import.meta.url);
+    const serverModule = require.resolve("@modelcontextprotocol/sdk/server/index.js");
+    const stdioModule = require.resolve("@modelcontextprotocol/sdk/server/stdio.js");
+    const typesModule = require.resolve("@modelcontextprotocol/sdk/types.js");
+    const serverFile = path.join(root, "mcp-server.cjs");
+    await fs.writeFile(
+      serverFile,
+      `const { Server } = require(${JSON.stringify(serverModule)});
+const { StdioServerTransport } = require(${JSON.stringify(stdioModule)});
+const { ListToolsRequestSchema, CallToolRequestSchema } = require(${JSON.stringify(typesModule)});
+const server = new Server({ name: "test", version: "1.0.0" }, { capabilities: { tools: {} } });
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", description: "Echo text", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } }] }));
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const value = String(request.params.arguments?.value ?? "");
+  return { content: [{ type: "text", text: value }], ...(value === "mcp-fail" ? { isError: true } : {}) };
+});
+void server.connect(new StdioServerTransport());
+`,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(root, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          local: { command: process.execPath, args: [serverFile] },
+        },
+      }),
+      "utf8",
+    );
+    const approvals: Array<{ name: string; options: unknown }> = [];
+    hooks.requestPermission = async (_sessionId, name, _input, options) => {
+      approvals.push({ name, options });
+      return true;
+    };
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream([
+          {
+            type: "response.completed",
+            response: {
+              id: "resp-mcp",
+              output: [
+                {
+                  type: "function_call",
+                  call_id: "mcp-servers",
+                  name: "MCP",
+                  arguments: JSON.stringify({ action: "list_servers" }),
+                },
+                {
+                  type: "function_call",
+                  call_id: "mcp-tools",
+                  name: "MCP",
+                  arguments: JSON.stringify({ action: "list_tools", server: "local" }),
+                },
+                {
+                  type: "function_call",
+                  call_id: "mcp-call",
+                  name: "MCP",
+                  arguments: JSON.stringify({
+                    action: "call_tool",
+                    server: "local",
+                    tool: "echo",
+                    arguments: { value: "mcp-ok" },
+                  }),
+                },
+                {
+                  type: "function_call",
+                  call_id: "mcp-fail",
+                  name: "MCP",
+                  arguments: JSON.stringify({
+                    action: "call_tool",
+                    server: "local",
+                    tool: "echo",
+                    arguments: { value: "mcp-fail" },
+                  }),
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-mcp-done", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root, { permissionMode: "bypassPermissions" }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    try {
+      await runtime.prompt("use the MCP server");
+    } finally {
+      await runtime.dispose();
+    }
+
+    expect(approvals.map((approval) => approval.name)).toEqual([
+      "MCP",
+      "MCP",
+      "MCP",
+    ]);
+    expect(approvals.every((approval) => Array.isArray(approval.options))).toBe(true);
+    const result = (id: string) =>
+      events.find(
+        (event) => event.kind === "tool-result" && event.toolUseId === id,
+      ) as Extract<AgentEvent, { kind: "tool-result" }> | undefined;
+    expect(result("mcp-servers")?.content).toContain("local\tstdio");
+    expect(result("mcp-tools")?.content).toContain("echo");
+    expect(result("mcp-call")?.content).toBe("mcp-ok");
+    expect(result("mcp-fail")).toMatchObject({
+      kind: "tool-result",
+      content: "MCP tool error: mcp-fail",
+      isError: true,
+    });
+  });
+
+  it("rejects an MCP config changed while approval is pending", async () => {
+    const configFile = path.join(root, ".mcp.json");
+    await fs.writeFile(
+      configFile,
+      JSON.stringify({
+        mcpServers: { local: { command: process.execPath, args: ["safe.cjs"] } },
+      }),
+      "utf8",
+    );
+    hooks.requestPermission = async () => {
+      await fs.writeFile(
+        configFile,
+        JSON.stringify({
+          mcpServers: { local: { command: process.execPath, args: ["changed.cjs"] } },
+        }),
+        "utf8",
+      );
+      return true;
+    };
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return responseStream([
+          {
+            type: "response.completed",
+            response: {
+              id: "resp-mcp-race",
+              output: [
+                {
+                  type: "function_call",
+                  call_id: "mcp-race",
+                  name: "MCP",
+                  arguments: JSON.stringify({ action: "list_tools", server: "local" }),
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: "resp-mcp-race-done", output: [] },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("list MCP tools");
+
+    expect(
+      events.find(
+        (event) => event.kind === "tool-result" && event.toolUseId === "mcp-race",
+      ),
+    ).toMatchObject({ kind: "tool-result", isError: true });
+    const result = events.find(
+      (event) => event.kind === "tool-result" && event.toolUseId === "mcp-race",
+    );
+    expect(result?.kind === "tool-result" && result.content).toContain(
+      "changed after approval",
+    );
   });
 
   it("requires explicit approval for commands in bypass mode", async () => {
@@ -429,13 +977,11 @@ describe("Logos agent runtime", () => {
                 {
                   type: "function_call",
                   call_id: "command-bypass",
-                  name: "run_command",
+                  name: "Bash",
                   arguments: JSON.stringify({
-                    command: process.execPath,
-                    args: [
-                      "-e",
+                    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
                       `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "bad")`,
-                    ],
+                    )}`,
                   }),
                 },
               ],
@@ -453,7 +999,7 @@ describe("Logos agent runtime", () => {
     const runtime = await LogosAgentRuntime.create(
       request(root, {
         permissionMode: "bypassPermissions",
-        allowedTools: ["run_command"],
+        allowedTools: ["Bash"],
       }),
       hooks,
       fakeAuth(),
@@ -462,7 +1008,7 @@ describe("Logos agent runtime", () => {
 
     await runtime.prompt("run a command");
 
-    expect(approvals).toEqual(["run_command"]);
+    expect(approvals).toEqual(["Bash"]);
     expect(await fs.stat(marker).catch(() => null)).toBeNull();
     expect(
       events.find(
@@ -488,7 +1034,7 @@ describe("Logos agent runtime", () => {
                 {
                   type: "function_call",
                   call_id: "large-error",
-                  name: "read_file",
+                  name: "Read",
                   arguments: JSON.stringify({ path: escapedPath }),
                 },
               ],
@@ -609,13 +1155,13 @@ describe("Logos agent runtime", () => {
                 {
                   type: "function_call",
                   call_id: "write-denied",
-                  name: "write_file",
+                  name: "Write",
                   arguments: JSON.stringify({ path: "denied.txt", content: "no" }),
                 },
                 {
                   type: "function_call",
                   call_id: "read-escape",
-                  name: "read_file",
+                  name: "Read",
                   arguments: JSON.stringify({ path: "../outside.txt" }),
                 },
               ],

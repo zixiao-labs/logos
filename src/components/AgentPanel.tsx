@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Button, Chip, Disclosure, Switch } from "@heroui/react";
+import { Button, Chip, Disclosure, Spinner, Switch } from "@heroui/react";
 import {
   useStore,
   type AgentItem,
@@ -200,7 +200,14 @@ function AgentConversation({ session }: { session: AgentThread }) {
     if (timelineFollowing.current) {
       logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
     }
-  }, [session.id, session.items, session.pendingAsk, session.pendingPermission, session.plan]);
+  }, [
+    session.id,
+    session.items,
+    session.pendingAsk,
+    session.pendingPermission,
+    session.plan,
+    session.status,
+  ]);
 
   const deferredText = useDeferredValue(text);
 
@@ -313,7 +320,10 @@ function AgentConversation({ session }: { session: AgentThread }) {
           <AuthCard thread={session} />
         )}
         {session.status === "running" && !session.pendingAsk && (
-          <div className="agent-result">{t("agent.running")}</div>
+          <div className="agent-working" role="status" aria-live="polite">
+            <Spinner color="current" size="sm" />
+            <span>{t("agent.running")}</span>
+          </div>
         )}
       </div>
 
@@ -798,7 +808,11 @@ function AgentItemView({
             style={{ cursor: "pointer" }}
             onClick={() => setOpen((o) => !o)}
           >
-            <Icon name={item.isError ? "error" : "terminal"} size={13} />
+            {item.status === "pending" || item.status === "in_progress" ? (
+              <Spinner color="current" size="sm" />
+            ) : (
+              <Icon name={item.isError ? "error" : "terminal"} size={13} />
+            )}
             {item.name}
             {item.status && (
               <Chip
@@ -917,10 +931,13 @@ function PermissionCard({
   const respondPermission = useStore((s) => s.respondPermission);
   const settings = useStore((s) => s.settings);
   const setSetting = useStore((s) => s.setSetting);
-  const summary =
-    (input as { command?: string; file_path?: string })?.command ??
-    (input as { file_path?: string })?.file_path ??
-    JSON.stringify(input);
+  const highRisk = toolName === "Bash" || toolName === "MCP" || toolName === "DAP_REPL";
+  const summary = highRisk
+    ? stringifyDebugData(input)
+    : ((input as { command?: string; file_path?: string; path?: string })?.command ??
+      (input as { file_path?: string; path?: string })?.file_path ??
+      (input as { path?: string })?.path ??
+      stringifyDebugData(input));
 
   function alwaysAllow() {
     const allowed = settings["agent.allowedTools"];
@@ -940,9 +957,12 @@ function PermissionCard({
           fontFamily: "var(--mono-font)",
           fontSize: 12,
           wordBreak: "break-word",
+          whiteSpace: "pre-wrap",
+          maxHeight: 180,
+          overflow: "auto",
         }}
       >
-        {String(summary).slice(0, 500)}
+        {String(summary)}
       </div>
       <div className="perm-actions">
         {options?.length ? (
@@ -959,7 +979,11 @@ function PermissionCard({
                 )
               }
             >
-              {option.name}
+              {option.id === "allow-once"
+                ? t("agent.allowOnce")
+                : option.id === "reject-once"
+                  ? t("agent.deny")
+                  : option.name}
             </Button>
           ))
         ) : (
