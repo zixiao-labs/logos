@@ -78,7 +78,7 @@ Logos packages Microsoft's JavaScript debugger for the following types:
 | --- | --- |
 | `node`, `pwa-node` | Node.js. |
 | `chrome`, `pwa-chrome` | Chrome. |
-| `electron` | Electron main process. This Logos alias sends `pwa-node` to the adapter, so provide suitable `runtimeExecutable` and related js-debug options. |
+| `electron` | Electron main process, with an optional Logos-managed renderer attach. This alias sends `pwa-node` to the adapter, so provide suitable `runtimeExecutable` and related js-debug options. |
 | `pwa-extensionHost` | Recognized, but not currently supported end to end because Logos does not implement js-debug's `launchVSCode` reverse request. |
 
 Logos sends `node` and `electron` to the adapter as `pwa-node`, and `chrome` as
@@ -90,6 +90,11 @@ configuration, including common fields such as `program`, `runtimeExecutable`,
 for its field reference, while observing Logos' compatibility limits below.
 Use `internalConsole` or `integratedTerminal` when setting `console`;
 `externalTerminal` is not supported by Logos.
+
+When Logos is started from a desktop launcher, it augments the debug adapter's
+`PATH` with `NVM_BIN` and Node versions installed under `$NVM_DIR` or `~/.nvm`.
+This allows values such as `"runtimeExecutable": "npm"` to work even though the
+desktop process did not load the user's shell startup files.
 
 For example, launch Chrome against a local development server:
 
@@ -110,6 +115,46 @@ For example, launch Chrome against a local development server:
 
 The development server must already be running because Logos does not execute
 `preLaunchTask`.
+
+To debug an Electron main process and renderer together, expose a Chromium
+remote-debugging port from Electron and add a Logos-specific `renderer` object:
+
+```jsonc
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Electron: Development",
+      "type": "electron",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "electron:dev",
+        "--",
+        "--remote-debugging-port=9222"
+      ],
+      "cwd": "${workspaceFolder}",
+      "outputCapture": "std",
+      "renderer": {
+        "port": 9222,
+        "webRoot": "${workspaceFolder}",
+        "urlFilter": "*"
+      }
+    }
+  ]
+}
+```
+
+The `renderer.port` must match Electron's `--remote-debugging-port`. The `--`
+in the example makes npm forward the switch to the script; the script must in
+turn pass it to the Electron executable. Replace `electron:dev` with the
+workspace's Electron launch script. For a direct Electron executable, put the
+switch directly in `runtimeArgs`. Logos starts the renderer as a
+`pwa-chrome` attach child of the main-process session, inherits the initial
+breakpoints, and stops both sessions together. Other Chrome attach fields such
+as `address`, `url`, `urlFilter`, `sourceMaps`, and `timeout` may be placed in
+`renderer`; `port` is required.
 
 ## Custom DAP adapters
 

@@ -60,6 +60,8 @@ describe("debug service", () => {
     const parser = new DapMessageParser();
     let adapterSequence = 1;
     const receivedCommands: string[] = [];
+    let launchArguments: Record<string, unknown> | undefined;
+    let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
 
     const send = (message: DapMessage) => fake.stdout.write(encodeDapMessage(message));
     const respond = (request: DapRequest, body?: unknown) =>
@@ -90,6 +92,7 @@ describe("debug service", () => {
             supportsTerminateRequest: true,
           });
         } else if (message.command === "launch") {
+          launchArguments = message.arguments;
           send({ seq: adapterSequence++, type: "event", event: "initialized" });
           respond(message);
         } else if (message.command === "setBreakpoints") {
@@ -106,7 +109,12 @@ describe("debug service", () => {
       }
     });
 
-    const spawnProcess = (() => {
+    const spawnProcess = ((
+      _command: string,
+      _args: string[],
+      options: { env?: NodeJS.ProcessEnv },
+    ) => {
+      spawnedEnvironment = options.env;
       queueMicrotask(() => fake.proc.emit("spawn"));
       return fake.proc;
     }) as unknown as typeof spawn;
@@ -127,7 +135,13 @@ describe("debug service", () => {
         type: "custom",
         request: "launch",
         program: "/workspace/app.js",
-        adapter: { type: "executable", command: "mock-adapter" },
+        runtimeExecutable: "npm",
+        env: { PATH: "${env:PATH}" },
+        adapter: {
+          type: "executable",
+          command: "mock-adapter",
+          env: { PATH: "/adapter/bin", REMOVED: null },
+        },
       },
       initialBreakpoints: { "/workspace/app.js": [{ line: 7 }] },
     });
@@ -146,6 +160,19 @@ describe("debug service", () => {
       "setBreakpoints",
       "configurationDone",
     ]);
+    expect(launchArguments).toMatchObject({
+      runtimeExecutable: "npm",
+      env: { PATH: expect.any(String) },
+    });
+    expect((launchArguments?.env as NodeJS.ProcessEnv).PATH).not.toBe("");
+    const pathKey = Object.keys(spawnedEnvironment ?? {}).find(
+      (key) => key.toLowerCase() === "path",
+    );
+    expect(spawnedEnvironment?.[pathKey!]).toBe("/adapter/bin");
+    if (process.platform !== "win32") {
+      expect((launchArguments?.env as NodeJS.ProcessEnv).PATH).toContain("/usr/bin");
+    }
+    expect(spawnedEnvironment?.REMOVED).toBeUndefined();
 
     const threads = await ipc.invoke(CH.debugRequest, "debug-1", "threads");
     expect(threads).toMatchObject({ body: { threads: [{ id: 1, name: "main" }] } });
@@ -804,6 +831,210 @@ describe("debug service", () => {
     expect(rootCommands).toContain("disconnect");
     expect(childCommands).toContain("disconnect");
     expect(childDisconnectArguments).toMatchObject({ terminateDebuggee: false });
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+    cleanup();
+  });
+
+  it("attaches an Electron renderer through the parent adapter endpoint", async () => {
+    const ipc = createIpcHarness();
+    const fake = fakeAdapterProcess();
+    let sequence = 1;
+    let rootLaunchArguments: Record<string, unknown> | undefined;
+    let rendererAttachArguments: Record<string, unknown> | undefined;
+    const rootBreakpointLines: number[] = [];
+    const rendererBreakpointLines: number[] = [];
+
+    const createSocket = (renderer: boolean) => {
+      let current: ReturnType<typeof fakeDapSocket>;
+      current = fakeDapSocket((message) => {
+        if (message.type !== "request") return;
+        if (!renderer && message.command === "launch") {
+          rootLaunchArguments = message.arguments;
+        }
+        if (renderer && message.command === "attach") {
+          rendererAttachArguments = message.arguments;
+        }
+        if (message.command === "setBreakpoints") {
+          const lines = (message.arguments?.breakpoints as Array<{ line: number }>)
+            .map((breakpoint) => breakpoint.line);
+          (renderer ? rendererBreakpointLines : rootBreakpointLines).push(...lines);
+        }
+        current.send({
+          seq: sequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+          ...(message.command === "initialize"
+            ? { body: { supportsConfigurationDoneRequest: true } }
+            : {}),
+        });
+        if (message.command === "launch" || message.command === "attach") {
+          current.send({ seq: sequence++, type: "event", event: "initialized" });
+        }
+      });
+      return current;
+    };
+    const rootSocket = createSocket(false);
+    const rendererSocket = createSocket(true);
+    const sockets = [rootSocket.socket, rendererSocket.socket];
+    const spawnProcess = (() => {
+      queueMicrotask(() => fake.proc.emit("spawn"));
+      return fake.proc;
+    }) as unknown as typeof spawn;
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      {
+        spawnProcess,
+        connectSocket: async () => {
+          const socket = sockets.shift();
+          if (!socket) throw new Error("Unexpected adapter connection");
+          return socket;
+        },
+      },
+    );
+
+    const root = await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+      sessionId: "electron-root",
+      configuration: {
+        name: "Electron: Development",
+        type: "electron",
+        request: "launch",
+        runtimeExecutable: "npm",
+        runtimeArgs: [
+          "run",
+          "electron",
+          "--",
+          "--remote-debugging-port=9333",
+        ],
+        adapter: {
+          type: "executable-server",
+          command: "mock-adapter",
+          args: ["${port}"],
+          port: 47128,
+        },
+        renderer: {
+          port: 9333,
+          webRoot: "/workspace",
+          urlFilter: "file://*",
+        },
+      },
+      initialBreakpoints: { "/workspace/renderer.ts": [{ line: 12 }] },
+    });
+
+    expect(root).toMatchObject({ id: "electron-root", status: "running" });
+    expect(rootLaunchArguments).toMatchObject({
+      type: "electron",
+      runtimeExecutable: "npm",
+    });
+    expect(rootLaunchArguments).not.toHaveProperty("renderer");
+    expect(rendererAttachArguments).toMatchObject({
+      type: "pwa-chrome",
+      port: 9333,
+      address: "127.0.0.1",
+      webRoot: "/workspace",
+      urlFilter: "file://*",
+      timeout: 30_000,
+    });
+    const sessions = await ipc.invoke<DebugSessionInfo[]>(CH.debugList);
+    expect(sessions).toHaveLength(2);
+    expect(
+      sessions.find((session) => session.name.endsWith(": Renderer")),
+    ).toMatchObject({
+      parentSessionId: "electron-root",
+      debugType: "pwa-chrome",
+      request: "attach",
+      status: "running",
+    });
+    await ipc.invoke(
+      CH.debugSetBreakpoints,
+      "electron-root",
+      "/workspace/renderer.ts",
+      [{ line: 24 }],
+    );
+    expect(rootBreakpointLines).toContain(24);
+    expect(rendererBreakpointLines).toContain(24);
+
+    await ipc.invoke(CH.debugStop, "electron-root", true);
+    expect(await ipc.invoke(CH.debugList)).toEqual([]);
+    cleanup();
+  });
+
+  it("does not restart a renderer after its parent adapter fails", async () => {
+    const ipc = createIpcHarness();
+    let sequence = 1;
+    let childDisconnectSeen!: () => void;
+    const sawChildDisconnect = new Promise<void>((resolve) => {
+      childDisconnectSeen = resolve;
+    });
+    const createSocket = (renderer: boolean) => {
+      let current: ReturnType<typeof fakeDapSocket>;
+      current = fakeDapSocket((message) => {
+        if (message.type !== "request") return;
+        if (renderer && message.command === "disconnect") {
+          childDisconnectSeen();
+          return;
+        }
+        current.send({
+          seq: sequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+        });
+        if (message.command === "launch" || message.command === "attach") {
+          current.send({ seq: sequence++, type: "event", event: "initialized" });
+        }
+      });
+      return current;
+    };
+    const rootSocket = createSocket(false);
+    const rendererSocket = createSocket(true);
+    const sockets = [rootSocket.socket, rendererSocket.socket];
+    let connections = 0;
+    const cleanup = registerDebugService(
+      {
+        ipcMain: ipc.ipcMain,
+        userDataDir: "/tmp/logos-test",
+        getWindow: () => null,
+        send: () => undefined,
+      } satisfies ServiceContext,
+      {
+        connectSocket: async () => {
+          connections++;
+          const socket = sockets.shift();
+          if (!socket) throw new Error("Unexpected adapter connection");
+          return socket;
+        },
+      },
+    );
+
+    await ipc.invoke(CH.debugStart, {
+      sessionId: "electron-parent-failure",
+      configuration: {
+        name: "Electron failure",
+        type: "electron",
+        request: "launch",
+        adapter: { type: "server", host: "127.0.0.1", port: 47129 },
+        renderer: { port: 9334 },
+      },
+    });
+    rendererSocket.send({
+      seq: sequence++,
+      type: "event",
+      event: "terminated",
+      body: { restart: true },
+    });
+    await sawChildDisconnect;
+    rootSocket.socket.destroy(new Error("adapter failed"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(connections).toBe(2);
     expect(await ipc.invoke(CH.debugList)).toEqual([]);
     cleanup();
   });

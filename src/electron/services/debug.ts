@@ -28,6 +28,7 @@ import type {
 } from "../../shared/dap";
 import type { ServiceContext } from "./context";
 import { DapConnection } from "./dap-transport";
+import { augmentPath } from "./path-env";
 
 type SpawnProcess = typeof spawn;
 
@@ -104,10 +105,27 @@ function configurationArguments(
   dapType: string,
 ): DapArguments {
   const { adapter: _adapter, ...dapConfiguration } = configuration;
+  if (configuration.type === "electron") delete dapConfiguration.renderer;
   return { ...dapConfiguration, type: dapType };
 }
 
-function resolveConfigurationEnvironment(value: unknown): unknown {
+function environmentValue(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+): string | undefined {
+  if (environment[name] != null || process.platform !== "win32") {
+    return environment[name];
+  }
+  const key = Object.keys(environment).find(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  );
+  return key ? environment[key] : undefined;
+}
+
+function resolveConfigurationEnvironment(
+  value: unknown,
+  environment: NodeJS.ProcessEnv,
+): unknown {
   if (typeof value === "string") {
     const unsupported = value.match(/\$\{(command|input):[^}]+\}/);
     if (unsupported) {
@@ -116,17 +134,17 @@ function resolveConfigurationEnvironment(value: unknown): unknown {
       );
     }
     return value.replace(/\$\{env:([^}]+)\}/g, (_match, name: string) =>
-      process.env[name] ?? "",
+      environmentValue(environment, name) ?? "",
     );
   }
   if (Array.isArray(value)) {
-    return value.map(resolveConfigurationEnvironment);
+    return value.map((item) => resolveConfigurationEnvironment(item, environment));
   }
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        resolveConfigurationEnvironment(item),
+        resolveConfigurationEnvironment(item, environment),
       ]),
     );
   }
@@ -137,11 +155,58 @@ function mergeEnvironment(
   overrides: Record<string, string | null> | undefined,
 ): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = { ...process.env };
+  augmentPath(result);
   for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (process.platform === "win32") {
+      for (const existingKey of Object.keys(result)) {
+        if (existingKey.toLowerCase() === key.toLowerCase()) delete result[existingKey];
+      }
+    }
     if (value == null) delete result[key];
     else result[key] = value;
   }
   return result;
+}
+
+function electronRendererConfiguration(
+  configuration: DebugLaunchConfiguration,
+): DebugLaunchConfiguration | undefined {
+  if (configuration.type !== "electron" || configuration.request !== "launch") {
+    return undefined;
+  }
+  const renderer = configuration.renderer;
+  if (renderer == null || renderer === false) return undefined;
+  if (!renderer || typeof renderer !== "object" || Array.isArray(renderer)) {
+    throw new Error("Electron renderer configuration must be an object");
+  }
+  const options = asArguments(renderer);
+  const port = options.port;
+  if (!Number.isInteger(port) || (port as number) <= 0 || (port as number) > 65_535) {
+    throw new Error("Electron renderer debug port must be an integer from 1 to 65535");
+  }
+  const {
+    name,
+    type: _type,
+    request: _request,
+    adapter: _adapter,
+    ...attachOptions
+  } = options;
+  return {
+    ...attachOptions,
+    name:
+      typeof name === "string" && name
+        ? name
+        : `${configuration.name}: Renderer`,
+    type: "pwa-chrome",
+    request: "attach",
+    address:
+      typeof attachOptions.address === "string"
+        ? attachOptions.address
+        : "127.0.0.1",
+    port,
+    timeout:
+      typeof attachOptions.timeout === "number" ? attachOptions.timeout : 30_000,
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -562,6 +627,50 @@ export function registerDebugService(
     return result;
   };
 
+  const rootSessionId = (session: DebugSession): string => {
+    let current = session;
+    const seen = new Set<string>();
+    while (current.info.parentSessionId && !seen.has(current.info.id)) {
+      seen.add(current.info.id);
+      const parent = sessions.get(current.info.parentSessionId);
+      if (!parent) break;
+      current = parent;
+    }
+    return current.info.id;
+  };
+
+  const sendBreakpointsToSessionTree = async (
+    session: DebugSession,
+    sourcePath: string,
+    breakpoints: DapSourceBreakpoint[],
+  ): Promise<DapBreakpoint[]> => {
+    const treeId = rootSessionId(session);
+    const related = Array.from(sessions.values()).filter(
+      (candidate) =>
+        candidate !== session &&
+        !candidate.disposed &&
+        rootSessionId(candidate) === treeId,
+    );
+    const [primary] = await Promise.all([
+      sendBreakpoints(session, sourcePath, breakpoints),
+      Promise.all(
+        related.map(async (candidate) => {
+          try {
+            await sendBreakpoints(candidate, sourcePath, breakpoints);
+          } catch (error) {
+            ctx.send(CH.debugEvent, {
+              kind: "adapter-output",
+              sessionId: candidate.info.id,
+              category: "stderr",
+              output: `Failed to update breakpoint in '${candidate.info.name}': ${errorMessage(error)}\n`,
+            });
+          }
+        }),
+      ),
+    ]);
+    return primary;
+  };
+
   const sessionIsStopping = (session: DebugSession): boolean =>
     session.startController.signal.aborted ||
     session.disposed ||
@@ -696,6 +805,12 @@ export function registerDebugService(
           shouldRestart,
         ).then(() => {
           if (!shouldRestart || session.userStopRequested) return;
+          if (
+            parent &&
+            (parent.disposed || sessions.get(parent.info.id) !== parent)
+          ) {
+            return;
+          }
           return startSession(restartRequest, adapterOverride, parent).then(
             () => undefined,
             () => undefined,
@@ -1072,12 +1187,17 @@ export function registerDebugService(
     adapterOverride?: DebugAdapterDescriptor,
     parentSession?: DebugSession,
   ) => {
+    const configurationEnvironment = mergeEnvironment(undefined);
     request = {
       ...request,
       configuration: resolveConfigurationEnvironment(
         request.configuration,
+        configurationEnvironment,
       ) as DebugLaunchConfiguration,
     };
+    const rendererConfiguration = parentSession
+      ? undefined
+      : electronRendererConfiguration(request.configuration);
     const id = request.sessionId ?? randomUUID();
     if (sessions.has(id) || pendingStarts.has(id)) {
       throw new Error(`Debug session '${id}' already exists`);
@@ -1250,6 +1370,23 @@ export function registerDebugService(
         activeSession.configurationStarted
       ) {
         setStatus(activeSession, "running");
+      }
+      if (rendererConfiguration) {
+        if (!activeSession.adapterEndpoint) {
+          throw new Error(
+            "Electron renderer debugging requires a reusable debug adapter endpoint",
+          );
+        }
+        await startSession(
+          {
+            configuration: rendererConfiguration,
+            initialBreakpoints: Object.fromEntries(activeSession.breakpoints),
+            exceptionBreakpoints: activeSession.exceptionBreakpoints,
+          },
+          { type: "server", ...activeSession.adapterEndpoint },
+          activeSession,
+        );
+        ensureSessionStarting(activeSession);
       }
       return cloneInfo(activeSession);
     } catch (error) {
@@ -1425,7 +1562,7 @@ export function registerDebugService(
     ) => {
       const session = sessions.get(sessionId);
       if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
-      return sendBreakpoints(session, sourcePath, breakpoints);
+      return sendBreakpointsToSessionTree(session, sourcePath, breakpoints);
     },
   );
   ipcMain.handle(
