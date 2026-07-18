@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
+import type { DapEvaluateResult, DapResponse, DebugSessionInfo } from "../../shared/dap";
 import type {
   AgentAuthMethod,
   AgentEffortLevel,
@@ -19,10 +22,75 @@ import {
   resolveLogosOpenAIModel,
 } from "../../shared/logos-agent";
 import type { OpenAIAuthStore } from "./openai-auth";
+import { WorkspaceMcpClient, type McpToolInput } from "./mcp-client";
 
 const MAX_STEPS = 20;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOOL_OUTPUT_BYTES = 1024 * 1024;
+const HIGH_RISK_PERMISSION_OPTIONS = [
+  { id: "allow-once", name: "Allow once", kind: "allow_once" as const },
+  { id: "reject-once", name: "Deny", kind: "reject_once" as const },
+];
+const LEGACY_TOOL_NAMES: Record<string, string> = {
+  read_file: "Read",
+  list_directory: "Glob",
+  search: "Grep",
+  write_file: "Write",
+  run_command: "Bash",
+};
+const GREP_WORKER_SOURCE = String.raw`
+const { parentPort, workerData } = require("node:worker_threads");
+const constants = require("node:fs").constants;
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const ignored = new Set([".git", "node_modules", "dist", "build", "coverage", "release"]);
+const matcher = new RegExp(workerData.pattern, workerData.caseSensitive ? "" : "i");
+const include = workerData.includeSource ? new RegExp(workerData.includeSource) : null;
+const matches = [];
+async function walk(current) {
+  if (matches.length >= 100) return;
+  const real = await fs.realpath(current);
+  const relativeToRoot = path.relative(workerData.workspaceRoot, real);
+  if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
+    throw new Error("Grep path resolves outside the workspace");
+  }
+  const stat = await fs.lstat(real);
+  if (stat.isSymbolicLink()) return;
+  if (stat.isFile()) {
+    if (stat.size > 1024 * 1024) return;
+    const relative = path.relative(workerData.workspaceRoot, real).split(path.sep).join("/");
+    if (include && !include.test(relative) && !include.test(path.basename(relative))) return;
+    const handle = await fs.open(real, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    let source;
+    try {
+      if ((await handle.stat()).size > 1024 * 1024) return;
+      source = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+    if (source.includes("\0")) return;
+    for (const [index, line] of source.split("\n").entries()) {
+      if (matches.length >= 100) break;
+      if (matcher.test(line)) matches.push({ path: relative, line: index + 1, text: line.slice(0, 4000) });
+    }
+    return;
+  }
+  if (!stat.isDirectory()) return;
+  const entries = await fs.readdir(real, { withFileTypes: true });
+  for (const entry of entries) {
+    if (matches.length >= 100) break;
+    if (entry.isSymbolicLink() || ignored.has(entry.name)) continue;
+    try {
+      await walk(path.join(real, entry.name));
+    } catch (error) {
+      if (!["ENOENT", "EACCES", "EPERM"].includes(error?.code)) throw error;
+    }
+  }
+}
+walk(workerData.root).then(() => parentPort.postMessage(matches), (error) => {
+  throw error;
+});
+`;
 
 type InputItem = Record<string, unknown>;
 
@@ -55,7 +123,17 @@ export interface LogosAgentHooks {
     sessionId: string,
     toolName: string,
     input: unknown,
+    options?: typeof HIGH_RISK_PERMISSION_OPTIONS,
   ): Promise<boolean>;
+  debug?: {
+    list(): DebugSessionInfo[];
+    generation(sessionId: string): string | undefined;
+    request<T = unknown>(
+      sessionId: string,
+      command: string,
+      args?: Record<string, unknown>,
+    ): Promise<DapResponse<T>>;
+  };
   closed(sessionId: string): void;
 }
 
@@ -82,11 +160,17 @@ const AUTH_METHODS: AgentAuthMethod[] = [
   },
 ];
 
+function toolDescription(name: string): string {
+  const tool = LOGOS_AGENT_TOOLS.find((candidate) => candidate.name === name);
+  if (!tool) throw new Error(`Missing Logos tool metadata: ${name}`);
+  return `${tool.description} ${tool.constraints}`;
+}
+
 const TOOLS = [
   {
     type: "function",
-    name: "read_file",
-    description: LOGOS_AGENT_TOOLS[0].description,
+    name: "Read",
+    description: toolDescription("Read"),
     parameters: {
       type: "object",
       properties: {
@@ -100,8 +184,8 @@ const TOOLS = [
   },
   {
     type: "function",
-    name: "list_directory",
-    description: LOGOS_AGENT_TOOLS[1].description,
+    name: "Glob",
+    description: toolDescription("Glob"),
     parameters: {
       type: "object",
       properties: {
@@ -113,23 +197,24 @@ const TOOLS = [
   },
   {
     type: "function",
-    name: "search",
-    description: LOGOS_AGENT_TOOLS[2].description,
+    name: "Grep",
+    description: toolDescription("Grep"),
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string" },
+        pattern: { type: "string", description: "JavaScript regular expression" },
         path: { type: "string" },
+        include: { type: "string", description: "Optional file glob such as **/*.ts" },
         case_sensitive: { type: "boolean" },
       },
-      required: ["query"],
+      required: ["pattern"],
       additionalProperties: false,
     },
   },
   {
     type: "function",
-    name: "write_file",
-    description: LOGOS_AGENT_TOOLS[3].description,
+    name: "Write",
+    description: toolDescription("Write"),
     parameters: {
       type: "object",
       properties: {
@@ -142,17 +227,76 @@ const TOOLS = [
   },
   {
     type: "function",
-    name: "run_command",
-    description: LOGOS_AGENT_TOOLS[4].description,
+    name: "Bash",
+    description: toolDescription("Bash"),
     parameters: {
       type: "object",
       properties: {
-        command: { type: "string" },
-        args: { type: "array", items: { type: "string" } },
+        command: { type: "string", description: "Shell command to run" },
         cwd: { type: "string" },
         timeout_ms: { type: "integer", minimum: 1000, maximum: 120000 },
       },
       required: ["command"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "Skill",
+    description: toolDescription("Skill"),
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Skill directory name; omit to list skills" },
+        path: { type: "string", description: "File relative to the skill; defaults to SKILL.md" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "MCP",
+    description: toolDescription("MCP"),
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list_servers", "list_tools", "call_tool"],
+        },
+        server: { type: "string" },
+        tool: { type: "string" },
+        arguments: { type: "object", additionalProperties: true },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "DAP_REPL",
+    description: toolDescription("DAP_REPL"),
+    parameters: {
+      type: "object",
+      properties: {
+        expression: { type: "string" },
+        session_id: { type: "string", description: "Optional when exactly one debug session is active" },
+        frame_id: { type: "integer" },
+      },
+      required: ["expression"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "Finish",
+    description: toolDescription("Finish"),
+    parameters: {
+      type: "object",
+      properties: {
+        summary: { type: "string", description: "Concise completion summary" },
+      },
+      required: ["summary"],
       additionalProperties: false,
     },
   },
@@ -187,13 +331,40 @@ function commandOutput(output: string, status: string): string {
   )}${suffix}`.trim();
 }
 
-function isFunctionCall(item: InputItem): item is FunctionCall {
-  return (
-    item.type === "function_call" &&
-    typeof item.name === "string" &&
-    typeof item.arguments === "string" &&
+function normalizeFunctionCall(item: InputItem): FunctionCall | null {
+  if (item.type !== "function_call" || typeof item.name !== "string") return null;
+  const callId =
     typeof item.call_id === "string"
-  );
+      ? item.call_id
+      : typeof item.id === "string"
+        ? item.id
+        : null;
+  if (!callId) return null;
+  let args: string;
+  if (typeof item.arguments === "string") args = item.arguments;
+  else if (item.arguments && typeof item.arguments === "object") {
+    args = JSON.stringify(item.arguments);
+  } else return null;
+  return { ...item, type: "function_call", name: item.name, arguments: args, call_id: callId };
+}
+
+function responseItemKey(item: InputItem, fallback: number | string): string {
+  return String(item.call_id ?? item.id ?? fallback);
+}
+
+function normalizeToolPolicy(tools: string[] | undefined): string[] {
+  return (tools ?? []).map((name) => LEGACY_TOOL_NAMES[name] ?? name);
+}
+
+function mergeResponseOutput(
+  streamed: InputItem[],
+  completed: InputItem[] | undefined,
+): InputItem[] {
+  if (!completed?.length) return streamed;
+  const merged = new Map<string, InputItem>();
+  streamed.forEach((item, index) => merged.set(responseItemKey(item, `s:${index}`), item));
+  completed.forEach((item, index) => merged.set(responseItemKey(item, `c:${index}`), item));
+  return [...merged.values()];
 }
 
 function replayableOutput(item: InputItem): boolean {
@@ -243,11 +414,17 @@ export class LogosAgentRuntime {
   private model: string;
   private effort?: AgentEffortLevel;
   private mode: AgentPermissionMode;
+  private allowedTools: string[];
+  private disallowedTools: string[];
   private abortController: AbortController | null = null;
   private activeToolProcess: ChildProcess | null = null;
+  private activeSearchWorker: Worker | null = null;
   private pendingPrompts: string[] = [];
   private running = false;
   private disposed = false;
+  private readonly mcp: WorkspaceMcpClient;
+  private readonly approvedMcpConfigs = new WeakMap<object, string>();
+  private readonly approvedDapGenerations = new WeakMap<object, string>();
 
   private constructor(
     private readonly request: AgentStartRequest,
@@ -263,6 +440,9 @@ export class LogosAgentRuntime {
     this.model = request.model || DEFAULT_LOGOS_MODEL;
     this.effort = request.effort;
     this.mode = request.permissionMode ?? "default";
+    this.allowedTools = normalizeToolPolicy(request.allowedTools);
+    this.disallowedTools = normalizeToolPolicy(request.disallowedTools);
+    this.mcp = new WorkspaceMcpClient(workspaceRoot);
   }
 
   static async create(
@@ -313,7 +493,68 @@ export class LogosAgentRuntime {
         usage = result.usage ?? usage;
         this.history.push(...result.output);
         if (result.calls.length === 0) {
+          this.trace("continue", {
+            step,
+            reason: "The model returned without calling Finish or another tool",
+          });
+          this.history.push({
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: "Continue the current task now. Use the available tools for remaining work, or call Finish with the final summary if and only if everything is complete.",
+              },
+            ],
+          });
           await this.persist();
+          continue;
+        }
+        let finished = false;
+        for (const call of result.calls) {
+          if (call.name === "Finish") {
+            let summary = "";
+            try {
+              const input = JSON.parse(call.arguments || "{}") as Record<string, unknown>;
+              summary = typeof input.summary === "string" ? input.summary.trim() : "";
+            } catch {
+              // The invalid call is returned to the model below so it can retry.
+            }
+            const finishError =
+              result.calls.length !== 1
+                ? "Finish must be the only function call in its response"
+                : !summary
+                  ? "Finish requires a non-empty summary"
+                  : null;
+            finished = !finishError;
+            this.trace("finish", {
+              callId: call.call_id,
+              arguments: call.arguments,
+              accepted: finished,
+            });
+            this.history.push({
+              type: "function_call_output",
+              call_id: call.call_id,
+              output: finishError ?? "Task marked complete",
+            });
+            if (finished && !result.text.trim()) {
+              this.hooks.emit({
+                kind: "text",
+                sessionId: this.request.sessionId,
+                messageId: crypto.randomUUID(),
+                text: summary,
+              });
+            }
+            continue;
+          }
+          const toolResult = await this.executeCall(call);
+          this.history.push({
+            type: "function_call_output",
+            call_id: call.call_id,
+            output: toolResult.output,
+          });
+        }
+        await this.persist();
+        if (finished) {
           this.hooks.emit({
             kind: "result",
             sessionId: this.request.sessionId,
@@ -325,17 +566,8 @@ export class LogosAgentRuntime {
           });
           return;
         }
-        for (const call of result.calls) {
-          const toolResult = await this.executeCall(call);
-          this.history.push({
-            type: "function_call_output",
-            call_id: call.call_id,
-            output: toolResult.output,
-          });
-        }
-        await this.persist();
       }
-      throw new Error(`Agent stopped after ${MAX_STEPS} tool steps`);
+      throw new Error(`Agent stopped after ${MAX_STEPS} steps without calling Finish`);
     } catch (error) {
       if (this.abortController?.signal.aborted) {
         this.hooks.emit({
@@ -392,6 +624,7 @@ export class LogosAgentRuntime {
   async interrupt(): Promise<void> {
     this.abortController?.abort();
     if (this.activeToolProcess) stopProcessTree(this.activeToolProcess);
+    if (this.activeSearchWorker) await this.activeSearchWorker.terminate();
     if (this.pendingPrompts.length > 0) {
       this.pendingPrompts = [];
       this.hooks.emit({
@@ -435,10 +668,17 @@ export class LogosAgentRuntime {
     this.effort = effort;
   }
 
+  setToolPolicy(allowed?: string[], disallowed?: string[]): void {
+    this.allowedTools = normalizeToolPolicy(allowed);
+    this.disallowedTools = normalizeToolPolicy(disallowed);
+  }
+
   async dispose(removeHistory = false): Promise<void> {
     this.disposed = true;
     this.abortController?.abort();
     if (this.activeToolProcess) stopProcessTree(this.activeToolProcess);
+    if (this.activeSearchWorker) await this.activeSearchWorker.terminate();
+    await this.mcp.close();
     if (removeHistory) await fs.rm(this.sessionFile(), { force: true });
     else await this.persist().catch(() => undefined);
   }
@@ -448,9 +688,12 @@ export class LogosAgentRuntime {
     const messageId = crypto.randomUUID();
     const tools = TOOLS.filter(
       (tool) =>
-        !this.request.disallowedTools?.includes(tool.name) &&
+        (tool.name === "Finish" || !this.disallowedTools.includes(tool.name)) &&
         (this.mode !== "plan" ||
-          (tool.name !== "write_file" && tool.name !== "run_command")),
+          (tool.name !== "Write" &&
+            tool.name !== "Bash" &&
+            tool.name !== "MCP" &&
+            tool.name !== "DAP_REPL")),
     );
     const target = resolveLogosOpenAIModel(this.model, auth.type);
     const gpt56 = isGpt56Model(target.apiModel);
@@ -471,7 +714,7 @@ export class LogosAgentRuntime {
       instructions: this.instructions(),
       input: this.history,
       tools,
-      tool_choice: "auto",
+      tool_choice: "required",
       parallel_tool_calls: false,
       stream: true,
       store: false,
@@ -570,6 +813,20 @@ export class LogosAgentRuntime {
         const key = String(item.id ?? event.output_index ?? output.size);
         output.set(key, item);
         if (type.endsWith(".done")) this.trace("output-item", item);
+      } else if (
+        (type === "response.function_call_arguments.delta" ||
+          type === "response.function_call_arguments.done") &&
+        (typeof event.item_id === "string" || typeof event.output_index === "number")
+      ) {
+        const key = String(event.item_id ?? event.output_index);
+        const item = output.get(key);
+        if (item?.type === "function_call") {
+          const value =
+            type.endsWith(".done") && typeof event.arguments === "string"
+              ? event.arguments
+              : `${typeof item.arguments === "string" ? item.arguments : ""}${typeof event.delta === "string" ? event.delta : ""}`;
+          output.set(key, { ...item, arguments: value });
+        }
       } else if (type === "response.completed") {
         const completed = event.response as
           | { id?: string; output?: InputItem[]; usage?: unknown }
@@ -611,7 +868,7 @@ export class LogosAgentRuntime {
     if (!completedStream) {
       throw new Error("OpenAI response stream ended before response.completed");
     }
-    const items = completedOutput ?? [...output.values()];
+    const items = mergeResponseOutput([...output.values()], completedOutput);
     if (!sawTextDelta) {
       text = items
         .flatMap((item) =>
@@ -631,9 +888,24 @@ export class LogosAgentRuntime {
         });
       }
     }
+    const callsById = new Map<string, FunctionCall>();
+    items.forEach((item) => {
+      const call = normalizeFunctionCall(item);
+      if (!call && item.type === "function_call") {
+        this.trace("rejected-tool-call", item);
+      }
+      if (call) callsById.set(call.call_id, call);
+    });
+    const calls = [...callsById.values()];
+    const normalizedItems = items.flatMap((item) => {
+      if (item.type !== "function_call") return replayableOutput(item) ? [item] : [];
+      const call = normalizeFunctionCall(item);
+      return call ? [call] : [];
+    });
+    this.trace("recognized-tools", { count: calls.length, names: calls.map((call) => call.name) });
     return {
-      output: items.filter(replayableOutput),
-      calls: items.filter(isFunctionCall),
+      output: normalizedItems,
+      calls,
       text,
       usage,
       responseId,
@@ -660,7 +932,7 @@ export class LogosAgentRuntime {
     this.trace("tool-call", { callId: call.call_id, name: call.name, input });
     let result: ToolResult;
     try {
-      if (this.isMutating(call.name) && !(await this.mayRun(call.name, input))) {
+      if (!(await this.mayRun(call.name, input))) {
         result = { output: "Denied by user", isError: true };
       } else {
         result = await this.runTool(call.name, input);
@@ -699,11 +971,10 @@ export class LogosAgentRuntime {
 
   private async runTool(name: string, input: Record<string, unknown>): Promise<ToolResult> {
     switch (name) {
-      case "read_file": {
+      case "Read": {
         const target = await this.workspacePath(String(input.path ?? ""), true);
-        const stat = await fs.stat(target);
-        if (stat.size > MAX_FILE_BYTES) throw new Error("File exceeds the 1 MiB read limit");
-        const lines = (await fs.readFile(target, "utf8")).split("\n");
+        const source = await this.readVerifiedFile(target, MAX_FILE_BYTES);
+        const lines = source.content.split("\n");
         const start = Math.max(Number(input.start_line ?? 1) - 1, 0);
         const limit = Math.min(Math.max(Number(input.limit ?? 400), 1), 4000);
         return {
@@ -714,7 +985,7 @@ export class LogosAgentRuntime {
           locations: [{ path: target, line: start + 1 }],
         };
       }
-      case "list_directory": {
+      case "Glob": {
         const target = await this.workspacePath(String(input.path ?? "."), true);
         const entries = await fs.readdir(target, { withFileTypes: true });
         return {
@@ -726,30 +997,63 @@ export class LogosAgentRuntime {
           locations: [{ path: target }],
         };
       }
-      case "search":
+      case "Grep":
         return this.searchFiles(
-          String(input.query ?? ""),
+          String(input.pattern ?? ""),
           String(input.path ?? "."),
           Boolean(input.case_sensitive),
+          typeof input.include === "string" ? input.include : undefined,
         );
-      case "write_file": {
-        const target = await this.workspacePath(String(input.path ?? ""), false);
+      case "Write": {
+        let target = await this.workspacePath(String(input.path ?? ""), false);
         const content = String(input.content ?? "");
         if (Buffer.byteLength(content) > 5 * MAX_FILE_BYTES) {
           throw new Error("File exceeds the 5 MiB write limit");
         }
-        const oldText = await fs.readFile(target, "utf8").catch(() => "");
-        await fs.mkdir(path.dirname(target), { recursive: true });
+        let oldText = "";
         let existingMode: number | undefined;
         try {
-          existingMode = (await fs.stat(target)).mode & 0o7777;
+          const existing = await this.readVerifiedFile(target, 5 * MAX_FILE_BYTES);
+          oldText = existing.content;
+          existingMode = existing.mode;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
+        const realParent = await fs.realpath(path.dirname(target)).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            throw new Error("Write requires the parent directory to exist");
+          }
+          throw error;
+        });
+        const parentRelative = path.relative(this.workspaceRoot, realParent);
+        if (parentRelative.startsWith("..") || path.isAbsolute(parentRelative)) {
+          throw new Error(`Path resolves outside the workspace: ${String(input.path ?? "")}`);
+        }
+        target = path.join(realParent, path.basename(target));
         const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
         try {
-          await fs.writeFile(temp, content, { encoding: "utf8", mode: 0o666 });
+          const handle = await fs.open(
+            temp,
+            fsConstants.O_WRONLY |
+              fsConstants.O_CREAT |
+              fsConstants.O_EXCL |
+              (fsConstants.O_NOFOLLOW ?? 0),
+            0o666,
+          );
+          try {
+            await handle.writeFile(content, "utf8");
+          } finally {
+            await handle.close();
+          }
+          const realTemp = await fs.realpath(temp);
+          const tempRelative = path.relative(this.workspaceRoot, realTemp);
+          if (tempRelative.startsWith("..") || path.isAbsolute(tempRelative)) {
+            throw new Error(`Path resolves outside the workspace: ${String(input.path ?? "")}`);
+          }
           if (existingMode !== undefined) await fs.chmod(temp, existingMode);
+          if ((await fs.realpath(realParent)) !== realParent) {
+            throw new Error("Write parent changed while the agent was running");
+          }
           await fs.rename(temp, target);
         } catch (error) {
           await fs.rm(temp, { force: true }).catch(() => undefined);
@@ -758,61 +1062,123 @@ export class LogosAgentRuntime {
         return {
           output: `Wrote ${Buffer.byteLength(content)} bytes to ${target}`,
           locations: [{ path: target, line: 1 }],
-          diffs: [{ path: target, oldText, newText: content }],
+          diffs:
+            Buffer.byteLength(oldText) + Buffer.byteLength(content) <= MAX_FILE_BYTES
+              ? [{ path: target, oldText, newText: content }]
+              : undefined,
         };
       }
-      case "run_command":
-        return this.runCommand(input);
+      case "Bash":
+        return this.runBash(input);
+      case "Skill":
+        return this.runSkill(input);
+      case "MCP":
+        return this.mcp.run(
+          input as McpToolInput,
+          this.abortController?.signal,
+          this.approvedMcpConfigs.get(input),
+        );
+      case "DAP_REPL":
+        return this.runDapRepl(input);
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
   }
 
   private async searchFiles(
-    query: string,
+    pattern: string,
     inputPath: string,
     caseSensitive: boolean,
+    include?: string,
   ): Promise<ToolResult> {
-    if (!query) throw new Error("Search query is required");
+    if (!pattern) throw new Error("Grep pattern is required");
+    if (pattern.length > 2_000) throw new Error("Grep pattern exceeds 2,000 characters");
     const root = await this.workspacePath(inputPath, true);
-    const needle = caseSensitive ? query : query.toLowerCase();
-    const matches: string[] = [];
-    const ignored = new Set([".git", "node_modules", "dist", "build", "coverage", "release"]);
-    const walk = async (current: string): Promise<void> => {
-      if (matches.length >= 100) return;
-      const stat = await fs.stat(current);
-      if (stat.isFile()) {
-        if (stat.size > MAX_FILE_BYTES) return;
-        const source = await fs.readFile(current, "utf8").catch(() => "");
-        if (source.includes("\0")) return;
-        source.split("\n").forEach((line, index) => {
-          if (matches.length >= 100) return;
-          const value = caseSensitive ? line : line.toLowerCase();
-          if (value.includes(needle)) {
-            matches.push(`${path.relative(this.workspaceRoot, current)}:${index + 1}:${line}`);
-          }
+    new RegExp(pattern, caseSensitive ? "" : "i");
+    const includeMatcher = include ? this.globMatcher(include) : null;
+    const matches = await new Promise<Array<{ path: string; line: number; text: string }>>(
+      (resolve, reject) => {
+        const worker = new Worker(GREP_WORKER_SOURCE, {
+          eval: true,
+          workerData: {
+            root,
+            workspaceRoot: this.workspaceRoot,
+            pattern,
+            caseSensitive,
+            includeSource: includeMatcher?.source,
+          },
         });
-        return;
-      }
-      const entries = await fs.readdir(current, { withFileTypes: true });
-      for (const entry of entries) {
-        if (matches.length >= 100) break;
-        if (entry.isSymbolicLink() || ignored.has(entry.name)) continue;
-        await walk(path.join(current, entry.name));
-      }
+        this.activeSearchWorker = worker;
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          if (this.activeSearchWorker === worker) this.activeSearchWorker = null;
+          void worker.terminate();
+          reject(new Error("Grep timed out after 5 seconds"));
+        }, 5_000);
+        const finish = () => {
+          clearTimeout(timer);
+          if (this.activeSearchWorker === worker) this.activeSearchWorker = null;
+        };
+        worker.once("message", (value: unknown) => {
+          if (settled) return;
+          settled = true;
+          finish();
+          resolve(
+            Array.isArray(value)
+              ? value.filter(
+                  (item): item is { path: string; line: number; text: string } =>
+                    Boolean(item) &&
+                    typeof item === "object" &&
+                    typeof item.path === "string" &&
+                    Number.isInteger(item.line) &&
+                    typeof item.text === "string",
+                )
+              : [],
+          );
+        });
+        worker.once("error", (error) => {
+          if (settled) return;
+          settled = true;
+          finish();
+          reject(error);
+        });
+        worker.once("exit", (code) => {
+          if (settled) return;
+          settled = true;
+          finish();
+          reject(new Error(`Grep worker exited with code ${code}`));
+        });
+      },
+    );
+    const first = matches[0];
+    return {
+      output: matches.length
+        ? matches.map((match) => `${match.path}:${match.line}:${match.text}`).join("\n")
+        : "No matches",
+      ...(first
+        ? {
+            locations: [
+              {
+                path: await this.workspacePath(first.path, true),
+                line: first.line,
+              },
+            ],
+          }
+        : {}),
     };
-    await walk(root);
-    return { output: matches.length ? matches.join("\n") : "No matches" };
   }
 
-  private async runCommand(input: Record<string, unknown>): Promise<ToolResult> {
+  private async runBash(input: Record<string, unknown>): Promise<ToolResult> {
     const command = String(input.command ?? "").trim();
     if (!command) throw new Error("Command is required");
-    const args = Array.isArray(input.args) ? input.args.map(String) : [];
     const cwd = await this.workspacePath(String(input.cwd ?? "."), true);
     const timeoutMs = Math.min(Math.max(Number(input.timeout_ms ?? 30_000), 1000), 120_000);
+    const executable = process.platform === "win32" ? "bash.exe" : "/bin/bash";
+    const args = ["--noprofile", "--norc", "-c", command];
     return new Promise<ToolResult>((resolve) => {
-      const child = spawn(command, args, {
+      const child = spawn(executable, args, {
         cwd,
         env: process.env,
         detached: process.platform !== "win32",
@@ -851,8 +1217,163 @@ export class LogosAgentRuntime {
     });
   }
 
+  private globMatcher(pattern: string): RegExp {
+    let source = "";
+    for (let index = 0; index < pattern.length; index++) {
+      const character = pattern[index];
+      if (character === "*") {
+        if (pattern[index + 1] === "*") {
+          if (pattern[index + 2] === "/") {
+            source += "(?:.*/)?";
+            index += 2;
+          } else {
+            source += ".*";
+            index++;
+          }
+        } else source += "[^/]*";
+      } else if (character === "?") source += "[^/]";
+      else source += "\\^$+.|()[]{}".includes(character) ? `\\${character}` : character;
+    }
+    return new RegExp(`^${source}$`);
+  }
+
+  private async runSkill(input: Record<string, unknown>): Promise<ToolResult> {
+    const skills = await this.discoverSkills();
+    const name = String(input.name ?? "").trim();
+    if (!name) {
+      return {
+        output: skills.length
+          ? skills.map((skill) => `${skill.name}\t${skill.source}`).join("\n")
+          : "No skills found",
+      };
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) {
+      throw new Error("Skill name is invalid");
+    }
+    const skill = skills.find((candidate) => candidate.name === name);
+    if (!skill) throw new Error(`Skill '${name}' was not found`);
+    const requested = String(input.path ?? "SKILL.md");
+    const target = await fs.realpath(path.resolve(skill.directory, requested));
+    const relative = path.relative(skill.directory, target);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error(`Skill path is outside '${name}': ${requested}`);
+    }
+    const stat = await fs.stat(target);
+    if (!stat.isFile()) throw new Error(`Skill path is not a file: ${requested}`);
+    if (stat.size > MAX_FILE_BYTES) throw new Error("Skill file exceeds the 1 MiB limit");
+    return { output: await fs.readFile(target, "utf8") };
+  }
+
+  private async discoverSkills(): Promise<
+    Array<{ name: string; source: "project" | "user"; directory: string }>
+  > {
+    const roots: Array<{ source: "project" | "user"; directory: string }> = [];
+    if (this.request.settingSources?.includes("project")) {
+      roots.push(
+        { source: "project", directory: path.join(this.workspaceRoot, ".agents", "skills") },
+        { source: "project", directory: path.join(this.workspaceRoot, ".claude", "skills") },
+        { source: "project", directory: path.join(this.workspaceRoot, ".logos", "skills") },
+      );
+    }
+    if (this.request.settingSources?.includes("user")) {
+      roots.push(
+        { source: "user", directory: path.join(os.homedir(), ".agents", "skills") },
+        { source: "user", directory: path.join(os.homedir(), ".claude", "skills") },
+      );
+    }
+    const result: Array<{
+      name: string;
+      source: "project" | "user";
+      directory: string;
+    }> = [];
+    for (const root of roots) {
+      let realRoot: string;
+      try {
+        realRoot = await fs.realpath(root.directory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (root.source === "project") {
+        const relative = path.relative(this.workspaceRoot, realRoot);
+        if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+      }
+      const entries = await fs.readdir(realRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+        const directory = await fs.realpath(path.join(realRoot, entry.name)).catch(() => "");
+        if (!directory) continue;
+        const relative = path.relative(realRoot, directory);
+        if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        const skillFile = path.join(directory, "SKILL.md");
+        const exists = await fs.stat(skillFile).then((stat) => stat.isFile()).catch(() => false);
+        if (exists && !result.some((skill) => skill.name === entry.name)) {
+          result.push({ name: entry.name, source: root.source, directory });
+        }
+      }
+    }
+    return result.sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  private async runDapRepl(input: Record<string, unknown>): Promise<ToolResult> {
+    const expression = String(input.expression ?? "").trim();
+    if (!expression) throw new Error("DAP expression is required");
+    const session = this.resolveDebugSession(input);
+    const approvedGeneration = this.approvedDapGenerations.get(input);
+    if (
+      !approvedGeneration ||
+      this.hooks.debug!.generation(session.id) !== approvedGeneration
+    ) {
+      throw new Error("The debug session changed after approval; review and approve it again");
+    }
+    const response = await this.hooks.debug!.request<DapEvaluateResult>(
+      session.id,
+      "evaluate",
+      {
+        expression,
+        context: "repl",
+        ...(Number.isInteger(input.frame_id) ? { frameId: input.frame_id } : {}),
+      },
+    );
+    if (!response.success) throw new Error(response.message ?? "DAP evaluation failed");
+    return { output: JSON.stringify(response.body ?? {}, null, 2) };
+  }
+
+  private resolveDebugSession(input: Record<string, unknown>): DebugSessionInfo {
+    if (!this.hooks.debug) throw new Error("The debug service is unavailable");
+    const active = this.hooks.debug
+      .list()
+      .filter(
+        (session) =>
+          session.status !== "terminated" &&
+          session.status !== "terminating" &&
+          session.status !== "error",
+      );
+    const requestedId = String(input.session_id ?? "").trim();
+    const session = requestedId
+      ? active.find((candidate) => candidate.id === requestedId)
+      : active.length === 1
+        ? active[0]
+        : undefined;
+    if (!session) {
+      const available = active.map((candidate) => `${candidate.id} (${candidate.name})`).join(", ");
+      throw new Error(
+        requestedId
+          ? `Debug session '${requestedId}' is not active${available ? `; available: ${available}` : ""}`
+          : active.length === 0
+            ? "No active debug session"
+            : `Multiple debug sessions are active; choose session_id: ${available}`,
+      );
+    }
+    return session;
+  }
+
   private async workspacePath(input: string, mustExist: boolean): Promise<string> {
     const root = this.workspaceRoot;
+    const currentRoot = await fs.realpath(root).catch(() => "");
+    if (currentRoot !== root) {
+      throw new Error("The workspace root changed while the agent was running");
+    }
     const target = path.resolve(root, input || ".");
     const relative = path.relative(root, target);
     if (relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -893,18 +1414,93 @@ export class LogosAgentRuntime {
     return target;
   }
 
-  private isMutating(name: string): boolean {
-    return name === "write_file" || name === "run_command";
+  private async readVerifiedFile(
+    target: string,
+    maxBytes: number,
+  ): Promise<{ content: string; mode: number }> {
+    const handle = await fs.open(
+      target,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    try {
+      const [handleStat, real] = await Promise.all([
+        handle.stat(),
+        fs.realpath(target),
+      ]);
+      const relative = path.relative(this.workspaceRoot, real);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new Error(`Path resolves outside the workspace: ${target}`);
+      }
+      const pathStat = await fs.stat(real);
+      if (pathStat.dev !== handleStat.dev || pathStat.ino !== handleStat.ino) {
+        throw new Error("File changed while the agent was opening it");
+      }
+      if (!handleStat.isFile()) throw new Error(`Path is not a file: ${target}`);
+      if (handleStat.size > maxBytes) {
+        throw new Error(`File exceeds the ${maxBytes / MAX_FILE_BYTES} MiB read limit`);
+      }
+      return {
+        content: await handle.readFile("utf8"),
+        mode: handleStat.mode & 0o7777,
+      };
+    } finally {
+      await handle.close();
+    }
   }
 
   private async mayRun(name: string, input: unknown): Promise<boolean> {
-    if (this.mode === "plan" || this.request.disallowedTools?.includes(name)) return false;
-    if (name === "run_command") {
-      return this.hooks.requestPermission(this.request.sessionId, name, input);
+    if (this.disallowedTools.includes(name)) return false;
+    const planBlocked =
+      name === "Write" || name === "Bash" || name === "MCP" || name === "DAP_REPL";
+    if (this.mode === "plan" && planBlocked) return false;
+    if (name === "Bash") {
+      return this.hooks.requestPermission(
+        this.request.sessionId,
+        name,
+        input,
+        HIGH_RISK_PERMISSION_OPTIONS,
+      );
     }
+    if (name === "DAP_REPL") {
+      const dapInput = input as Record<string, unknown>;
+      const session = this.resolveDebugSession(dapInput);
+      const generation = this.hooks.debug?.generation(session.id);
+      if (!generation) throw new Error(`Debug session '${session.id}' is not active`);
+      dapInput.session_id = session.id;
+      const allowed = await this.hooks.requestPermission(
+        this.request.sessionId,
+        name,
+        {
+          ...dapInput,
+          session: {
+            id: session.id,
+            name: session.name,
+            type: session.debugType,
+            status: session.status,
+          },
+        },
+        HIGH_RISK_PERMISSION_OPTIONS,
+      );
+      if (allowed) this.approvedDapGenerations.set(dapInput, generation);
+      return allowed;
+    }
+    if (name === "MCP" && (input as McpToolInput).action !== "list_servers") {
+      const approval = await this.mcp.permissionDetails(input as McpToolInput);
+      const allowed = await this.hooks.requestPermission(
+        this.request.sessionId,
+        name,
+        approval.details,
+        HIGH_RISK_PERMISSION_OPTIONS,
+      );
+      if (allowed && approval.fingerprint && input && typeof input === "object") {
+        this.approvedMcpConfigs.set(input, approval.fingerprint);
+      }
+      return allowed;
+    }
+    if (name !== "Write") return true;
     if (this.mode === "bypassPermissions") return true;
-    if (this.request.allowedTools?.includes(name)) return true;
-    if (this.mode === "acceptEdits" && name === "write_file") return true;
+    if (this.allowedTools.includes(name)) return true;
+    if (this.mode === "acceptEdits") return true;
     return this.hooks.requestPermission(this.request.sessionId, name, input);
   }
 

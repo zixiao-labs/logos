@@ -35,13 +35,35 @@ uses the explicit `gpt-5.6-sol` model ID as its cross-authentication default.
 
 ## Workspace Tools
 
-The Logos runtime provides `read_file`, `list_directory`, `search`, `write_file`, and
-`run_command`. The exact tool contract and the mode-specific system prompt are shown
-at the top of every Logos thread before its first prompt.
+The Logos runtime provides `Read`, `Glob`, `Grep`, `Write`, `Bash`, `Skill`, `MCP`,
+`DAP_REPL`, and the loop-control tool `Finish`. The exact tool contract and the
+mode-specific system prompt are shown at the top of every Logos thread before its
+first prompt. A turn remains active until the model explicitly calls `Finish`; an
+assistant-only planning message therefore cannot end a task before tool work begins.
 Paths are constrained to the active workspace, including real-path checks that reject
-symbolic-link escapes. Write and command tools follow the selected permission mode.
-Threads are bound to the workspace where they started and cannot silently continue in
-another folder.
+symbolic-link escapes. `Write` follows the selected permission mode. Every `Bash`
+command, MCP connection/tool call, and `DAP_REPL` expression requires one-time approval,
+including in bypass mode. Threads are bound to the workspace where they started and
+cannot silently continue in another folder.
+
+`Bash` runs `/bin/bash` on macOS/Linux and an installed `bash.exe` on Windows. Windows
+users can provide Bash through Git for Windows or WSL; Logos does not reinterpret Bash
+syntax through `cmd.exe` or PowerShell.
+
+`Grep` accepts JavaScript regular expressions and an optional file glob. `Skill`
+discovers Agent Skills under `.agents/skills`, `.claude/skills`, and `.logos/skills`
+in the project, plus enabled user setting sources. Skill reads are restricted to the
+selected skill directory.
+
+The built-in runtime reads MCP server definitions from workspace `.mcp.json`. Both the
+standard `mcpServers` key and VS Code-style `servers` key are accepted. Stdio and
+Streamable HTTP transports are supported. Reading the configuration does not launch a
+server; a server is connected only after the user approves `list_tools` or `call_tool`.
+
+`DAP_REPL` evaluates expressions through an existing Logos debug session. When exactly
+one session is active it is selected automatically; otherwise the tool requires an
+explicit session id. Evaluation always requires approval because expressions can have
+side effects in the debuggee.
 
 ## ACP Registry
 

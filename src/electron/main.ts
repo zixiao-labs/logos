@@ -18,7 +18,8 @@ import { AcpSecretStore } from "./services/acp-secrets";
 import { setupAutoUpdater } from "./services/updater";
 
 let mainWindow: BrowserWindow | null = null;
-const disposers: (() => void)[] = [];
+const disposers: Array<() => void | Promise<void>> = [];
+let shutdownStarted = false;
 
 function createContext(): ServiceContext {
   return {
@@ -113,6 +114,7 @@ async function createWindow() {
 app.whenReady().then(() => {
   const ctx = createContext();
   const acpSecrets = new AcpSecretStore(ctx.userDataDir);
+  const disposeDebug = registerDebugService(ctx);
   registerAppHandlers();
   disposers.push(
     registerFsService(ctx),
@@ -123,7 +125,7 @@ app.whenReady().then(() => {
     registerAcpRegistryService(ctx),
     registerAgentService(ctx, acpSecrets),
     registerLspService(ctx),
-    registerDebugService(ctx),
+    disposeDebug,
     registerMenu(ctx),
   );
   void createWindow();
@@ -140,12 +142,13 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  for (const dispose of disposers) {
-    try {
-      dispose();
-    } catch {
-      /* ignore */
-    }
-  }
+app.on("before-quit", (event) => {
+  if (shutdownStarted) return;
+  event.preventDefault();
+  shutdownStarted = true;
+  const cleanup = Promise.allSettled(
+    disposers.map((dispose) => Promise.resolve().then(dispose)),
+  );
+  const timeout = new Promise<void>((resolve) => setTimeout(resolve, 3_000));
+  void Promise.race([cleanup, timeout]).finally(() => app.quit());
 });
