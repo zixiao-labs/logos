@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@lightning-js/lightning";
+import type * as monaco from "monaco-editor";
 import type { GitBlameLine } from "../shared/types";
 import {
+  createInlineBlameDecorationOptions,
   formatBlameAge,
   formatBlameTooltip,
   formatInlineBlame,
@@ -41,6 +43,23 @@ describe("git blame formatting", () => {
     );
     expect(formatBlameTooltip(committed, "en")).toContain(
       "src/editor.ts:10",
+    );
+  });
+
+  it("keeps end-of-line injected blame visible for a collapsed range", () => {
+    const options = createInlineBlameDecorationOptions(
+      committed,
+      "en",
+      3 as monaco.editor.InjectedTextCursorStops,
+    );
+
+    expect(options.showIfCollapsed).toBe(true);
+    expect(options.after?.content).toContain("   Ada Lovelace,");
+    expect(options.after?.content).toContain("• Add current-line blame");
+    expect(options.after?.inlineClassName).toBe("logos-inline-blame");
+    expect(options.after?.cursorStops).toBe(3);
+    expect((options.hoverMessage as monaco.IMarkdownString).value).toContain(
+      "Add current-line blame",
     );
   });
 

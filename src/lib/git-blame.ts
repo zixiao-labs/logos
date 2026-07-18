@@ -1,4 +1,5 @@
 import type { GitBlameLine, LanguageCode } from "../shared/types";
+import type * as monaco from "monaco-editor";
 import { translate } from "../i18n/locales";
 
 function locale(language: LanguageCode): LanguageCode {
@@ -84,4 +85,26 @@ export function formatBlameTooltip(
     ...(blame.uncommitted ? [] : [blame.hash]),
     `${blame.path}:${blame.finalLine}`,
   ].join("\n");
+}
+
+export function createInlineBlameDecorationOptions(
+  blame: GitBlameLine,
+  language: LanguageCode,
+  cursorStops: monaco.editor.InjectedTextCursorStops,
+): monaco.editor.IModelDecorationOptions {
+  const hover = formatBlameTooltip(blame, language).replaceAll(
+    "```",
+    "` ` `",
+  );
+  return {
+    after: {
+      content: `   ${formatInlineBlame(blame, language)}`,
+      inlineClassName: "logos-inline-blame",
+      cursorStops,
+    },
+    hoverMessage: { value: `\`\`\`text\n${hover}\n\`\`\`` },
+    // The decoration is anchored to an empty range at the end of the line.
+    // Monaco otherwise suppresses its injected text as a collapsed decoration.
+    showIfCollapsed: true,
+  };
 }

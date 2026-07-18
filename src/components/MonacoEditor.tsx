@@ -12,7 +12,7 @@ import {
   takeLspNavigationTarget,
 } from "../lib/lsp-monaco";
 import { serverIdForLanguage } from "../lib/language";
-import { formatBlameTooltip, formatInlineBlame } from "../lib/git-blame";
+import { createInlineBlameDecorationOptions } from "../lib/git-blame";
 import type { DebugBreakpointState } from "../shared/dap";
 import type { FileSnapshot } from "../shared/types";
 
@@ -547,10 +547,6 @@ export function MonacoEditor({
           state.setCurrentLineBlame({ path, line: cursorLine, blame });
           if (!inlineBlameEnabled) return;
           const endColumn = model.getLineMaxColumn(cursorLine);
-          const hover = formatBlameTooltip(blame, languageCode).replaceAll(
-            "```",
-            "` ` `",
-          );
           collection?.set([
             {
               range: new monaco.Range(
@@ -559,14 +555,11 @@ export function MonacoEditor({
                 cursorLine,
                 endColumn,
               ),
-              options: {
-                after: {
-                  content: `   ${formatInlineBlame(blame, languageCode)}`,
-                  inlineClassName: "logos-inline-blame",
-                  cursorStops: monaco.editor.InjectedTextCursorStops.None,
-                },
-                hoverMessage: { value: `\`\`\`text\n${hover}\n\`\`\`` },
-              },
+              options: createInlineBlameDecorationOptions(
+                blame,
+                languageCode,
+                monaco.editor.InjectedTextCursorStops.None,
+              ),
             },
           ]);
         });
