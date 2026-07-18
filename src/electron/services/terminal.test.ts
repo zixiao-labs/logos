@@ -80,6 +80,7 @@ describe("terminal service", () => {
     const pathEntries = spawnedEnv[pathKey!].split(
       process.platform === "win32" ? ";" : ":",
     );
+    expect(pathEntries).toContain("/custom/bin");
     expect(pathEntries.indexOf("/custom/bin")).toBeLessThan(
       pathEntries.indexOf("/usr/bin"),
     );
