@@ -444,7 +444,11 @@ describe("Logos agent runtime", () => {
 
   it("executes an approved write tool and continues the model loop", async () => {
     const target = path.join(root, "created.txt");
+    const largeTarget = path.join(root, "large.txt");
+    const largeOldText = "a".repeat(600 * 1024);
+    const largeNewText = "b".repeat(600 * 1024);
     await fs.writeFile(target, "old content", "utf8");
+    await fs.writeFile(largeTarget, largeOldText, "utf8");
     await fs.chmod(target, 0o640);
     await fs.mkdir(path.join(root, "target-dir"));
     let calls = 0;
@@ -467,6 +471,13 @@ describe("Logos agent runtime", () => {
                 {
                   type: "function_call",
                   id: "item-2",
+                  call_id: "large-write",
+                  name: "Write",
+                  arguments: JSON.stringify({ path: "large.txt", content: largeNewText }),
+                },
+                {
+                  type: "function_call",
+                  id: "item-3",
                   call_id: "call-2",
                   name: "Write",
                   arguments: JSON.stringify({ path: "target-dir", content: "blocked" }),
@@ -504,6 +515,7 @@ describe("Logos agent runtime", () => {
     await runtime.prompt("create a file");
 
     expect(await fs.readFile(target, "utf8")).toBe("created");
+    expect(await fs.readFile(largeTarget, "utf8")).toBe(largeNewText);
     if (process.platform !== "win32") {
       expect((await fs.stat(target)).mode & 0o777).toBe(0o640);
     }
@@ -523,6 +535,11 @@ describe("Logos agent runtime", () => {
         (event) => event.kind === "tool-result" && event.toolUseId === "call-2",
       ),
     ).toMatchObject({ kind: "tool-result", isError: true });
+    const largeResult = events.find(
+      (event) => event.kind === "tool-result" && event.toolUseId === "large-write",
+    );
+    expect(largeResult).toMatchObject({ kind: "tool-result", isError: false });
+    expect(largeResult?.kind === "tool-result" ? largeResult.diffs : undefined).toBeUndefined();
   });
 
   it("executes read, list, search, and command tools with observable results", async () => {
@@ -676,8 +693,8 @@ describe("Logos agent runtime", () => {
     await runtime.prompt("load the review skill");
 
     const results = events.filter((event) => event.kind === "tool-result");
-    expect(results.find((event) => event.toolUseId === "skill-list")?.content).toContain(
-      "review",
+    expect(results.find((event) => event.toolUseId === "skill-list")?.content).toBe(
+      "review\tproject",
     );
     expect(results.find((event) => event.toolUseId === "skill-load")?.content).toContain(
       "Check behavior before style",

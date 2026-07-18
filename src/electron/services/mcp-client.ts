@@ -214,13 +214,15 @@ export class WorkspaceMcpClient {
     const connections = [...this.connections.values()];
     this.connections.clear();
     await Promise.all(
-      connections.map(async ({ client, transport }) => {
-        if (transport instanceof StreamableHTTPClientTransport && transport.sessionId) {
-          await transport.terminateSession().catch(() => undefined);
-        }
-        await client.close().catch(() => undefined);
-      }),
+      connections.map((connection) => this.closeConnection(connection)),
     );
+  }
+
+  private async closeConnection({ client, transport }: McpConnection): Promise<void> {
+    if (transport instanceof StreamableHTTPClientTransport && transport.sessionId) {
+      await transport.terminateSession().catch(() => undefined);
+    }
+    await client.close().catch(() => undefined);
   }
 
   private async loadServers(): Promise<Record<string, McpServerConfig>> {
@@ -264,7 +266,7 @@ export class WorkspaceMcpClient {
     if (existing?.fingerprint === fingerprint) return existing.client;
     if (existing) {
       this.connections.delete(name);
-      await existing.client.close().catch(() => undefined);
+      await this.closeConnection(existing);
     }
 
     const client = new Client({ name: "logos", version: "1.4.0" });

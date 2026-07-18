@@ -80,7 +80,11 @@ async function walk(current) {
   for (const entry of entries) {
     if (matches.length >= 100) break;
     if (entry.isSymbolicLink() || ignored.has(entry.name)) continue;
-    await walk(path.join(real, entry.name));
+    try {
+      await walk(path.join(real, entry.name));
+    } catch (error) {
+      if (!["ENOENT", "EACCES", "EPERM"].includes(error?.code)) throw error;
+    }
   }
 }
 walk(workerData.root).then(() => parentPort.postMessage(matches), (error) => {
@@ -1058,7 +1062,10 @@ export class LogosAgentRuntime {
         return {
           output: `Wrote ${Buffer.byteLength(content)} bytes to ${target}`,
           locations: [{ path: target, line: 1 }],
-          diffs: [{ path: target, oldText, newText: content }],
+          diffs:
+            Buffer.byteLength(oldText) + Buffer.byteLength(content) <= MAX_FILE_BYTES
+              ? [{ path: target, oldText, newText: content }]
+              : undefined,
         };
       }
       case "Bash":
@@ -1236,7 +1243,7 @@ export class LogosAgentRuntime {
     if (!name) {
       return {
         output: skills.length
-          ? skills.map((skill) => `${skill.name}\t${skill.source}\t${skill.directory}`).join("\n")
+          ? skills.map((skill) => `${skill.name}\t${skill.source}`).join("\n")
           : "No skills found",
       };
     }
