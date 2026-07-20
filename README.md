@@ -21,6 +21,8 @@ Current status: Actively developing
 
 - [Debugging with `launch.json`](docs/debugging/launch-json.md), including VS Code compatibility and an AI generation prompt
 - [Agent runtimes, authentication, ACP Registry, and Agent Debug](docs/agents/runtime.md)
+- [Extension boundary and sandbox architecture](docs/extensions/sandbox-architecture.md)
+- [Extension developer types and temporary registry format](docs/extensions/development-registry.md)
 
 ## Development
 

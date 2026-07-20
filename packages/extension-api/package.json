@@ -1,0 +1,26 @@
+{
+  "name": "@logos-editor/extension-api",
+  "version": "0.1.0",
+  "description": "Versioned manifest and registry types for Logos extensions",
+  "type": "module",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    }
+  },
+  "files": [
+    "index.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "keywords": [
+    "logos",
+    "extension",
+    "types"
+  ],
+  "license": "MIT",
+  "sideEffects": false
+}

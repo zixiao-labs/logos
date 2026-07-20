@@ -48,6 +48,7 @@ describe("terminal service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: (channel: string, ...args: unknown[]) =>
           sent.push([channel, ...args]),
       } satisfies ServiceContext,
@@ -143,6 +144,7 @@ describe("terminal service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       { spawn: () => proc } as unknown as typeof import("node-pty"),

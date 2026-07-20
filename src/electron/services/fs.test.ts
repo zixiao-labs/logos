@@ -31,6 +31,7 @@ describe("filesystem service", () => {
       ipcMain: service.ipcMain,
       userDataDir: root,
       getWindow: () => null,
+      isTrustedSender: () => true,
       send: () => undefined,
     } satisfies ServiceContext);
   });
