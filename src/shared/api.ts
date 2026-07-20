@@ -46,6 +46,7 @@ import type {
   DebugSessionInfo,
   DebugStartRequest,
 } from "./dap";
+import type { ExtensionRegistrySnapshot } from "./extensions";
 
 /** Unsubscribe handle returned by every `on…` subscription. */
 export type Unsubscribe = () => void;
@@ -95,6 +96,11 @@ export interface LogosAPI {
     setRoot(path: string): Promise<void>;
     recent(): Promise<string[]>;
     onChanged(cb: (root: string | null) => void): Unsubscribe;
+  };
+  extensions: {
+    list(): Promise<ExtensionRegistrySnapshot>;
+    install(id: string): Promise<ExtensionRegistrySnapshot>;
+    uninstall(id: string): Promise<ExtensionRegistrySnapshot>;
   };
   git: {
     status(root: string): Promise<GitStatus>;

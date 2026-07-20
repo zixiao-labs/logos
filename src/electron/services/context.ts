@@ -1,4 +1,4 @@
-import type { BrowserWindow, IpcMain } from "electron";
+import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron";
 import type {
   TerminalCreateOptions,
   TerminalCreated,
@@ -23,6 +23,12 @@ export interface ServiceContext {
   userDataDir: string;
   /** Prevent development-only resources from shadowing signed packaged code. */
   isPackaged?: boolean;
+  /** Product version used to enforce manifest engine compatibility. */
+  appVersion?: string;
+  /** Development-only, read-only extension registry root. */
+  extensionRegistryDir?: string;
+  /** Runtime supplies this to bind privileged invokes to the workbench main frame. */
+  isTrustedSender?(event: IpcMainInvokeEvent): boolean;
   terminal?: {
     create(options: TerminalCreateOptions): TerminalCreated;
     kill(id: string): void;

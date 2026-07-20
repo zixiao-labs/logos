@@ -21,7 +21,7 @@
     "test": "lightning run",
     "test:watch": "lightning watch",
     "test:coverage": "lightning run --config lightning.coverage.config.ts --coverage",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && npm -w @logos-editor/extension-api run typecheck"
   },
   "author": "Zixiao Laboratories",
   "license": "MIT",
@@ -104,6 +104,7 @@
     }
   },
   "dependencies": {
+    "@logos-editor/extension-api": "0.1.0",
     "@agentclientprotocol/sdk": "0.21.0",
     "@anthropic-ai/claude-agent-sdk": "^0.3.159",
     "@gravity-ui/icons": "^2.18.0",

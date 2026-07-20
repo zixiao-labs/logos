@@ -8,6 +8,7 @@ import { registerAgentService } from "./services/agent";
 import { registerAcpRegistryService } from "./services/acp-registry";
 import { registerDebugService } from "./services/debug";
 import { registerFsService } from "./services/fs";
+import { registerExtensionService } from "./services/extensions";
 import { registerGitService } from "./services/git";
 import { registerLspService } from "./services/lsp";
 import { registerMenu } from "./services/menu";
@@ -22,6 +23,12 @@ const disposers: Array<() => void | Promise<void>> = [];
 let shutdownStarted = false;
 
 function createContext(): ServiceContext {
+  const configuredRegistry = process.env.LOGOS_EXTENSION_REGISTRY?.trim();
+  const extensionRegistryDir = app.isPackaged
+    ? undefined
+    : configuredRegistry && path.isAbsolute(configuredRegistry)
+      ? configuredRegistry
+      : path.resolve(app.getAppPath(), "..", "extensions");
   return {
     ipcMain,
     getWindow: () => mainWindow,
@@ -31,6 +38,13 @@ function createContext(): ServiceContext {
     },
     userDataDir: app.getPath("userData"),
     isPackaged: app.isPackaged,
+    appVersion: app.getVersion(),
+    extensionRegistryDir,
+    isTrustedSender: event =>
+      mainWindow !== null &&
+      !mainWindow.isDestroyed() &&
+      event.sender === mainWindow.webContents &&
+      event.senderFrame === mainWindow.webContents.mainFrame,
   };
 }
 
@@ -93,9 +107,18 @@ async function createWindow() {
     webPreferences: {
       preload: path.resolve(__dirname, "preload.cjs"),
       contextIsolation: true,
-      sandbox: false, // node-pty / SDK run in main; preload needs ipcRenderer
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
     },
   });
+
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-attach-webview", event => event.preventDefault());
+  mainWindow.webContents.session.setPermissionCheckHandler(() => false);
+  mainWindow.webContents.session.setPermissionRequestHandler(
+    (_webContents, _permission, callback) => callback(false),
+  );
 
   const notifyState = () =>
     mainWindow?.webContents.send(CH.windowStateChanged, {
@@ -109,6 +132,10 @@ async function createWindow() {
   } else {
     await mainWindow.loadFile(path.resolve(__dirname, "renderer/index.html"));
   }
+  const workbenchUrl = mainWindow.webContents.getURL();
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== workbenchUrl) event.preventDefault();
+  });
 }
 
 app.whenReady().then(() => {
@@ -123,6 +150,7 @@ app.whenReady().then(() => {
     registerSettingsService(ctx, acpSecrets),
     registerWorkspaceService(ctx, dialog),
     registerAcpRegistryService(ctx),
+    registerExtensionService(ctx),
     registerAgentService(ctx, acpSecrets),
     registerLspService(ctx),
     disposeDebug,

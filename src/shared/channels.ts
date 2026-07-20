@@ -31,6 +31,11 @@ export const CH = {
   workspaceRecent: "workspace:recent",
   workspaceChanged: "workspace:changed", // push
 
+  // extensions (local development registry; invoke)
+  extensionsList: "extensions:list",
+  extensionsInstall: "extensions:install",
+  extensionsUninstall: "extensions:uninstall",
+
   // git (invoke)
   gitStatus: "git:status",
   gitStage: "git:stage",

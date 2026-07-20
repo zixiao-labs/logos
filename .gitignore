@@ -8,3 +8,4 @@ build
 coverage
 test-results
 .zed
+.codex

@@ -151,6 +151,11 @@ const api: LogosAPI = {
     recent: () => ipcRenderer.invoke(CH.workspaceRecent),
     onChanged: (cb) => on<string | null>(CH.workspaceChanged, cb),
   },
+  extensions: {
+    list: () => ipcRenderer.invoke(CH.extensionsList),
+    install: (id) => ipcRenderer.invoke(CH.extensionsInstall, id),
+    uninstall: (id) => ipcRenderer.invoke(CH.extensionsUninstall, id),
+  },
   git: {
     status: (root) => ipcRenderer.invoke(CH.gitStatus, root),
     stage: (root, paths) => ipcRenderer.invoke(CH.gitStage, root, paths),
