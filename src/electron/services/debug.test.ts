@@ -123,6 +123,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: (channel, ...args) => sent.push([channel, ...args]),
       } satisfies ServiceContext,
       { spawnProcess },
@@ -233,6 +234,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       { connectSocket: async () => adapter.socket },
@@ -287,6 +289,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: (channel, ...args) => sent.push([channel, ...args]),
       } satisfies ServiceContext,
       { connectSocket: async () => adapter.socket },
@@ -361,6 +364,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       {
@@ -439,6 +443,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       {
@@ -507,6 +512,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       {
@@ -574,6 +580,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: (channel, ...args) => sent.push([channel, ...args]),
       } satisfies ServiceContext,
       { connectSocket: async () => adapter.socket },
@@ -649,6 +656,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: (channel, ...args) => sent.push([channel, ...args]),
         terminal: {
           create: (options) => {
@@ -771,6 +779,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       {
@@ -896,6 +905,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       {
@@ -1018,6 +1028,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       {
@@ -1066,6 +1077,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       { connectSocket: () => socketPromise },
@@ -1112,6 +1124,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       { connectSocket: async () => adapter.socket },
@@ -1169,6 +1182,7 @@ describe("debug service", () => {
         ipcMain: ipc.ipcMain,
         userDataDir: "/tmp/logos-test",
         getWindow: () => null,
+        isTrustedSender: () => true,
         send: () => undefined,
       } satisfies ServiceContext,
       {

@@ -30,6 +30,13 @@ const semanticVersion = z
   .string()
   .max(128)
   .regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
+const logosEngineRange = z
+  .string()
+  .max(64)
+  .regex(
+    /^(?:\*|[~^]?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/,
+    "must be *, an exact version, or a ^/~ version range",
+  );
 const shortText = z.string().min(1).max(256).refine(value => !value.includes("\0"));
 const description = z.string().min(1).max(4_096).refine(value => !value.includes("\0"));
 const reason = z.string().min(1).max(512).refine(value => !value.includes("\0"));
@@ -410,11 +417,7 @@ const manifestSchema = z
     description,
     engines: z
       .object({
-        logos: z
-          .string()
-          .min(1)
-          .max(64)
-          .regex(/^[0-9xX*^~<>=| .+\-]+$/),
+        logos: logosEngineRange,
       })
       .strict(),
     logos: z

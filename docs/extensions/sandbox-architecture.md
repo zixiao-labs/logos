@@ -31,18 +31,17 @@ Logos 不应把“Extension Host 是独立进程”误当成安全沙箱。安�
 
 当前仓库尚未实现 Extension Host。现有代码可作为受信任工作台功能的原型，但不能直接暴露给扩展：
 
-- `src/electron/main.ts` 为主窗口设置了 `sandbox: false`。`node-pty` 和 Agent SDK 位于主进程，并不要求 renderer 关闭 Chromium 沙箱。
+- `src/electron/main.ts` 已为主窗口显式设置 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false` 和 `webviewTag: false`。主窗口还拒绝新窗口、非工作台导航、session 权限请求和 `will-attach-webview`；这些是已经落地的 renderer 边界。
 - `src/electron/preload.ts` 将文件、终端、Git、Agent、LSP、DAP 等完整能力暴露为 `window.logos`。一旦工作台 renderer 出现 XSS，攻击面接近用户权限。
 - `src/electron/services/fs.ts` 接受调用方提供的绝对路径，没有工作区边界、调用者身份或逐操作能力检查。该服务不能复用为扩展文件 API。
-- `src/components/EditorArea.tsx` 直接渲染 `<webview src={active.url}>`，没有独立 session、固定 preload、导航策略、资源代理或权限处理器。
-- IPC channel 虽然集中定义，但 handler 未系统校验 `event.senderFrame`、来源窗口、payload schema、大小和频率。
+- `src/components/EditorArea.tsx` 仍保留直接渲染 `<webview src={active.url}>` 的路径。当前 `webviewTag: false` 和 `will-attach-webview` 会阻止它成为可用的 guest，但这段 UI 实现仍须在未来启用 Web 内容前替换为受控视图，不能视为已完成的 WebView 边界。
+- IPC channel 虽然集中定义，扩展 registry IPC 也已校验主窗口 main frame，但其余 handler 尚未系统校验 `event.senderFrame`、来源窗口、payload schema、大小和频率。
 
-在接入任何第三方扩展前，工作台本身应完成以下 P0 加固：
+在接入任何第三方扩展前，工作台本身仍应完成以下 P0 加固：
 
-- 主 renderer 使用 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false`，并显式关闭 `webviewTag`。
-- 为主窗口设置 CSP、`will-navigate`、`setWindowOpenHandler` 和 session 权限拒绝策略。
+- 为主窗口设置 CSP；保留并回归测试已经落地的 `will-navigate`、`setWindowOpenHandler` 和 session 权限拒绝策略。
 - 所有 IPC handler 校验发送者，使用严格 schema，并把 UI 文件操作限制在当前工作区或用户通过系统对话框授予的路径。
-- 用宿主创建的 `WebContentsView`/受控 renderer 替换页面内 `<webview>`；普通网页浏览与扩展 WebView 使用不同的 session 和协议。
+- 删除 `EditorArea` 中页面内 `<webview>` 路径；需要 Web 内容时改用宿主创建的 `WebContentsView`/受控 renderer，并让普通网页浏览与扩展 WebView 使用不同的 session 和协议。
 - `shell.openExternal` 只接受经过解析、规范化、策略允许且由用户动作触发的 URL；`file:` 不走通用外部打开 API。
 
 这些是工作台安全基线，不等同于扩展沙箱。
@@ -398,7 +397,9 @@ connect-src 'none';
 
 ## 12. 包、签名与供应链
 
-安装发生在隔离的 Installer 进程，流程如下：
+### 目标架构（尚未实现）
+
+规划中的安装应发生在独立、隔离的 Installer 进程。独立进程、隔离安装、发布者签名/吊销、仓库新鲜度与回滚保护、SBOM、启动前入口复核等校验目前均未实现；以下步骤保留为未来设计目标：
 
 1. 下载到 staging，不执行 postinstall/install script，不解析工作区文件。
 2. 验证仓库元数据的新鲜度和回滚保护；验证仓库对 `{publisher, extensionId, version, digest}` 的绑定。
@@ -409,7 +410,9 @@ connect-src 'none';
 7. 提取到内容寻址目录 `<digest>`，权限只读；通过原子指针切换版本。
 8. 启动前再次核对入口 digest。异常退出可回滚，但回滚版本仍需未被吊销。
 
-本地未签名扩展只允许在显式的 Extension Development Profile 中运行：独立用户数据目录、明显 UI 标识、默认无网络/密钥/进程能力，且不能与普通配置的授权记录互用。
+当前实现仍位于 `src/electron/services/extensions.ts` 的主进程 IPC 服务中。它仅面向未打包构建的本地 registry；实际安装时会在该服务内完成归档 staging、SHA-256 校验、安全 ZIP 检查与解包、只读内容寻址存储和安装记录写入。这些已有校验不是独立 Installer 进程形成的安全边界，也不包含上述签名、吊销和隔离安装能力。
+
+Extension Development Profile 同样是尚未实现的目标约束：本地未签名扩展将来只能在显式开发配置中运行，并须使用独立用户数据目录、显示明显的开发模式 UI 标识、默认禁用网络/密钥/进程能力，且授权记录不得与普通配置互用。当前本地 registry 仅由 `LOGOS_EXTENSION_REGISTRY` 和 `app.isPackaged` 决定是否可见，仍使用普通用户数据目录，也没有独立 UI、能力默认策略或授权记录存储；不能把该开关描述成已经完成的安全隔离。当前阶段也尚不执行第三方扩展代码。
 
 更新时只下载并验证完整目标；delta 只是传输优化，最终产物仍按完整 digest 验证。离线吊销缓存有过期时间；高风险被吊销扩展立即停用并保留可审计原因。
 
@@ -501,12 +504,12 @@ VS Code 兼容 RPC 在适配层结束，内部 broker 不直接接受 VS Code �
 
 ### Phase 0：工作台安全基线
 
-- 开启 renderer sandbox、CSP、导航/新窗口/permission handler。
-- IPC sender + schema + 限流；UI 文件 API 限制在工作区。
-- 替换直接 `<webview>`。
-- 建立安全回归测试。
+- 已落地：主 renderer 使用 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false`、`webviewTag: false`，并拒绝新窗口、非工作台导航、session 权限请求和 `will-attach-webview`。
+- 仍需完成：设置 CSP；为全部 IPC 增加 sender、schema 和限流约束；将 UI 文件 API 限制在工作区或用户明确授予的路径。
+- 仍需完成：移除 `EditorArea` 的直接 `<webview>` 路径并建立受控 Web 内容边界。
+- 仍需完成：建立覆盖上述边界的安全回归测试。
 
-**退出条件**：工作台 renderer XSS 不能直接获得 Node/Electron、shell 或工作区外文件。
+**目标退出条件（当前尚未达到）**：工作台 renderer XSS 不能直接获得 Node/Electron、shell 或工作区外文件。当前 Chromium sandbox 已阻止 renderer 直接获得 Node/Electron，但 preload 暴露的高权限 IPC、未统一收口的 sender/schema 校验和未限制到工作区的文件服务仍使该退出条件不成立。
 
 ### Phase 1：包与声明式贡献
 

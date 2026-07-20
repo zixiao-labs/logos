@@ -72,7 +72,7 @@ function validateExtensionId(id: string): string {
 }
 
 function assertTrustedSender(ctx: ServiceContext, event: IpcMainInvokeEvent): void {
-  if (ctx.isTrustedSender && !ctx.isTrustedSender(event)) {
+  if (!ctx.isTrustedSender(event)) {
     throw new Error("Extension request did not originate from the workbench main frame.");
   }
 }
@@ -224,6 +224,55 @@ async function inspectArchive(file: string): Promise<InspectedArchive> {
   return { manifest, entries };
 }
 
+async function readArchiveManifest(file: string): Promise<LogosExtensionManifest> {
+  const zip = await openZip(file);
+  try {
+    const body = await new Promise<string>((resolve, reject) => {
+      let settled = false;
+      let entries = 0;
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      zip.once("error", fail);
+      zip.once("end", () =>
+        fail(new Error("Extension archive is missing extension.json at its root.")),
+      );
+      zip.on("entry", entry => {
+        if (settled) return;
+        entries += 1;
+        if (entries > ARCHIVE_MAX_ENTRIES) {
+          fail(new Error("Extension archive contains too many entries."));
+          return;
+        }
+        if (entry.fileName !== MANIFEST_ENTRY) {
+          zip.readEntry();
+          return;
+        }
+        if (
+          entry.uncompressedSize > 1024 * 1024 ||
+          isUnsafeUnixFileType(entry, false)
+        ) {
+          fail(new Error("Extension manifest entry is invalid."));
+          return;
+        }
+        void readZipEntry(zip, entry, 1024 * 1024)
+          .then(buffer => {
+            if (settled) return;
+            settled = true;
+            resolve(buffer.toString("utf8"));
+          })
+          .catch(fail);
+      });
+      zip.readEntry();
+    });
+    return parseExtensionManifestJson(body);
+  } finally {
+    zip.close();
+  }
+}
+
 async function sha256File(file: string): Promise<`sha256:${string}`> {
   const hash = createHash("sha256");
   const handle = await fs.open(file, "r");
@@ -237,33 +286,40 @@ async function sha256File(file: string): Promise<`sha256:${string}`> {
   return `sha256:${hash.digest("hex")}`;
 }
 
-async function copyRegistryArchive(
+async function resolveRegistryArchive(
   root: string,
   reference: ExtensionRegistryPackage,
-  scanDir: string,
-): Promise<string> {
-  const rootReal = await fs.realpath(root);
-  const requested = path.join(rootReal, ...reference.archive.split("/"));
+): Promise<{ source: string; size: number }> {
+  const requested = path.join(root, ...reference.archive.split("/"));
   let source: string;
   try {
     source = await fs.realpath(requested);
   } catch {
     throw new Error(`Registry package is missing: ${reference.id}`);
   }
-  if (!isInside(rootReal, source)) {
+  if (!isInside(root, source)) {
     throw new Error("Registry archive resolves outside the registry root.");
   }
   const sourceStat = await fs.stat(source);
   if (!sourceStat.isFile() || sourceStat.size > ARCHIVE_MAX_BYTES) {
     throw new Error("Registry archive is not a regular file within the size limit.");
   }
+  return { source, size: sourceStat.size };
+}
+
+async function copyRegistryArchive(
+  root: string,
+  reference: ExtensionRegistryPackage,
+  scanDir: string,
+): Promise<string> {
+  const { source, size } = await resolveRegistryArchive(root, reference);
 
   await fs.mkdir(scanDir, { recursive: true, mode: 0o700 });
   const copy = path.join(scanDir, `${randomUUID()}.zip`);
   await fs.copyFile(source, copy, fs.constants.COPYFILE_EXCL);
   await fs.chmod(copy, 0o400);
   const copyStat = await fs.stat(copy);
-  if (!copyStat.isFile() || copyStat.size !== sourceStat.size || copyStat.size > ARCHIVE_MAX_BYTES) {
+  if (!copyStat.isFile() || copyStat.size !== size || copyStat.size > ARCHIVE_MAX_BYTES) {
     await fs.rm(copy, { force: true });
     throw new Error("Registry archive changed while it was being staged.");
   }
@@ -561,12 +617,10 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
   const contentDir = path.join(managedDir, "content");
   const recordsDir = path.join(managedDir, "installed");
   const installs = new Map<string, Promise<void>>();
+  const manifestCache = new Map<string, LogosExtensionManifest>();
   const appVersion = ctx.appVersion ?? "0.0.0";
 
-  async function loadPreparedCatalog(): Promise<{
-    root: string;
-    packages: Array<{ reference: ExtensionRegistryPackage; prepared: PreparedPackage }>;
-  }> {
+  async function loadRegistry() {
     if (ctx.isPackaged || !ctx.extensionRegistryDir) {
       throw new Error("The local development extension registry is unavailable.");
     }
@@ -594,37 +648,58 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
       }
       throw error;
     }
-    const index = parseExtensionRegistryJson(indexBody);
+    return { root, index: parseExtensionRegistryJson(indexBody) };
+  }
+
+  async function manifestForReference(
+    root: string,
+    reference: ExtensionRegistryPackage,
+  ): Promise<LogosExtensionManifest> {
+    let manifest = manifestCache.get(reference.digest);
+    if (!manifest) {
+      const { source } = await resolveRegistryArchive(root, reference);
+      manifest = await readArchiveManifest(source);
+    }
+    if (
+      extensionManifestId(manifest) !== reference.id ||
+      manifest.version !== reference.version
+    ) {
+      throw new Error(`Registry package identity mismatch: ${reference.id}`);
+    }
+    manifestCache.set(reference.digest, manifest);
+    return manifest;
+  }
+
+  async function loadCatalog(): Promise<{
+    root: string;
+    packages: Array<{
+      reference: ExtensionRegistryPackage;
+      manifest: LogosExtensionManifest;
+    }>;
+  }> {
+    const { root, index } = await loadRegistry();
     const packages: Array<{
       reference: ExtensionRegistryPackage;
-      prepared: PreparedPackage;
+      manifest: LogosExtensionManifest;
     }> = [];
-    try {
-      for (const reference of index.extensions) {
-        packages.push({
-          reference,
-          prepared: await preparePackage(root, reference, scanDir),
-        });
-      }
-      return { root, packages };
-    } catch (error) {
-      await Promise.all(packages.map(item => fs.rm(item.prepared.archivePath, { force: true })));
-      throw error;
+    for (const reference of index.extensions) {
+      packages.push({
+        reference,
+        manifest: await manifestForReference(root, reference),
+      });
     }
+    return { root, packages };
   }
 
   async function snapshot(): Promise<ExtensionRegistrySnapshot> {
-    let catalog:
-      | Awaited<ReturnType<typeof loadPreparedCatalog>>
-      | undefined;
     try {
-      catalog = await loadPreparedCatalog();
+      const catalog = await loadCatalog();
       const installed = await loadInstallRecords(recordsDir);
       return {
         status: "ready",
         source: "local-development",
-        extensions: catalog.packages.map(({ reference, prepared }) =>
-          projectExtension(reference, prepared.manifest, installed.get(reference.id), appVersion),
+        extensions: catalog.packages.map(({ reference, manifest }) =>
+          projectExtension(reference, manifest, installed.get(reference.id), appVersion),
         ),
       };
     } catch (error) {
@@ -639,12 +714,6 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
         extensions: [],
         message,
       };
-    } finally {
-      if (catalog) {
-        await Promise.all(
-          catalog.packages.map(item => fs.rm(item.prepared.archivePath, { force: true })),
-        );
-      }
     }
   }
 
@@ -653,11 +722,13 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
     const active = installs.get(id);
     if (active) return active;
     const pending = (async () => {
-      const catalog = await loadPreparedCatalog();
+      const { root, index } = await loadRegistry();
+      const reference = index.extensions.find(candidate => candidate.id === id);
+      if (!reference) throw new Error("Unknown extension id.");
+      const prepared = await preparePackage(root, reference, scanDir);
       try {
-        const item = catalog.packages.find(candidate => candidate.reference.id === id);
-        if (!item) throw new Error("Unknown extension id.");
-        const status = compatibility(item.prepared.manifest, appVersion);
+        manifestCache.set(reference.digest, prepared.manifest);
+        const status = compatibility(prepared.manifest, appVersion);
         if (status !== "safe-compatible") {
           throw new Error(
             status === "requires-authorization"
@@ -665,21 +736,21 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
               : "Executable or incompatible extensions are blocked by the current security policy.",
           );
         }
-        const digestHex = item.reference.digest.slice("sha256:".length);
+        const digestHex = reference.digest.slice("sha256:".length);
         const contentTarget = path.join(contentDir, digestHex);
-        const contentExists = await validateExistingContent(contentTarget, item.reference);
+        const contentExists = await validateExistingContent(contentTarget, reference);
         if (!contentExists) {
           await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
           await fs.mkdir(contentDir, { recursive: true, mode: 0o700 });
           const stage = path.join(stagingDir, randomUUID());
           await fs.mkdir(stage, { mode: 0o700 });
           try {
-            await extractArchive(item.prepared.archivePath, stage);
+            await extractArchive(prepared.archivePath, stage);
             await writeJsonAtomic(path.join(stage, ".logos-package.json"), {
               schemaVersion: 1,
               id,
-              version: item.reference.version,
-              digest: item.reference.digest,
+              version: reference.version,
+              digest: reference.digest,
             });
             try {
               await fs.rename(stage, contentTarget);
@@ -687,7 +758,7 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
               if (!isNodeError(error) || !["EEXIST", "ENOTEMPTY"].includes(error.code ?? "")) {
                 throw error;
               }
-              await validateExistingContent(contentTarget, item.reference);
+              await validateExistingContent(contentTarget, reference);
             }
             await makeTreeReadOnly(contentTarget);
           } finally {
@@ -697,15 +768,13 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
         const record: InstallRecord = {
           schemaVersion: 1,
           id,
-          version: item.reference.version,
-          digest: item.reference.digest,
+          version: reference.version,
+          digest: reference.digest,
           installedAt: new Date().toISOString(),
         };
         await writeJsonAtomic(path.join(recordsDir, `${id}.json`), record);
       } finally {
-        await Promise.all(
-          catalog.packages.map(item => fs.rm(item.prepared.archivePath, { force: true })),
-        );
+        await fs.rm(prepared.archivePath, { force: true });
       }
     })();
     installs.set(id, pending);

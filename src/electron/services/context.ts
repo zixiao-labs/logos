@@ -28,7 +28,7 @@ export interface ServiceContext {
   /** Development-only, read-only extension registry root. */
   extensionRegistryDir?: string;
   /** Runtime supplies this to bind privileged invokes to the workbench main frame. */
-  isTrustedSender?(event: IpcMainInvokeEvent): boolean;
+  isTrustedSender(event: IpcMainInvokeEvent): boolean;
   terminal?: {
     create(options: TerminalCreateOptions): TerminalCreated;
     kill(id: string): void;

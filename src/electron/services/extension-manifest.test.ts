@@ -67,6 +67,17 @@ describe("extension manifest validation", () => {
     ).toThrow();
   });
 
+  it("accepts only engine ranges implemented by the compatibility checker", () => {
+    for (const logos of ["*", "1.2.3", "~1.2.3", "^1.2.3"]) {
+      expect(parseExtensionManifest(manifest({ engines: { logos } })).engines.logos).toBe(
+        logos,
+      );
+    }
+    for (const logos of [">=1.0.0", "1.0.0 || 2.0.0", "1.x", "^ 1.0.0"]) {
+      expect(() => parseExtensionManifest(manifest({ engines: { logos } }))).toThrow();
+    }
+  });
+
   it("rejects unsafe paths, ambiguous network origins, and sensitive reads", () => {
     expect(() => normalizeSafePackagePath("../outside.js", "entry")).toThrow();
     expect(() => normalizeSafePackagePath("C:\\outside.js", "entry")).toThrow();

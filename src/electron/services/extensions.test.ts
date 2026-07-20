@@ -141,6 +141,7 @@ describe("extension registry and installer", () => {
       appVersion: "1.4.0",
       extensionRegistryDir: registryDir,
       isPackaged: false,
+      isTrustedSender: () => true,
     } satisfies ServiceContext);
     return { ipc, digest };
   }
@@ -161,6 +162,11 @@ describe("extension registry and installer", () => {
         },
       ],
     });
+    expect(
+      await fs
+        .stat(path.join(userDataDir, "extensions", "registry-scan"))
+        .then(() => "exists", error => (error as NodeJS.ErrnoException).code),
+    ).toBe("ENOENT");
 
     const installed = await ipc.invoke<ExtensionRegistrySnapshot>(
       CH.extensionsInstall,
@@ -210,16 +216,34 @@ describe("extension registry and installer", () => {
     ).rejects.toThrow("blocked");
   });
 
-  it("rejects digest, identity, missing resource, traversal, and symlink archive attacks", async () => {
+  it("caches a validated listing manifest by package digest", async () => {
+    const body = Buffer.from(JSON.stringify(manifest()));
+    const { ipc } = await setup([{ name: "extension.json", body }]);
+
+    expect(await ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toMatchObject({
+      status: "ready",
+      extensions: [{ id: "example.sample" }],
+    });
+    await fs.rm(path.join(registryDir, "packages", "sample.zip"));
+    expect(await ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toMatchObject({
+      status: "ready",
+      extensions: [{ id: "example.sample" }],
+    });
+  });
+
+  it("defers full archive verification until install and still rejects package attacks", async () => {
     const declarative = Buffer.from(JSON.stringify(manifest()));
     const digestMismatch = await setup(
       [{ name: "extension.json", body: declarative }],
       { digest: `sha256:${"0".repeat(64)}` },
     );
     expect(await digestMismatch.ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toMatchObject({
-      status: "invalid",
-      extensions: [],
+      status: "ready",
+      extensions: [{ id: "example.sample" }],
     });
+    await expect(digestMismatch.ipc.invoke(CH.extensionsInstall, "example.sample")).rejects.toThrow(
+      "digest mismatch",
+    );
 
     await fs.rm(registryDir, { recursive: true, force: true });
     registryDir = await fs.mkdtemp(path.join(os.tmpdir(), "logos-extension-registry-"));
@@ -242,8 +266,12 @@ describe("extension registry and installer", () => {
       },
     ]);
     expect(await missingResource.ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toMatchObject({
-      status: "invalid",
+      status: "ready",
+      extensions: [{ id: "example.sample", compatibility: "blocked" }],
     });
+    await expect(missingResource.ipc.invoke(CH.extensionsInstall, "example.sample")).rejects.toThrow(
+      "missing package resource",
+    );
 
     await fs.rm(registryDir, { recursive: true, force: true });
     registryDir = await fs.mkdtemp(path.join(os.tmpdir(), "logos-extension-registry-"));
@@ -252,8 +280,11 @@ describe("extension registry and installer", () => {
       { name: "../escape", body: Buffer.from("escape") },
     ]);
     expect(await traversal.ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toMatchObject({
-      status: "invalid",
+      status: "ready",
     });
+    await expect(traversal.ipc.invoke(CH.extensionsInstall, "example.sample")).rejects.toThrow(
+      "path",
+    );
 
     await fs.rm(registryDir, { recursive: true, force: true });
     registryDir = await fs.mkdtemp(path.join(os.tmpdir(), "logos-extension-registry-"));
@@ -262,8 +293,11 @@ describe("extension registry and installer", () => {
       { name: "link", body: Buffer.from("/etc/passwd"), mode: 0o120777 },
     ]);
     expect(await symlink.ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toMatchObject({
-      status: "invalid",
+      status: "ready",
     });
+    await expect(symlink.ipc.invoke(CH.extensionsInstall, "example.sample")).rejects.toThrow(
+      "link or special file",
+    );
   });
 
   it("does not expose the development registry in packaged mode", async () => {
@@ -276,6 +310,7 @@ describe("extension registry and installer", () => {
       appVersion: "1.4.0",
       extensionRegistryDir: registryDir,
       isPackaged: true,
+      isTrustedSender: () => true,
     } satisfies ServiceContext);
 
     expect(await ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toEqual({

@@ -34,6 +34,7 @@ describe("settings service", () => {
       ipcMain: ipc.ipcMain,
       userDataDir,
       getWindow: () => null,
+      isTrustedSender: () => true,
       send: (channel: string, ...args: unknown[]) => sent.push([channel, ...args]),
     } satisfies ServiceContext;
     registerSettingsService(ctx, acpSecrets);

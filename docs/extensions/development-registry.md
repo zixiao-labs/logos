@@ -14,10 +14,14 @@ contains the versioned TypeScript contract for:
 - declarative contribution types
 - `ExtensionRegistryIndex` and content-digest references
 
-Use `satisfies LogosExtensionManifest` when authoring `extension.json`. The
-types document what a package may request; the host remains authoritative and
-can reject a structurally valid package under product, workspace, runtime, or
-user policy.
+Use `satisfies LogosExtensionManifest` on the source TypeScript object used to
+author a manifest, then serialize that validated object to `extension.json`.
+The JSON file itself cannot contain TypeScript syntax such as `satisfies`, type
+annotations, or imports. A build pipeline may instead validate hand-authored
+JSON against an equivalent JSON Schema before packaging. These authoring checks
+document what a package may request; the host remains authoritative and can
+reject a structurally valid package under product, workspace, runtime, or user
+policy.
 
 ## Local registry
 

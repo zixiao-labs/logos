@@ -209,6 +209,7 @@ describe("ACP registry service cache", () => {
       ipcMain: ipc.ipcMain,
       userDataDir,
       getWindow: () => null,
+      isTrustedSender: () => true,
       send: () => undefined,
     } satisfies ServiceContext);
 
@@ -256,6 +257,7 @@ describe("ACP registry service cache", () => {
       ipcMain: ipc.ipcMain,
       userDataDir,
       getWindow: () => null,
+      isTrustedSender: () => true,
       send: () => undefined,
     } satisfies ServiceContext);
 
@@ -297,6 +299,7 @@ describe("ACP registry service cache", () => {
       ipcMain: ipc.ipcMain,
       userDataDir,
       getWindow: () => null,
+      isTrustedSender: () => true,
       send: () => undefined,
     } satisfies ServiceContext);
 
