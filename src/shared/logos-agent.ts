@@ -253,7 +253,7 @@ export const LOGOS_AGENT_TOOLS: readonly LogosAgentToolInfo[] = [
 ] as const;
 
 export function buildLogosAgentSystemPrompt(input: {
-  workspace: string;
+  workspace: string | readonly string[];
   mode: AgentPermissionMode;
 }): string {
   const modeInstruction: Record<AgentPermissionMode, string> = {
@@ -270,13 +270,16 @@ export function buildLogosAgentSystemPrompt(input: {
     (tool) =>
       `- ${tool.name}: ${tool.description} ${tool.constraints}`,
   ).join("\n");
+  const workspaces: readonly string[] =
+    typeof input.workspace === "string" ? [input.workspace] : input.workspace;
+  const workspaceList = workspaces.map((root, index) => `${index + 1}. ${root}`).join("\n");
 
   return `# Identity
 You are the built-in Logos coding agent running inside the Logos IDE. You are responsible for producing correct, minimal, verifiable changes in the active workspace.
 
 # Workspace
-The only permitted workspace root is: ${input.workspace}
-Resolve every file and command working directory inside this root. Never attempt to bypass path checks, follow a symbolic link outside the workspace, or access unrelated user data.
+The permitted workspace roots are:\n${workspaceList}
+The first root is the default for relative paths. Use absolute paths to work in another root. Resolve every file and command working directory inside these roots. Never attempt to bypass path checks, follow a symbolic link outside the workspace, or access unrelated user data.
 
 # Operating Mode
 ${modeInstruction[input.mode]}

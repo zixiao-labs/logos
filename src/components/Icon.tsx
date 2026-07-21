@@ -4,6 +4,7 @@ export type IconName =
   | "files"
   | "search"
   | "git"
+  | "graph"
   | "debug"
   | "extensions"
   | "agent"
@@ -58,6 +59,7 @@ const PATHS: Record<IconName, string> = {
     "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7",
   search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3",
   git: "M6 3v12M18 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a9 9 0 0 0 9-9",
+  graph: "M4 19V9m8 10V5m8 14v-7M4 9l8-4 8 7",
   debug:
     "M8 2l1.4 2.2A7 7 0 0 1 12 3.7c.9 0 1.8.2 2.6.5L16 2m-8 7H4m16 0h-4M7 14H3m18 0h-4M8 19l-2 3m10-3 2 3M8 8h8v7a4 4 0 0 1-8 0V8zM12 8V4",
   extensions:

@@ -641,6 +641,89 @@ describe("Logos agent runtime", () => {
     expect(calls).toBe(2);
   });
 
+  it("reads, searches, and writes across every workspace root", async () => {
+    const additionalRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "logos-agent-additional-"),
+    );
+    try {
+      await fs.mkdir(path.join(additionalRoot, "src"));
+      const sourcePath = path.join(additionalRoot, "src", "secondary.txt");
+      const writtenPath = path.join(additionalRoot, "written.txt");
+      await fs.writeFile(sourcePath, "secondary needle", "utf8");
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls += 1;
+        if (calls === 1) {
+          return responseStream([
+            {
+              type: "response.completed",
+              response: {
+                id: "resp-multi-root",
+                output: [
+                  {
+                    type: "function_call",
+                    call_id: "read-secondary",
+                    name: "Read",
+                    arguments: JSON.stringify({ path: sourcePath }),
+                  },
+                  {
+                    type: "function_call",
+                    call_id: "search-secondary",
+                    name: "Grep",
+                    arguments: JSON.stringify({
+                      pattern: "needle",
+                      path: path.join(additionalRoot, "src"),
+                    }),
+                  },
+                  {
+                    type: "function_call",
+                    call_id: "write-secondary",
+                    name: "Write",
+                    arguments: JSON.stringify({
+                      path: writtenPath,
+                      content: "written from the agent",
+                    }),
+                  },
+                ],
+              },
+            },
+          ]);
+        }
+        return responseStream([
+          {
+            type: "response.completed",
+            response: { id: "resp-multi-root-done", output: [] },
+          },
+        ]);
+      }) as typeof globalThis.fetch;
+      const runtime = await LogosAgentRuntime.create(
+        request(root, { additionalDirectories: [additionalRoot] }),
+        hooks,
+        fakeAuth(),
+        sessionsDir,
+      );
+
+      await runtime.prompt("work in the second workspace root");
+
+      const result = (toolUseId: string) =>
+        events.find(
+          (event) => event.kind === "tool-result" && event.toolUseId === toolUseId,
+        ) as Extract<AgentEvent, { kind: "tool-result" }> | undefined;
+      expect(result("read-secondary")?.content).toContain("secondary needle");
+      const canonicalSourcePath = await fs.realpath(sourcePath);
+      expect(result("search-secondary")).toMatchObject({
+        isError: false,
+        locations: [{ path: canonicalSourcePath, line: 1 }],
+      });
+      expect(result("write-secondary")?.isError).toBe(false);
+      expect(await fs.readFile(writtenPath, "utf8")).toBe("written from the agent");
+      expect(await runtime.matchesWorkspace(root, [additionalRoot])).toBe(true);
+      expect(await runtime.matchesWorkspace(additionalRoot, [root])).toBe(false);
+    } finally {
+      await fs.rm(additionalRoot, { recursive: true, force: true });
+    }
+  });
+
   it("loads project skills through the Skill tool", async () => {
     const skillDir = path.join(root, ".agents", "skills", "review");
     await fs.mkdir(skillDir, { recursive: true });

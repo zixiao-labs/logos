@@ -147,9 +147,12 @@ const api: LogosAPI = {
   },
   workspace: {
     getRoot: () => ipcRenderer.invoke(CH.workspaceGetRoot),
+    getFolders: () => ipcRenderer.invoke(CH.workspaceGetFolders),
     setRoot: (p) => ipcRenderer.invoke(CH.workspaceSetRoot, p),
+    addFolder: () => ipcRenderer.invoke(CH.workspaceAddFolder),
+    removeFolder: (p) => ipcRenderer.invoke(CH.workspaceRemoveFolder, p),
     recent: () => ipcRenderer.invoke(CH.workspaceRecent),
-    onChanged: (cb) => on<string | null>(CH.workspaceChanged, cb),
+    onChanged: (cb) => on<import("../shared/types").WorkspaceSnapshot>(CH.workspaceChanged, cb),
   },
   extensions: {
     list: () => ipcRenderer.invoke(CH.extensionsList),
@@ -174,12 +177,15 @@ const api: LogosAPI = {
     fileDiff: (root, p, staged) =>
       ipcRenderer.invoke(CH.gitFileDiff, root, p, staged),
     log: (root, limit) => ipcRenderer.invoke(CH.gitLog, root, limit),
+    graph: (root, limit) => ipcRenderer.invoke(CH.gitGraph, root, limit),
     blame: (root, p, line) => ipcRenderer.invoke(CH.gitBlame, root, p, line),
     init: (root) => ipcRenderer.invoke(CH.gitInit, root),
     fetch: (root) => ipcRenderer.invoke(CH.gitFetch, root),
     pull: (root) => ipcRenderer.invoke(CH.gitPull, root),
     push: (root) => ipcRenderer.invoke(CH.gitPush, root),
     sync: (root) => ipcRenderer.invoke(CH.gitSync, root),
+    watch: (roots) => ipcRenderer.invoke(CH.gitWatch, roots),
+    onChanged: (cb) => on<string>(CH.gitChanged, cb),
   },
   terminal: {
     create: (opts: TerminalCreateOptions) =>

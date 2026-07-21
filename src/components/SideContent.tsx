@@ -2,6 +2,7 @@ import type { SidebarView } from "../state/store";
 import { Explorer } from "./Explorer";
 import { SearchPanel } from "./SearchPanel";
 import { GitPanel } from "./GitPanel";
+import { GitGraphPanel } from "./GitGraphPanel";
 import { DebugSidebar } from "./DebugSidebar";
 
 /** Renders the inner view for a primary side-bar slot. */
@@ -11,6 +12,8 @@ export function SideContent({ view }: { view: SidebarView }) {
       return <SearchPanel />;
     case "git":
       return <GitPanel />;
+    case "gitGraph":
+      return <GitGraphPanel />;
     case "debug":
       return <DebugSidebar />;
     case "explorer":

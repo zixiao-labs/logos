@@ -23,6 +23,7 @@ export function CursorLayout() {
     { view: "explorer", icon: "files" },
     { view: "search", icon: "search" },
     { view: "git", icon: "git" },
+    { view: "gitGraph", icon: "graph" },
     { view: "debug", icon: "debug" },
   ];
 

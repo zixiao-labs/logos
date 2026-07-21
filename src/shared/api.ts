@@ -23,6 +23,7 @@ import type {
   GitBranch,
   GitBlameLine,
   GitFileDiff,
+  GitGraphEntry,
   GitLogEntry,
   GitStatus,
   LanguageServerInfo,
@@ -34,6 +35,7 @@ import type {
   TerminalCreateOptions,
   TerminalCreated,
   WindowControl,
+  WorkspaceSnapshot,
 } from "./types";
 import type { ServerCapabilities } from "vscode-languageserver-protocol";
 import type {
@@ -93,9 +95,12 @@ export interface LogosAPI {
   };
   workspace: {
     getRoot(): Promise<string | null>;
+    getFolders(): Promise<string[]>;
     setRoot(path: string): Promise<void>;
+    addFolder(): Promise<WorkspaceSnapshot | null>;
+    removeFolder(path: string): Promise<WorkspaceSnapshot>;
     recent(): Promise<string[]>;
-    onChanged(cb: (root: string | null) => void): Unsubscribe;
+    onChanged(cb: (workspace: WorkspaceSnapshot) => void): Unsubscribe;
   };
   extensions: {
     list(): Promise<ExtensionRegistrySnapshot>;
@@ -120,6 +125,7 @@ export interface LogosAPI {
     diff(root: string, path: string, staged: boolean): Promise<string>;
     fileDiff(root: string, path: string, staged: boolean): Promise<GitFileDiff>;
     log(root: string, limit?: number): Promise<GitLogEntry[]>;
+    graph(root: string, limit?: number): Promise<GitGraphEntry[]>;
     /** Blame one 1-based line in an absolute working-tree file path. */
     blame(root: string, path: string, line: number): Promise<GitBlameLine | null>;
     init(root: string): Promise<void>;
@@ -128,6 +134,8 @@ export interface LogosAPI {
     push(root: string): Promise<string>;
     /** Pull (rebase) then push. */
     sync(root: string): Promise<string>;
+    watch(roots: string[]): Promise<void>;
+    onChanged(cb: (root: string) => void): Unsubscribe;
   };
   terminal: {
     create(opts: TerminalCreateOptions): Promise<TerminalCreated>;

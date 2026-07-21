@@ -21,9 +21,12 @@ interface EditState {
 export function Explorer() {
   const t = useT();
   const root = useStore((s) => s.root);
+  const workspaceFolders = useStore((s) => s.workspaceFolders);
   const openFile = useStore((s) => s.openFile);
   const openFolder = useStore((s) => s.openFolder);
-  const git = useStore((s) => s.git);
+  const addWorkspaceFolder = useStore((s) => s.addWorkspaceFolder);
+  const removeWorkspaceFolder = useStore((s) => s.removeWorkspaceFolder);
+  const gitRepositories = useStore((s) => s.gitRepositories);
   const refreshGit = useStore((s) => s.refreshGit);
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -35,10 +38,10 @@ export function Explorer() {
   );
 
   const gitMap: Record<string, string> = {};
-  if (git && root) {
-    for (const c of git.changes) {
+  for (const [repositoryRoot, repository] of Object.entries(gitRepositories)) {
+    for (const c of repository.status.changes) {
       const status = c.working !== " " ? c.working : c.index;
-      gitMap[`${root}/${c.path}`.replace(/\\/g, "/")] = status;
+      gitMap[`${repositoryRoot}/${c.path}`.replace(/\\/g, "/")] = status;
     }
   }
 
@@ -48,17 +51,21 @@ export function Explorer() {
     return listing.entries;
   }, []);
 
-  // (Re)load the root listing whenever the workspace changes, and watch it.
+  // (Re)load every root whenever the workspace changes, and watch all of them.
   useEffect(() => {
-    if (!root) {
+    if (workspaceFolders.length === 0) {
       setChildren({});
       setExpanded(new Set());
       return;
     }
-    void loadChildren(root);
-    void window.logos.fs.watch(root);
-    return () => void window.logos.fs.unwatch(root);
-  }, [root, loadChildren]);
+    for (const folder of workspaceFolders) {
+      void loadChildren(folder);
+      void window.logos.fs.watch(folder);
+    }
+    return () => {
+      for (const folder of workspaceFolders) void window.logos.fs.unwatch(folder);
+    };
+  }, [workspaceFolders, loadChildren]);
 
   // Refresh open directories (debounced) on file-system changes.
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -67,13 +74,16 @@ export function Explorer() {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
       refreshTimer.current = setTimeout(() => {
         const parent = dirname(e.path);
-        for (const dir of [root, parent]) {
-          if (dir && (dir === root || expanded.has(dir))) void loadChildren(dir);
+        const eventRoot = workspaceFolders.find(folder =>
+          e.path === folder || e.path.startsWith(`${folder}/`) || e.path.startsWith(`${folder}\\`),
+        );
+        for (const dir of [eventRoot, parent]) {
+          if (dir && (dir === eventRoot || expanded.has(dir))) void loadChildren(dir);
         }
         void refreshGit();
       }, 120);
     });
-  }, [root, expanded, loadChildren, refreshGit]);
+  }, [workspaceFolders, expanded, loadChildren, refreshGit]);
 
   async function toggle(dir: string) {
     setExpanded((prev) => {
@@ -108,7 +118,7 @@ export function Explorer() {
   function startCreate(kind: "file" | "dir") {
     const parent = targetDir();
     if (!parent) return;
-    if (!expanded.has(parent) && parent !== root) void toggle(parent);
+    if (!expanded.has(parent) && !workspaceFolders.includes(parent)) void toggle(parent);
     setExpanded((p) => new Set(p).add(parent));
     setEdit({ parent, kind, mode: "create", value: "" });
   }
@@ -290,7 +300,10 @@ export function Explorer() {
     <div className="sidepanel" style={{ width: "100%" }} onClick={() => setSelected(null)}>
       <div className="panel-header">
         <span style={{ fontWeight: 700, color: "var(--foreground)" }}>
-          {basename(root).toUpperCase()}
+          {(workspaceFolders.length > 1
+            ? t("explorer.workspace")
+            : basename(root)
+          ).toUpperCase()}
         </span>
         <div className="actions" onClick={(e) => e.stopPropagation()}>
           <button className="icon-btn" title={t("explorer.newFile")} onClick={() => startCreate("file")}>
@@ -301,9 +314,16 @@ export function Explorer() {
           </button>
           <button
             className="icon-btn"
+            title={t("explorer.addFolder")}
+            onClick={() => void addWorkspaceFolder()}
+          >
+            <Icon name="add" />
+          </button>
+          <button
+            className="icon-btn"
             title={t("explorer.refresh")}
             onClick={() => {
-              if (root) void loadChildren(root);
+              for (const folder of workspaceFolders) void loadChildren(folder);
               for (const d of expanded) void loadChildren(d);
             }}
           >
@@ -313,12 +333,38 @@ export function Explorer() {
       </div>
       <div className="scroll-y" onContextMenu={(e) => openMenu(e)}>
         <div className="tree">
-          {edit?.parent === root && edit.mode === "create" ? renderEditRow(0) : null}
-          {(children[root] ?? []).map((c) =>
-            edit?.mode === "rename" && edit.target === c.path
-              ? renderEditRow(0)
-              : renderNode(c, 0),
-          )}
+          {workspaceFolders.map(folder => (
+            <div key={folder} className="workspace-folder">
+              <div className="tree-row workspace-folder-row" title={folder}>
+                <span className="tree-twisty">
+                  <Icon name="chevron-down" size={14} />
+                </span>
+                <span className="tree-icon">
+                  <Icon name="folder-open" size={15} />
+                </span>
+                <span className="tree-label" style={{ fontWeight: 650 }}>
+                  {basename(folder)}
+                </span>
+                <span style={{ flex: 1 }} />
+                <button
+                  className="icon-btn"
+                  title={t("explorer.removeFolder")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void removeWorkspaceFolder(folder);
+                  }}
+                >
+                  <Icon name="close" size={13} />
+                </button>
+              </div>
+              {edit?.parent === folder && edit.mode === "create" ? renderEditRow(1) : null}
+              {(children[folder] ?? []).map((child) =>
+                edit?.mode === "rename" && edit.target === child.path
+                  ? renderEditRow(1)
+                  : renderNode(child, 1),
+              )}
+            </div>
+          ))}
         </div>
       </div>
       {menu && (

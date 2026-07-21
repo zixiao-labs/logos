@@ -47,6 +47,16 @@ export interface FsWatchEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace
+// ---------------------------------------------------------------------------
+
+/** Ordered workspace folders. The first folder is the default cwd/root. */
+export interface WorkspaceSnapshot {
+  folders: string[];
+  root: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------
 
@@ -81,6 +91,12 @@ export interface GitLogEntry {
   message: string;
   author: string;
   date: string;
+}
+
+/** Commit topology and refs used by the Git Graph view. */
+export interface GitGraphEntry extends GitLogEntry {
+  parents: string[];
+  refs: string[];
 }
 
 export interface GitBlameLine {
@@ -395,6 +411,8 @@ export interface AgentStartRequest {
   sessionId: string;
   prompt: string;
   cwd: string;
+  /** Additional workspace roots visible to the agent without changing cwd. */
+  additionalDirectories?: string[];
   model?: string;
   permissionMode?: AgentPermissionMode;
   /** Resume a previous SDK session id for multi-turn / restart recovery. */

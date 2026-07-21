@@ -89,7 +89,7 @@ describe("workspace service", () => {
     expect(recent.filter((root) => root === roots[4])).toHaveLength(1);
     expect(service.sent.at(-1)).toEqual([
       CH.workspaceChanged,
-      roots[4],
+      { folders: [roots[4]], root: roots[4] },
     ]);
 
     const reloaded = setup();
@@ -131,5 +131,27 @@ describe("workspace service", () => {
     await expect(service.invoke(CH.workspaceSetRoot, arbitrary)).rejects.toThrow(
       "native folder dialog",
     );
+  });
+
+  it("adds, persists, and removes multiple workspace folders", async () => {
+    const service = setup();
+    const first = path.join(userDataDir, "first");
+    const second = path.join(userDataDir, "second");
+    await Promise.all([fs.mkdir(first), fs.mkdir(second)]);
+    openResult = { canceled: false, filePaths: [first] };
+    await service.invoke(CH.dialogOpenFolder);
+
+    openResult = { canceled: false, filePaths: [second, first] };
+    const added = await service.invoke(CH.workspaceAddFolder);
+    const canonical = await Promise.all([fs.realpath(first), fs.realpath(second)]);
+    expect(added).toEqual({ folders: canonical, root: canonical[0] });
+    expect(await service.invoke(CH.workspaceGetFolders)).toEqual(canonical);
+
+    const reloaded = setup();
+    expect(await reloaded.invoke(CH.workspaceGetFolders)).toEqual(canonical);
+    expect(await reloaded.invoke(CH.workspaceRemoveFolder, canonical[0])).toEqual({
+      folders: [canonical[1]],
+      root: canonical[1],
+    });
   });
 });

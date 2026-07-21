@@ -27,7 +27,10 @@ export const CH = {
 
   // workspace
   workspaceGetRoot: "workspace:getRoot",
+  workspaceGetFolders: "workspace:getFolders",
   workspaceSetRoot: "workspace:setRoot",
+  workspaceAddFolder: "workspace:addFolder",
+  workspaceRemoveFolder: "workspace:removeFolder",
   workspaceRecent: "workspace:recent",
   workspaceChanged: "workspace:changed", // push
 
@@ -51,12 +54,15 @@ export const CH = {
   gitDiff: "git:diff",
   gitFileDiff: "git:fileDiff",
   gitLog: "git:log",
+  gitGraph: "git:graph",
   gitBlame: "git:blame",
   gitInit: "git:init",
   gitFetch: "git:fetch",
   gitPull: "git:pull",
   gitPush: "git:push",
   gitSync: "git:sync",
+  gitWatch: "git:watch",
+  gitChanged: "git:changed", // push
 
   // terminal
   terminalCreate: "terminal:create",

@@ -8,7 +8,9 @@ import { Icon } from "./Icon";
 
 export function GitPanel() {
   const t = useT();
-  const root = useStore((s) => s.root);
+  const root = useStore((s) => s.gitRoot ?? s.root);
+  const workspaceFolders = useStore((s) => s.workspaceFolders);
+  const setGitRoot = useStore((s) => s.setGitRoot);
   const git = useStore((s) => s.git);
   const gitHead = useStore((s) => s.gitHead);
   const refreshGit = useStore((s) => s.refreshGit);
@@ -128,7 +130,10 @@ export function GitPanel() {
   }) => {
     const status = staged ? change.index : change.working;
     return (
-      <div className="tree-row" onClick={() => openGitDiff(change.path, staged)}>
+      <div
+        className="tree-row"
+        onClick={() => openGitDiff(change.path, staged, root)}
+      >
         <span className="tree-icon">
           <Icon name="file" size={14} />
         </span>
@@ -165,9 +170,22 @@ export function GitPanel() {
   return (
     <div className="sidepanel" style={{ width: "100%" }}>
       <div className="panel-header">
-        <span style={{ fontWeight: 700, color: "var(--foreground)" }}>
-          {t("git.title").toUpperCase()}
-        </span>
+        {workspaceFolders.length > 1 ? (
+          <select
+            className="field git-repository-select"
+            aria-label={t("git.repository")}
+            value={root ?? ""}
+            onChange={(event) => setGitRoot(event.target.value)}
+          >
+            {workspaceFolders.map(folder => (
+              <option key={folder} value={folder}>{basename(folder)}</option>
+            ))}
+          </select>
+        ) : (
+          <span style={{ fontWeight: 700, color: "var(--foreground)" }}>
+            {t("git.title").toUpperCase()}
+          </span>
+        )}
         <div className="actions">
           <button
             className="icon-btn"
@@ -271,7 +289,7 @@ export function GitPanel() {
         </div>
       </div>
 
-      <div className="scroll-y">
+      <div className="scroll-y" data-testid="source-control-changes">
         {git?.clean && (
           <div className="empty-state">{t("git.clean")}</div>
         )}

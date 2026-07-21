@@ -17,6 +17,7 @@ export function EditorArea() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const root = useStore((s) => s.root);
+  const workspaceFolders = useStore((s) => s.workspaceFolders);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const openPreview = useStore((s) => s.openPreview);
 
@@ -43,10 +44,21 @@ export function EditorArea() {
     }
   }
 
+  const activeWorkspaceRoot =
+    active?.kind === "file" && active.path
+      ? (workspaceFolders.find(
+          (folder) =>
+            active.path === folder ||
+            active.path!.startsWith(`${folder}/`) ||
+            active.path!.startsWith(`${folder}\\`),
+        ) ?? root)
+      : null;
   const crumbs =
     active?.kind === "file" && active.path
-      ? (root && active.path.startsWith(root)
-          ? active.path.slice(root.length + 1)
+      ? (activeWorkspaceRoot
+          ? active.path
+              .slice(activeWorkspaceRoot.length)
+              .replace(/^[\\/]/, "")
           : active.path
         ).split(/[\\/]/)
       : [];
@@ -139,6 +151,7 @@ export function EditorArea() {
         {active?.kind === "welcome" && <Welcome />}
         {active?.kind === "diff" && active.diff && (
           <GitDiffEditor
+            root={active.diff.root}
             path={active.diff.path}
             staged={active.diff.staged}
             language={active.language ?? "plaintext"}

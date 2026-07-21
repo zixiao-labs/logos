@@ -1,5 +1,5 @@
 import simpleGit, { type SimpleGit } from "simple-git";
-import { promises as fs } from "node:fs";
+import { promises as fs, watch as fsWatch, type FSWatcher } from "node:fs";
 import path from "node:path";
 import { CH } from "../../shared/channels";
 import type {
@@ -7,6 +7,7 @@ import type {
   GitBranch,
   GitFileChange,
   GitFileDiff,
+  GitGraphEntry,
   GitLogEntry,
   GitStatus,
 } from "../../shared/types";
@@ -14,6 +15,50 @@ import type { ServiceContext } from "./context";
 
 const cache = new Map<string, SimpleGit>();
 const repositoryRootCache = new Map<string, Promise<string>>();
+const GIT_GRAPH_SEPARATOR = "\u001f";
+const GIT_GRAPH_RECORD_SEPARATOR = "\u001e";
+const WATCH_IGNORED = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  "release",
+  ".DS_Store",
+]);
+
+/** Mirrors Git Graph's repository watcher filter without refreshing on Git internals noise. */
+export function shouldRefreshGit(filename: string): boolean {
+  const normalized = filename.replaceAll("\\", "/").replace(/^\.\//, "");
+  if (!normalized) return false;
+  if (normalized.split("/").some(segment => WATCH_IGNORED.has(segment))) return false;
+  if (!normalized.startsWith(".git/")) return normalized !== ".git";
+  return /^(?:\.git\/(?:config|index|HEAD|packed-refs|refs\/(?:stash|heads\/.*|remotes\/.*|tags\/.*)))$/.test(
+    normalized,
+  );
+}
+
+export function parseGitGraph(output: string): GitGraphEntry[] {
+  return output
+    .split(GIT_GRAPH_RECORD_SEPARATOR)
+    .map(record => record.trim())
+    .filter(Boolean)
+    .map(record => {
+      const [hash = "", parents = "", refs = "", message = "", author = "", date = ""] =
+        record.split(GIT_GRAPH_SEPARATOR);
+      return {
+        hash,
+        shortHash: hash.slice(0, 7),
+        parents: parents.split(" ").filter(Boolean),
+        refs: refs
+          .split(",")
+          .map(ref => ref.trim())
+          .filter(Boolean),
+        message,
+        author,
+        date,
+      };
+    });
+}
 
 function git(root: string): SimpleGit {
   let g = cache.get(root);
@@ -117,6 +162,61 @@ export function parseGitBlamePorcelain(
 
 export function registerGitService(ctx: ServiceContext): () => void {
   const { ipcMain } = ctx;
+  const watchers = new Map<string, FSWatcher[]>();
+  const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const scheduleRefresh = (root: string) => {
+    const pending = refreshTimers.get(root);
+    if (pending) clearTimeout(pending);
+    refreshTimers.set(
+      root,
+      setTimeout(() => {
+        refreshTimers.delete(root);
+        ctx.send(CH.gitChanged, root);
+      }, 300),
+    );
+  };
+
+  const addWatcher = (
+    root: string,
+    target: string,
+    toRepositoryPath: (filename: string) => string,
+  ): FSWatcher | null => {
+    try {
+      const watcher = fsWatch(target, { recursive: true }, (_event, filename) => {
+        if (!filename) return;
+        if (shouldRefreshGit(toRepositoryPath(filename.toString()))) scheduleRefresh(root);
+      });
+      watcher.on("error", () => watcher.close());
+      return watcher;
+    } catch {
+      return null;
+    }
+  };
+
+  const stopWatching = (root: string) => {
+    for (const watcher of watchers.get(root) ?? []) watcher.close();
+    watchers.delete(root);
+    const timer = refreshTimers.get(root);
+    if (timer) clearTimeout(timer);
+    refreshTimers.delete(root);
+  };
+
+  const startWatching = async (root: string) => {
+    if (watchers.has(root)) return;
+    const active: FSWatcher[] = [];
+    const rootWatcher = addWatcher(root, root, filename => filename);
+    if (rootWatcher) active.push(rootWatcher);
+    const gitDir = await git(root)
+      .revparse(["--git-dir"])
+      .then(value => path.resolve(root, value.trim()))
+      .catch(() => null);
+    if (gitDir && !gitDir.startsWith(`${root}${path.sep}`)) {
+      const gitWatcher = addWatcher(root, gitDir, filename => `.git/${filename}`);
+      if (gitWatcher) active.push(gitWatcher);
+    }
+    watchers.set(root, active);
+  };
 
   ipcMain.handle(CH.gitStatus, (_e, root: string) => status(root));
 
@@ -259,6 +359,20 @@ export function registerGitService(ctx: ServiceContext): () => void {
   );
 
   ipcMain.handle(
+    CH.gitGraph,
+    async (_e, root: string, limit = 200): Promise<GitGraphEntry[]> => {
+      const output = await git(root).raw([
+        "log",
+        "--all",
+        `--max-count=${limit}`,
+        "--date=iso-strict",
+        `--pretty=format:%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%aI%x1e`,
+      ]);
+      return parseGitGraph(output);
+    },
+  );
+
+  ipcMain.handle(
     CH.gitBlame,
     async (
       _e,
@@ -365,7 +479,16 @@ export function registerGitService(ctx: ServiceContext): () => void {
     }
   });
 
+  ipcMain.handle(CH.gitWatch, async (_e, roots: string[]) => {
+    const desired = new Set(roots);
+    for (const root of watchers.keys()) {
+      if (!desired.has(root)) stopWatching(root);
+    }
+    await Promise.all(roots.map(startWatching));
+  });
+
   return () => {
+    for (const root of [...watchers.keys()]) stopWatching(root);
     cache.clear();
     repositoryRootCache.clear();
   };

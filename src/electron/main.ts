@@ -45,6 +45,7 @@ const GIT_ROOT_CHANNELS = new Set<ChannelName>([
   CH.gitDiff,
   CH.gitFileDiff,
   CH.gitLog,
+  CH.gitGraph,
   CH.gitBlame,
   CH.gitInit,
   CH.gitFetch,
@@ -63,6 +64,12 @@ async function authorizeWorkbenchRequest(
   channel: ChannelName,
   args: readonly unknown[],
 ): Promise<void> {
+  if (channel === CH.gitWatch) {
+    for (const root of args[0] as string[]) {
+      await workspaceAccess.assertWorkspaceRoot(root);
+    }
+    return;
+  }
   if (GIT_ROOT_CHANNELS.has(channel)) {
     const root = String(args[0]);
     await workspaceAccess.assertWorkspaceRoot(root);
@@ -86,7 +93,11 @@ async function authorizeWorkbenchRequest(
     return;
   }
   if (channel === CH.agentStart) {
-    await workspaceAccess.assertWorkspaceRoot((args[0] as { cwd: string }).cwd);
+    const request = args[0] as { cwd: string; additionalDirectories?: string[] };
+    await workspaceAccess.assertWorkspaceRoot(request.cwd);
+    for (const directory of request.additionalDirectories ?? []) {
+      await workspaceAccess.assertWorkspaceRoot(directory);
+    }
     return;
   }
   if (channel === CH.agentListModels || channel === CH.agentListCommands) {
