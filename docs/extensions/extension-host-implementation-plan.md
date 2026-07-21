@@ -180,7 +180,7 @@ type ExtensionInstanceIdentity = {
 
 按架构文档实现目标规范化、DNS/IP 双检查、重定向复核、secret handle 注入和结构化 ToolLaunch。LSP/DAP/formatter 作为 Process Broker 创建的独立工具沙箱，不成为扩展 runner 子进程。
 
-Network Broker 不得采用“预先解析检查、随后让通用客户端重新解析”的流程。每次初始连接及每个重定向目标都重新规范化 host 并解析全部 A/AAAA 记录，将 IPv4-mapped IPv6 先归一化为 IPv4，再拒绝 loopback、link-local、private、metadata、multicast 等禁止地址；broker 必须用本轮已验证的地址建立连接（TLS SNI/证书及 HTTP `Host` 仍绑定原 hostname），连接后再把实际 peer 地址归一化并确认其属于本轮已批准集合，否则立即关闭。重定向禁止自动跟随，逐跳重复上述授权、解析、拨号和 peer 校验，以消除 DNS rebinding/TOCTOU 窗口；代理/PAC 也必须提供等价的目标与实际 peer 约束，不能降级绕过。
+Network Broker 不得采用“预先解析检查、随后让通用客户端重新解析”的流程。每次初始连接及每个重定向目标都重新规范化 host 并解析全部 A/AAAA 记录，将 IPv4-mapped IPv6 先归一化为 IPv4，再拒绝 loopback、link-local、private、metadata、multicast 等禁止地址；broker 必须用本轮已验证的地址建立连接（TLS SNI/证书及 HTTP `Host` 仍绑定原 hostname），连接后再把实际 peer 地址归一化并确认其属于本轮已批准集合，否则立即关闭。重定向禁止自动跟随，逐跳重复上述授权、解析、拨号和 peer 校验，以消除 DNS rebinding/TOCTOU 窗口；代理/PAC 不得成为直连校验的例外：代理 endpoint 必须单独授权；CONNECT/SOCKS 目标按同一轮解析和地址策略校验，分别校验代理 peer 与目标绑定，禁止 PAC fallback 或透明代理绕过。
 
 退出条件：所有 socket/spawn/secret 使用都能映射到精确 capability 和审计记录；测试覆盖初始连接与逐跳重定向、IPv4-mapped IPv6、loopback、link-local、private、metadata、DNS rebinding 和 peer 不匹配；工具进程不能继承用户 HOME、凭据、网络或未授权写路径。
 
