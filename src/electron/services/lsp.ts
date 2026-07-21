@@ -1571,7 +1571,7 @@ export function registerLspService(ctx: ServiceContext): () => void {
   });
 
   // Best-effort latest-version probe (network); used by the Extensions/LSP view.
-  ipcMain.handle("lsp:checkUpdates", async () => {
+  ipcMain.handle(CH.lspCheckUpdates, async () => {
     const result: Record<string, string | null> = {};
     for (const s of REGISTRY) {
       result[s.id] = isNpmServer(s) ? await latestVersion(s.npmPackage) : null;

@@ -18,20 +18,25 @@ import type {
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { registerFsService } from "./fs";
+import { WorkspaceAccessController } from "./workspace-access";
 
 describe("filesystem service", () => {
   let root: string;
   let cleanup: () => void;
   let service: ReturnType<typeof createIpcHarness>;
+  let workspaceAccess: WorkspaceAccessController;
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "logos-fs-"));
     service = createIpcHarness();
+    workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(root);
     cleanup = registerFsService({
       ipcMain: service.ipcMain,
       userDataDir: root,
       getWindow: () => null,
       isTrustedSender: () => true,
+      workspaceAccess,
       send: () => undefined,
     } satisfies ServiceContext);
   });
@@ -72,7 +77,7 @@ describe("filesystem service", () => {
     expect(await service.invoke<string>(CH.fsReadFile, original)).toBe("content");
     expect(await service.invoke<boolean>(CH.fsExists, original)).toBe(true);
     expect(await service.invoke<FileStat>(CH.fsStat, original)).toMatchObject({
-      path: original,
+      path: await fs.realpath(original),
       type: "file",
       size: 7,
     });
@@ -154,5 +159,29 @@ describe("filesystem service", () => {
     const persisted = await fs.readFile(file, "utf8");
     expect(persisted).toBe(winner.payload);
     expect(persisted).not.toBe(loser.payload);
+  });
+
+  it("validates a conditional-write target before creating temporary files", async () => {
+    const outside = `${root}-outside`;
+    const file = path.join(root, "escape.txt");
+    await fs.symlink(path.join(outside, "nested", "file.txt"), file);
+
+    try {
+      await expect(
+        service.invoke(CH.fsWriteFileConditional, file, "content", "missing"),
+      ).rejects.toThrow("outside");
+      await expect(fs.stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("releases watchers after the workspace root changes", async () => {
+    const nextRoot = path.join(root, "next");
+    await fs.mkdir(nextRoot);
+    await service.invoke(CH.fsWatch, root);
+    await workspaceAccess.restoreWorkspaceRoot(nextRoot);
+
+    await expect(service.invoke(CH.fsUnwatch, root)).resolves.toBeUndefined();
   });
 });

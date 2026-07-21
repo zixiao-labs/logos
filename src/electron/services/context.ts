@@ -1,4 +1,8 @@
-import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron";
+import type {
+  BrowserWindow,
+  IpcMainEvent,
+  IpcMainInvokeEvent,
+} from "electron";
 import type {
   TerminalCreateOptions,
   TerminalCreated,
@@ -8,6 +12,8 @@ import type {
   DapResponse,
   DebugSessionInfo,
 } from "../../shared/dap";
+import type { WorkspaceAccessController } from "./workspace-access";
+import type { IpcRegistration } from "./ipc-security";
 
 /**
  * Passed to every service's `register` function. Keeps services decoupled from
@@ -15,7 +21,7 @@ import type {
  * renderer.
  */
 export interface ServiceContext {
-  ipcMain: IpcMain;
+  ipcMain: IpcRegistration;
   /** Push an event to the focused renderer (no-op if the window is gone). */
   send(channel: string, ...args: unknown[]): void;
   getWindow(): BrowserWindow | null;
@@ -28,7 +34,9 @@ export interface ServiceContext {
   /** Development-only, read-only extension registry root. */
   extensionRegistryDir?: string;
   /** Runtime supplies this to bind privileged invokes to the workbench main frame. */
-  isTrustedSender(event: IpcMainInvokeEvent): boolean;
+  isTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): boolean;
+  /** Main-process authority for workspace and native-dialog file grants. */
+  workspaceAccess?: WorkspaceAccessController;
   terminal?: {
     create(options: TerminalCreateOptions): TerminalCreated;
     kill(id: string): void;

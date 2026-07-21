@@ -113,4 +113,73 @@ describe("listWorkspaceFiles", () => {
     expect(await listWorkspaceFiles("/root")).toEqual(["/root/2"]);
     expect(await listWorkspaceFiles("/root", 8000, 0)).toEqual(["/root/3"]);
   });
+
+  it("shares concurrent scans instead of multiplying directory IPC", async () => {
+    let reads = 0;
+    let releaseRead = false;
+    let resolveRoot: ((value: DirListing) => void) | undefined;
+    vi.stubGlobal("window", {
+      logos: {
+        fs: {
+          readDir: async (path: string): Promise<DirListing> => {
+            reads += 1;
+            if (path.endsWith("/release")) releaseRead = true;
+            return new Promise<DirListing>((resolve) => {
+              resolveRoot = resolve;
+            });
+          },
+        },
+      },
+    });
+
+    const first = listWorkspaceFiles("/concurrent");
+    const second = listWorkspaceFiles("/concurrent");
+    expect(reads).toBe(1);
+    resolveRoot?.({
+      path: "/concurrent",
+      entries: [
+        { name: "release", path: "/concurrent/release", type: "directory" },
+        { name: "index.ts", path: "/concurrent/index.ts", type: "file" },
+      ],
+    });
+
+    expect(await first).toEqual(["/concurrent/index.ts"]);
+    expect(await second).toEqual(["/concurrent/index.ts"]);
+    expect(reads).toBe(1);
+    expect(releaseRead).toBe(false);
+  });
+
+  it("does not let an invalidated scan overwrite a newer cache entry", async () => {
+    const resolvers: Array<(value: DirListing) => void> = [];
+    let reads = 0;
+    vi.stubGlobal("window", {
+      logos: {
+        fs: {
+          readDir: async () => {
+            reads += 1;
+            return new Promise<DirListing>((resolve) => resolvers.push(resolve));
+          },
+        },
+      },
+    });
+
+    const stale = listWorkspaceFiles("/root");
+    invalidateWorkspaceFiles("/root");
+    const current = listWorkspaceFiles("/root");
+    expect(reads).toBe(2);
+
+    resolvers[1]?.({
+      path: "/root",
+      entries: [file("new.ts", "/root/new.ts")],
+    });
+    expect(await current).toEqual(["/root/new.ts"]);
+
+    resolvers[0]?.({
+      path: "/root",
+      entries: [file("old.ts", "/root/old.ts")],
+    });
+    expect(await stale).toEqual(["/root/old.ts"]);
+    expect(await listWorkspaceFiles("/root")).toEqual(["/root/new.ts"]);
+    expect(reads).toBe(2);
+  });
 });

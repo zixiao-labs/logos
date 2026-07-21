@@ -1,8 +1,8 @@
 # Logos 扩展边界与沙箱架构
 
-> 状态：提案（安全基线）
-> 日期：2026-07-19
-> 参考实现：本地 VS Code 仓库 `be161a6b320`
+> 状态：安全基线（Extension Host 仍在规划）
+> 日期：2026-07-21
+> 参考实现：初始审计 `be161a6b320`；当前本地 VS Code 对照 `41fe30d01a19`
 > 适用范围：声明式扩展、Wasm 扩展、VS Code Web/Node 兼容扩展、扩展 WebView、LSP/DAP 等扩展子进程
 
 ## 1. 结论
@@ -29,22 +29,17 @@ Logos 不应把“Extension Host 是独立进程”误当成安全沙箱。安�
 
 ## 2. 当前基线与必须先解决的问题
 
-当前仓库尚未实现 Extension Host。现有代码可作为受信任工作台功能的原型，但不能直接暴露给扩展：
+当前仓库仍未实现 Extension Host，但已经具有扩展包安全基础和工作台 workspace 边界：
 
-- `src/electron/main.ts` 已为主窗口显式设置 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false` 和 `webviewTag: false`。主窗口还拒绝新窗口、非工作台导航、session 权限请求和 `will-attach-webview`；这些是已经落地的 renderer 边界。
-- `src/electron/preload.ts` 将文件、终端、Git、Agent、LSP、DAP 等完整能力暴露为 `window.logos`。一旦工作台 renderer 出现 XSS，攻击面接近用户权限。
-- `src/electron/services/fs.ts` 接受调用方提供的绝对路径，没有工作区边界、调用者身份或逐操作能力检查。该服务不能复用为扩展文件 API。
-- `src/components/EditorArea.tsx` 仍保留直接渲染 `<webview src={active.url}>` 的路径。当前 `webviewTag: false` 和 `will-attach-webview` 会阻止它成为可用的 guest，但这段 UI 实现仍须在未来启用 Web 内容前替换为受控视图，不能视为已完成的 WebView 边界。
-- IPC channel 虽然集中定义，扩展 registry IPC 也已校验主窗口 main frame，但其余 handler 尚未系统校验 `event.senderFrame`、来源窗口、payload schema、大小和频率。
+- manifest/registry 使用有大小和结构上限的严格 schema；本地开发 registry 实现摘要校验、安全 ZIP 检查、只读内容寻址安装和安装记录。只有声明式 runtime 可安装，可执行 runtime 失败关闭。
+- 主窗口使用 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false` 和 `webviewTag: false`，强制工作台 CSP，并拒绝新窗口、非工作台导航、session 权限请求和 `will-attach-webview`。生产构建只按生成 HTML 的 SHA-256 放行内联启动脚本；开发态仅为本地 Nasti bootstrap 放行内联脚本。
+- 集中 IPC 注册层要求所有 renderer→main channel 预先声明 schema，并统一校验主窗口 main frame、结构/大小和速率；未知 channel 在注册时失败。
+- `WorkspaceAccessController` 将文件服务限制到 canonical workspace 或原生对话框授予的精确路径，拒绝任意 `workspace.setRoot`、路径前缀混淆和指向工作区外的 symlink。Git、终端 cwd、Agent cwd、LSP 与部分调试入口也绑定当前 workspace。
+- `EditorArea` 的页面内 `<webview>` 路径和对应 JSX 类型已删除。通用外部打开只允许规范化 HTTPS/`mailto:`，禁止 `file:`/HTTP，并通过原生确认。
 
-在接入任何第三方扩展前，工作台本身仍应完成以下 P0 加固：
+这些工作台服务仍不能复用为扩展 API：它们暴露真实绝对路径并面向第一方工作台语义。未来 Extension Host 只能通过连接绑定身份的虚拟 URI broker 使用能力。
 
-- 为主窗口设置 CSP；保留并回归测试已经落地的 `will-navigate`、`setWindowOpenHandler` 和 session 权限拒绝策略。
-- 所有 IPC handler 校验发送者，使用严格 schema，并把 UI 文件操作限制在当前工作区或用户通过系统对话框授予的路径。
-- 删除 `EditorArea` 中页面内 `<webview>` 路径；需要 Web 内容时改用宿主创建的 `WebContentsView`/受控 renderer，并让普通网页浏览与扩展 WebView 使用不同的 session 和协议。
-- `shell.openExternal` 只接受经过解析、规范化、策略允许且由用户动作触发的 URL；`file:` 不走通用外部打开 API。
-
-这些是工作台安全基线，不等同于扩展沙箱。
+剩余的工作台风险是第一方 terminal/debug/agent 启动能力。preload 无法提供不可伪造的 DOM user-gesture 证明；在引入任何第三方 Web 内容前，仍须用主进程授权状态和 Workspace Trust 收口这些高风险启动动作。详细现状和交付拆分见 [`extension-host-implementation-plan.md`](./extension-host-implementation-plan.md)。
 
 ## 3. 从 VS Code 借鉴什么、改进什么
 
@@ -260,7 +255,7 @@ Installer 把外部格式转换为排序、去歧义的内部 IR 后再签名/�
 无需提示、自动提供：
 
 - 读取自己的已验证只读包。
-- 访问自己的 namespaced storage（建议默认 50 MiB，可由产品策略调整）。
+- storage broker/WIT 在 Wasm v1 之后交付并启用相应 capability 后，访问自己的 namespaced storage（建议默认 50 MiB，可由产品策略调整）；Wasm v1 不自动获得 storage。
 - 写入带扩展 ID 的限速日志。
 - 单调时钟、受控 wall clock、CSPRNG。
 - 注册清单已声明的编辑器贡献。
@@ -504,12 +499,11 @@ VS Code 兼容 RPC 在适配层结束，内部 broker 不直接接受 VS Code �
 
 ### Phase 0：工作台安全基线
 
-- 已落地：主 renderer 使用 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false`、`webviewTag: false`，并拒绝新窗口、非工作台导航、session 权限请求和 `will-attach-webview`。
-- 仍需完成：设置 CSP；为全部 IPC 增加 sender、schema 和限流约束；将 UI 文件 API 限制在工作区或用户明确授予的路径。
-- 仍需完成：移除 `EditorArea` 的直接 `<webview>` 路径并建立受控 Web 内容边界。
-- 仍需完成：建立覆盖上述边界的安全回归测试。
+- 已落地：Chromium sandbox/context isolation、导航/弹窗/权限拒绝、强制 CSP、集中 IPC sender/schema/大小/限流、workspace/dialog file authority、外部 URL 原生确认和页面内 `<webview>` 移除。
+- 已落地：覆盖未知 IPC、非 main-frame、超大载荷、洪泛、任意 workspace root、路径前缀混淆、外部 symlink 和对话框授权撤销的安全回归测试。
+- 接入第三方 Web 内容前仍需完成：第一方 terminal/debug/agent 高风险启动动作与主进程授权状态、Workspace Trust 的绑定。
 
-**目标退出条件（当前尚未达到）**：工作台 renderer XSS 不能直接获得 Node/Electron、shell 或工作区外文件。当前 Chromium sandbox 已阻止 renderer 直接获得 Node/Electron，但 preload 暴露的高权限 IPC、未统一收口的 sender/schema 校验和未限制到工作区的文件服务仍使该退出条件不成立。
+**当前退出条件**：renderer 不能直接获得 Node/Electron 或工作区外文件，未声明/畸形 IPC 失败关闭；但工作台 renderer 仍能请求第一方 shell/调试/Agent 能力，因此“renderer XSS 不能获得 shell”的完整条件尚未达到。此缺口不允许用 CSP 或 sender 校验替代，也不阻塞继续开发无代码声明式贡献；它阻塞第三方 Web 内容进入工作台 renderer。
 
 ### Phase 1：包与声明式贡献
 
@@ -579,7 +573,7 @@ VS Code 兼容 RPC 在适配层结束，内部 broker 不直接接受 VS Code �
 
 ## 20. 参考资料
 
-本地 VS Code 参考（commit `be161a6b320`）：
+本地 VS Code 参考（初始审计 `be161a6b320`，当前复核 `41fe30d01a19`）：
 
 - `src/vs/platform/extensions/electron-main/extensionHostStarter.ts`
 - `src/vs/workbench/services/extensions/electron-browser/localProcessExtensionHost.ts`

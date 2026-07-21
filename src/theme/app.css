@@ -2005,12 +2005,6 @@ textarea.field {
   color: var(--accent);
 }
 
-.webview-host {
-  width: 100%;
-  height: 100%;
-  border: none;
-}
-
 .search-box {
   padding: 8px 12px;
 }

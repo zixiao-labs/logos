@@ -2,15 +2,19 @@
 const SKIP = new Set([
   "node_modules",
   ".git",
+  ".nasti",
   "dist",
   "out",
   "build",
+  "release",
+  "coverage",
   ".next",
   ".cache",
   "target",
 ]);
 
 const cache = new Map<string, { files: string[]; at: number }>();
+const pending = new Map<string, Promise<string[]>>();
 
 async function walk(dir: string, acc: string[], limit: number): Promise<void> {
   if (acc.length >= limit) return;
@@ -38,13 +42,32 @@ export async function listWorkspaceFiles(
 ): Promise<string[]> {
   const cached = cache.get(root);
   if (cached && Date.now() - cached.at < maxAgeMs) return cached.files;
-  const files: string[] = [];
-  await walk(root, files, limit);
-  cache.set(root, { files, at: Date.now() });
-  return files;
+  const inFlight = pending.get(root);
+  if (inFlight) return inFlight;
+
+  const scan = (async () => {
+    const files: string[] = [];
+    await walk(root, files, limit);
+    return files;
+  })();
+  pending.set(root, scan);
+  try {
+    const files = await scan;
+    if (pending.get(root) === scan) {
+      cache.set(root, { files, at: Date.now() });
+    }
+    return files;
+  } finally {
+    if (pending.get(root) === scan) pending.delete(root);
+  }
 }
 
 export function invalidateWorkspaceFiles(root?: string) {
-  if (root) cache.delete(root);
-  else cache.clear();
+  if (root) {
+    cache.delete(root);
+    pending.delete(root);
+  } else {
+    cache.clear();
+    pending.clear();
+  }
 }

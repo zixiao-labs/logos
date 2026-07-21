@@ -39,7 +39,7 @@ export function registerTerminalService(
       name: "xterm-256color",
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
-      cwd: opts.cwd || os.homedir(),
+      cwd: opts.cwd || ctx.workspaceAccess?.currentRoot() || os.homedir(),
       env,
     });
     terminals.set(id, proc);
