@@ -65,8 +65,7 @@ export type TabKind =
   | "preview"
   | "settings"
   | "extensions"
-  | "welcome"
-  | "webview";
+  | "welcome";
 
 export interface EditorTab {
   id: string;
@@ -76,7 +75,6 @@ export interface EditorTab {
   language?: string;
   dirty?: boolean;
   externalChange?: "changed" | "deleted";
-  url?: string;
   content?: string;
   debugPosition?: { line: number; column: number };
   debugSessionId?: string;
@@ -303,7 +301,6 @@ interface LogosState {
   openGitDiff(path: string, staged: boolean): void;
   openSpecial(kind: "settings" | "extensions" | "welcome"): void;
   openPreview(path: string): void;
-  openWebview(url: string, name: string): void;
   closeTab(id: string): void;
   setActiveTab(id: string): void;
   setDirty(id: string, dirty: boolean): void;
@@ -1238,15 +1235,6 @@ export const useStore = create<LogosState>((set, get) => ({
           ...s.tabs,
           { id, kind: "preview", name: `Preview ${basename(path)}`, path },
         ],
-      }));
-    }
-    set({ activeTabId: id });
-  },
-  openWebview(url, name) {
-    const id = `webview:${url}`;
-    if (!get().tabs.find((t) => t.id === id)) {
-      set((s) => ({
-        tabs: [...s.tabs, { id, kind: "webview", name, url }],
       }));
     }
     set({ activeTabId: id });

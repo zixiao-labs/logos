@@ -110,6 +110,7 @@ export const CH = {
   lspFileOperation: "lsp:fileOperation",
   lspResourceOperation: "lsp:resourceOperation",
   lspDirectoryIsEmpty: "lsp:directoryIsEmpty",
+  lspCheckUpdates: "lsp:checkUpdates",
   lspClientRequest: "lsp:clientRequest", // push (server request -> renderer)
   lspClientRequestCancel: "lsp:clientRequestCancel", // push
   lspClientResponse: "lsp:clientResponse",

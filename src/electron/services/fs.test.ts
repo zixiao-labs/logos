@@ -18,6 +18,7 @@ import type {
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { registerFsService } from "./fs";
+import { WorkspaceAccessController } from "./workspace-access";
 
 describe("filesystem service", () => {
   let root: string;
@@ -27,11 +28,14 @@ describe("filesystem service", () => {
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "logos-fs-"));
     service = createIpcHarness();
+    const workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(root);
     cleanup = registerFsService({
       ipcMain: service.ipcMain,
       userDataDir: root,
       getWindow: () => null,
       isTrustedSender: () => true,
+      workspaceAccess,
       send: () => undefined,
     } satisfies ServiceContext);
   });
@@ -72,7 +76,7 @@ describe("filesystem service", () => {
     expect(await service.invoke<string>(CH.fsReadFile, original)).toBe("content");
     expect(await service.invoke<boolean>(CH.fsExists, original)).toBe(true);
     expect(await service.invoke<FileStat>(CH.fsStat, original)).toMatchObject({
-      path: original,
+      path: await fs.realpath(original),
       type: "file",
       size: 7,
     });

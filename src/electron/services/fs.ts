@@ -81,20 +81,29 @@ async function readDir(dirPath: string): Promise<DirListing> {
 
 export function registerFsService(ctx: ServiceContext): () => void {
   const { ipcMain } = ctx;
+  const workspaceAccess = ctx.workspaceAccess;
+  if (!workspaceAccess) throw new Error("Workspace access controller is required.");
   const watchers = new Map<string, { watcher: FSWatcher; references: number }>();
   const conditionalWrites = new Map<string, Promise<ConditionalWriteResult>>();
   // Coalesce rapid-fire fs events so we don't flood the renderer.
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
 
-  ipcMain.handle(CH.fsReadDir, (_e, p: string) => readDir(p));
+  ipcMain.handle(CH.fsReadDir, async (_e, p: string) =>
+    readDir(await workspaceAccess.assertPath(p)),
+  );
 
-  ipcMain.handle(CH.fsReadFile, (_e, p: string) => fs.readFile(p, "utf8"));
+  ipcMain.handle(CH.fsReadFile, async (_e, p: string) =>
+    fs.readFile(await workspaceAccess.assertPath(p), "utf8"),
+  );
 
-  ipcMain.handle(CH.fsReadFileSnapshot, (_e, p: string) => readFileSnapshot(p));
+  ipcMain.handle(CH.fsReadFileSnapshot, async (_e, p: string) =>
+    readFileSnapshot(await workspaceAccess.assertPath(p)),
+  );
 
   ipcMain.handle(CH.fsWriteFile, async (_e, p: string, content: string) => {
-    await fs.mkdir(path.dirname(p), { recursive: true });
-    await fs.writeFile(p, content, "utf8");
+    const target = await workspaceAccess.assertPath(p, "write");
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, content, "utf8");
   });
 
   ipcMain.handle(
@@ -105,6 +114,7 @@ export function registerFsService(ctx: ServiceContext): () => void {
       content: string,
       expectedRevision: string,
     ): Promise<ConditionalWriteResult> => {
+      p = await workspaceAccess.assertPath(p, "write");
       const queueKey = await conditionalWriteKey(p);
       const previous =
         conditionalWrites.get(queueKey)?.catch(() => undefined) ?? Promise.resolve();
@@ -130,6 +140,7 @@ export function registerFsService(ctx: ServiceContext): () => void {
             const mode = (await fs.stat(target)).mode & 0o7777;
             await fs.chmod(temp, mode);
           }
+          await workspaceAccess.assertPath(target, "write");
           await fs.rename(temp, target);
           return {
             status: "written-optimistically",
@@ -150,9 +161,10 @@ export function registerFsService(ctx: ServiceContext): () => void {
   );
 
   ipcMain.handle(CH.fsStat, async (_e, p: string): Promise<FileStat> => {
-    const s = await fs.stat(p);
+    const target = await workspaceAccess.assertPath(p);
+    const s = await fs.stat(target);
     return {
-      path: p,
+      path: target,
       type: s.isDirectory() ? "directory" : "file",
       size: s.size,
       mtimeMs: s.mtimeMs,
@@ -160,31 +172,41 @@ export function registerFsService(ctx: ServiceContext): () => void {
   });
 
   ipcMain.handle(CH.fsCreateFile, async (_e, p: string, content = "") => {
-    await fs.mkdir(path.dirname(p), { recursive: true });
+    const target = await workspaceAccess.assertPath(p, "write");
+    await fs.mkdir(path.dirname(target), { recursive: true });
     // wx => fail if it already exists.
-    await fs.writeFile(p, content, { encoding: "utf8", flag: "wx" });
+    await fs.writeFile(target, content, { encoding: "utf8", flag: "wx" });
   });
 
-  ipcMain.handle(CH.fsCreateDir, (_e, p: string) =>
-    fs.mkdir(p, { recursive: true }).then(() => undefined),
+  ipcMain.handle(CH.fsCreateDir, async (_e, p: string) => {
+    await fs.mkdir(await workspaceAccess.assertPath(p, "write"), {
+      recursive: true,
+    });
+  });
+
+  ipcMain.handle(CH.fsRename, async (_e, from: string, to: string) =>
+    fs.rename(
+      await workspaceAccess.assertPath(from, "write"),
+      await workspaceAccess.assertPath(to, "write"),
+    ),
   );
 
-  ipcMain.handle(CH.fsRename, (_e, from: string, to: string) =>
-    fs.rename(from, to),
+  ipcMain.handle(CH.fsDelete, async (_e, p: string) =>
+    fs.rm(await workspaceAccess.assertPath(p, "write"), {
+      recursive: true,
+      force: true,
+    }),
   );
 
-  ipcMain.handle(CH.fsDelete, (_e, p: string) =>
-    fs.rm(p, { recursive: true, force: true }),
-  );
-
-  ipcMain.handle(CH.fsExists, (_e, p: string) =>
+  ipcMain.handle(CH.fsExists, async (_e, p: string) =>
     fs
-      .access(p)
+      .access(await workspaceAccess.assertPath(p))
       .then(() => true)
       .catch(() => false),
   );
 
-  ipcMain.handle(CH.fsWatch, (_e, root: string) => {
+  ipcMain.handle(CH.fsWatch, async (_e, root: string) => {
+    root = await workspaceAccess.assertPath(root);
     const existing = watchers.get(root);
     if (existing) {
       existing.references++;
@@ -207,6 +229,11 @@ export function registerFsService(ctx: ServiceContext): () => void {
             key,
             setTimeout(async () => {
               pending.delete(key);
+              try {
+                await workspaceAccess.assertPath(full);
+              } catch {
+                return;
+              }
               const exists = await fs
                 .access(full)
                 .then(() => true)
@@ -234,7 +261,8 @@ export function registerFsService(ctx: ServiceContext): () => void {
     }
   });
 
-  ipcMain.handle(CH.fsUnwatch, (_e, root: string) => {
+  ipcMain.handle(CH.fsUnwatch, async (_e, root: string) => {
+    root = await workspaceAccess.assertPath(root);
     const entry = watchers.get(root);
     if (!entry) return;
     entry.references--;

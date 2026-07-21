@@ -72,9 +72,7 @@ export function EditorArea() {
                     ? "extensions"
                     : tab.kind === "preview"
                       ? "preview"
-                      : tab.kind === "webview"
-                        ? "globe"
-                        : tab.kind === "diff"
+                      : tab.kind === "diff"
                           ? "git"
                         : "file"
               }
@@ -150,9 +148,6 @@ export function EditorArea() {
         {active?.kind === "extensions" && <ExtensionsView />}
         {active?.kind === "preview" && active.path && (
           <MarkdownPreview path={active.path} />
-        )}
-        {active?.kind === "webview" && active.url && (
-          <webview src={active.url} className="webview-host" />
         )}
         {!active && <div className="welcome">{t("editor.noTabs")}</div>}
       </div>
