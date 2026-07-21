@@ -14,12 +14,18 @@ import { CH } from "../../shared/channels";
 import type {
   GitBlameLine,
   GitFileDiff,
+  GitGraphEntry,
   GitLogEntry,
   GitStatus,
 } from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
-import { parseGitBlamePorcelain, registerGitService } from "./git";
+import {
+  parseGitBlamePorcelain,
+  parseGitGraph,
+  registerGitService,
+  shouldRefreshGit,
+} from "./git";
 
 const exec = promisify(execFile);
 
@@ -27,6 +33,7 @@ describe("git service", () => {
   let root: string;
   let cleanup: () => void;
   let service: ReturnType<typeof createIpcHarness>;
+  let gitChanged: ((root: string) => void) | undefined;
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "logos-git-"));
@@ -36,7 +43,9 @@ describe("git service", () => {
       userDataDir: root,
       getWindow: () => null,
       isTrustedSender: () => true,
-      send: () => undefined,
+      send: (channel, changedRoot) => {
+        if (channel === CH.gitChanged) gitChanged?.(String(changedRoot));
+      },
     } satisfies ServiceContext);
   });
 
@@ -57,6 +66,53 @@ describe("git service", () => {
     expect(
       await service.invoke(CH.gitBlame, root, path.join(root, "note.txt"), 1),
     ).toBeNull();
+  });
+
+  it("parses graph records and filters repository watch events", () => {
+    expect(
+      parseGitGraph(
+        "abcdef123456789\u001fparent1 parent2\u001fHEAD -> main, tag: v1\u001fSubject\u001fAuthor\u001f2026-07-21T00:00:00Z\u001e",
+      ),
+    ).toEqual([
+      {
+        hash: "abcdef123456789",
+        shortHash: "abcdef1",
+        parents: ["parent1", "parent2"],
+        refs: ["HEAD -> main", "tag: v1"],
+        message: "Subject",
+        author: "Author",
+        date: "2026-07-21T00:00:00Z",
+      },
+    ]);
+    expect(shouldRefreshGit("src/app.ts")).toBe(true);
+    expect(shouldRefreshGit(".git/HEAD")).toBe(true);
+    expect(shouldRefreshGit(".git/objects/12/object")).toBe(false);
+    expect(shouldRefreshGit("node_modules/pkg/index.js")).toBe(false);
+  });
+
+  it("returns an empty graph before the first commit and preserves unrelated errors", async () => {
+    await expect(service.invoke(CH.gitGraph, root, 10)).rejects.toThrow();
+    await service.invoke(CH.gitInit, root);
+    await expect(
+      service.invoke<GitGraphEntry[]>(CH.gitGraph, root, 10),
+    ).resolves.toEqual([]);
+  });
+
+  it("pushes a debounced refresh when a watched working-tree file changes", async () => {
+    const changed = new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for the Git watcher")),
+        3_000,
+      );
+      gitChanged = (changedRoot) => {
+        clearTimeout(timeout);
+        resolve(changedRoot);
+      };
+    });
+    await service.invoke(CH.gitWatch, [root]);
+    await fs.writeFile(path.join(root, "watched.txt"), "changed", "utf8");
+
+    await expect(changed).resolves.toBe(root);
   });
 
   it("returns committed and working-tree blame for one line", async () => {
@@ -315,5 +371,18 @@ describe("git service", () => {
         false,
       ),
     ).toMatchObject({ original: "", modified: "new file\n", staged: false });
+  });
+
+  it("returns commit topology and refs for Git Graph", async () => {
+    await service.invoke(CH.gitInit, root);
+    await exec("git", ["-C", root, "config", "user.name", "Logos Tests"]);
+    await exec("git", ["-C", root, "config", "user.email", "tests@logos.local"]);
+    await fs.writeFile(path.join(root, "graph.txt"), "graph\n", "utf8");
+    await service.invoke(CH.gitStage, root, ["graph.txt"]);
+    await service.invoke(CH.gitCommit, root, "Graph commit");
+
+    const graph = await service.invoke<GitGraphEntry[]>(CH.gitGraph, root, 10);
+    expect(graph[0]).toMatchObject({ message: "Graph commit", parents: [] });
+    expect(graph[0]?.refs.some(ref => ref.includes("HEAD"))).toBe(true);
   });
 });

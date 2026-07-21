@@ -50,6 +50,16 @@ describe("Logos agent contract", () => {
     expect(prompt).toContain("Finish is the only way to end the loop");
   });
 
+  it("lists every multi-root workspace folder and explains absolute paths", () => {
+    const prompt = buildLogosAgentSystemPrompt({
+      workspace: ["/workspace/app", "/workspace/docs"],
+      mode: "default",
+    });
+    expect(prompt).toContain("1. /workspace/app");
+    expect(prompt).toContain("2. /workspace/docs");
+    expect(prompt).toContain("Use absolute paths to work in another root");
+  });
+
   it("publishes the GPT-5.6 series, modes, and effort capabilities", () => {
     expect(DEFAULT_LOGOS_MODEL).toBe("gpt-5.6-sol");
     expect(LOGOS_OPENAI_MODELS.slice(0, 12).map((model) => model.value)).toEqual([

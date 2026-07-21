@@ -197,7 +197,21 @@ export class AcpAgentRuntime {
       throw new Error("ACP runtime configuration is missing");
     }
     const server = request.runtime.server;
-    request = { ...request, cwd: await fs.realpath(request.cwd) };
+    const cwd = await fs.realpath(request.cwd);
+    const additionalDirectories = (
+      await Promise.all(
+        (request.additionalDirectories ?? []).map((directory) =>
+          fs.realpath(directory),
+        ),
+      )
+    ).filter((directory, index, directories) =>
+      directory !== cwd && directories.indexOf(directory) === index,
+    );
+    request = {
+      ...request,
+      cwd,
+      additionalDirectories,
+    };
     const sdk = await importAcp();
     hooks.emit({
       kind: "system",
@@ -489,7 +503,13 @@ export class AcpAgentRuntime {
   private async ensureSession(): Promise<void> {
     if (this.acpSessionId) return;
     let setup: SessionSetup;
-    const common = { cwd: this.request.cwd, mcpServers: [] };
+    const common = {
+      cwd: this.request.cwd,
+      mcpServers: [],
+      ...(this.request.additionalDirectories?.length
+        ? { additionalDirectories: this.request.additionalDirectories }
+        : {}),
+    };
     if (this.request.resume && this.capabilities.sessionCapabilities?.resume) {
       const resumed: ResumeSessionResponse = await withSetupTimeout(
         this.connection.resumeSession({
@@ -693,7 +713,7 @@ export class AcpAgentRuntime {
 
   async createTerminal(input: CreateTerminalRequest): Promise<{ terminalId: string }> {
     const cwd = await resolveWorkspacePath(
-      this.request.cwd,
+      [this.request.cwd, ...(this.request.additionalDirectories ?? [])],
       input.cwd ?? this.request.cwd,
       true,
     );
@@ -827,7 +847,8 @@ function createClient(
           };
     },
     async readTextFile(input) {
-      const filePath = await resolveWorkspacePath(request.cwd, input.path, true);
+      const roots = [request.cwd, ...(request.additionalDirectories ?? [])];
+      const filePath = await resolveWorkspacePath(roots, input.path, true);
       const source = await readBoundedTextFile(filePath);
       const lines = source.split("\n");
       const start = Math.max((input.line ?? 1) - 1, 0);
@@ -836,7 +857,11 @@ function createClient(
       };
     },
     async writeTextFile(input) {
-      await writeWorkspaceTextFile(request.cwd, input.path, input.content);
+      await writeWorkspaceTextFile(
+        [request.cwd, ...(request.additionalDirectories ?? [])],
+        input.path,
+        input.content,
+      );
       return {};
     },
     createTerminal: (input) => runtime().createTerminal(input),
@@ -1076,22 +1101,32 @@ function assertInsideWorkspace(root: string, target: string): void {
 }
 
 async function resolveWorkspacePath(
-  root: string,
+  roots: readonly string[],
   target: string,
   mustExist: boolean,
 ): Promise<string> {
-  const resolvedRoot = path.resolve(root);
-  if ((await fs.realpath(resolvedRoot)) !== resolvedRoot) {
-    throw new Error("ACP workspace changed after the session started");
+  const resolvedRoots = roots.map((root) => path.resolve(root));
+  for (const root of resolvedRoots) {
+    if ((await fs.realpath(root)) !== root) {
+      throw new Error("ACP workspace changed after the session started");
+    }
   }
-  const resolvedTarget = path.resolve(resolvedRoot, target);
-  assertInsideWorkspace(resolvedRoot, resolvedTarget);
+  const resolvedTarget = path.isAbsolute(target)
+    ? path.resolve(target)
+    : path.resolve(resolvedRoots[0], target);
+  if (!path.isAbsolute(target) && !workspaceRootForPath(resolvedRoots, resolvedTarget)) {
+    throw new Error(`ACP access outside workspace denied: ${target}`);
+  }
+  let missingError: unknown;
   try {
     const realTarget = await fs.realpath(resolvedTarget);
-    assertInsideWorkspace(resolvedRoot, realTarget);
+    if (!workspaceRootForPath(resolvedRoots, realTarget)) {
+      throw new Error(`ACP access outside workspace denied: ${target}`);
+    }
     return realTarget;
   } catch (error) {
-    if (mustExist || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    missingError = error;
   }
 
   let existing = path.dirname(resolvedTarget);
@@ -1099,9 +1134,13 @@ async function resolveWorkspacePath(
   while (true) {
     try {
       const realParent = await fs.realpath(existing);
-      assertInsideWorkspace(resolvedRoot, realParent);
+      const parentRoot = workspaceRootForPath(resolvedRoots, realParent);
+      if (!parentRoot) {
+        throw new Error(`ACP access outside workspace denied: ${target}`);
+      }
       const candidate = path.join(realParent, ...missing.reverse());
-      assertInsideWorkspace(resolvedRoot, candidate);
+      assertInsideWorkspace(parentRoot, candidate);
+      if (mustExist) throw missingError;
       return candidate;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -1114,16 +1153,22 @@ async function resolveWorkspacePath(
 }
 
 async function writeWorkspaceTextFile(
-  root: string,
+  roots: readonly string[],
   target: string,
   content: string,
 ): Promise<void> {
-  const resolvedRoot = path.resolve(root);
-  const candidate = await resolveWorkspacePath(resolvedRoot, target, false);
+  const resolvedRoots = roots.map((root) => path.resolve(root));
+  const candidate = await resolveWorkspacePath(resolvedRoots, target, false);
+  const candidateRoot = workspaceRootForPath(resolvedRoots, candidate);
+  if (!candidateRoot) throw new Error(`ACP access outside workspace denied: ${target}`);
   await fs.mkdir(path.dirname(candidate), { recursive: true });
-  const parent = await resolveWorkspacePath(resolvedRoot, path.dirname(candidate), true);
+  const parent = await resolveWorkspacePath(
+    resolvedRoots,
+    path.dirname(candidate),
+    true,
+  );
   const destination = path.join(parent, path.basename(candidate));
-  assertInsideWorkspace(resolvedRoot, destination);
+  assertInsideWorkspace(candidateRoot, destination);
   const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
   const handle = await fs.open(
     destination,
@@ -1138,6 +1183,23 @@ async function writeWorkspaceTextFile(
   } finally {
     await handle.close();
   }
+}
+
+function workspaceRootForPath(
+  roots: readonly string[],
+  candidate: string,
+): string | null {
+  let match: string | null = null;
+  for (const root of roots) {
+    const relative = path.relative(root, candidate);
+    const inside =
+      relative === "" ||
+      (relative !== ".." &&
+        !relative.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relative));
+    if (inside && (!match || root.length > match.length)) match = root;
+  }
+  return match;
 }
 
 function isAuthError(error: unknown): boolean {

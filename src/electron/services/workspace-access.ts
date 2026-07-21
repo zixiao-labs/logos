@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, type Stats } from "node:fs";
 import path from "node:path";
 
 export type WorkspaceAccessMode = "read" | "write";
@@ -10,7 +10,12 @@ interface PathGrant {
 
 function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
 }
 
 async function canonicalizeCandidate(candidate: string): Promise<string> {
@@ -41,11 +46,11 @@ async function canonicalizeCandidate(candidate: string): Promise<string> {
 
 /**
  * Main-process authority for workbench file access. Renderer-provided paths are
- * accepted only below the canonical workspace root or through an exact path
+ * accepted only below a canonical workspace root or through an exact path
  * grant created by a native file dialog.
  */
 export class WorkspaceAccessController {
-  private root: string | null = null;
+  private roots: string[] = [];
   private grants: PathGrant[] = [];
   private initialization: Promise<void> = Promise.resolve();
 
@@ -54,7 +59,11 @@ export class WorkspaceAccessController {
   }
 
   currentRoot(): string | null {
-    return this.root;
+    return this.roots[0] ?? null;
+  }
+
+  currentRoots(): readonly string[] {
+    return [...this.roots];
   }
 
   async canonicalize(candidate: string): Promise<string> {
@@ -62,17 +71,27 @@ export class WorkspaceAccessController {
   }
 
   async restoreWorkspaceRoot(candidate: string | null): Promise<string | null> {
-    if (candidate == null) {
-      this.root = null;
-      this.grants = [];
-      return null;
+    const roots = await this.restoreWorkspaceRoots(candidate ? [candidate] : []);
+    return roots[0] ?? null;
+  }
+
+  async restoreWorkspaceRoots(candidates: readonly string[]): Promise<string[]> {
+    const roots: string[] = [];
+    for (const candidate of candidates) {
+      let canonical: string;
+      let stat: Stats;
+      try {
+        canonical = await canonicalizeCandidate(candidate);
+        stat = await fs.stat(canonical);
+      } catch {
+        continue;
+      }
+      if (!stat.isDirectory()) throw new Error("Workspace roots must be directories.");
+      if (!roots.includes(canonical)) roots.push(canonical);
     }
-    const canonical = await canonicalizeCandidate(candidate);
-    const stat = await fs.stat(canonical);
-    if (!stat.isDirectory()) throw new Error("Workspace root must be a directory.");
-    this.root = canonical;
+    this.roots = roots;
     this.grants = [];
-    return canonical;
+    return [...roots];
   }
 
   async grantPath(
@@ -99,7 +118,7 @@ export class WorkspaceAccessController {
   ): Promise<string> {
     await this.initialization;
     const canonical = await canonicalizeCandidate(candidate);
-    if (this.root && isInside(this.root, canonical)) return canonical;
+    if (this.roots.some(root => isInside(root, canonical))) return canonical;
     if (
       this.grants.some(
         grant => grant.path === canonical && grant.modes.has(mode),
@@ -112,10 +131,10 @@ export class WorkspaceAccessController {
 
   async assertWorkspaceRoot(candidate: string): Promise<string> {
     await this.initialization;
-    if (!this.root) throw new Error("No workspace is open.");
+    if (this.roots.length === 0) throw new Error("No workspace is open.");
     const canonical = await canonicalizeCandidate(candidate);
-    if (canonical !== this.root) {
-      throw new Error("Request root does not match the current workspace.");
+    if (!this.roots.includes(canonical)) {
+      throw new Error("Request root is not part of the current workspace.");
     }
     return canonical;
   }

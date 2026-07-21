@@ -78,13 +78,14 @@ export interface EditorTab {
   content?: string;
   debugPosition?: { line: number; column: number };
   debugSessionId?: string;
-  diff?: { path: string; staged: boolean };
+  diff?: { root: string; path: string; staged: boolean };
 }
 
 export type SidebarView =
   | "explorer"
   | "search"
   | "git"
+  | "gitGraph"
   | "debug"
   | "extensions"
   | "agent";
@@ -160,6 +161,7 @@ export interface AgentThread {
   runtimeId: string;
   runtimeName?: string;
   workspaceRoot?: string;
+  workspaceFolders?: string[];
   parentId?: string;
   createdAt: number;
   updatedAt: number;
@@ -243,6 +245,7 @@ interface LogosState {
   ready: boolean;
   settings: Settings;
   root: string | null;
+  workspaceFolders: string[];
   recent: string[];
 
   sidebarView: SidebarView;
@@ -264,6 +267,8 @@ interface LogosState {
   git: GitStatus | null;
   /** The current HEAD commit, shown at the top of the Source Control panel. */
   gitHead: GitLogEntry | null;
+  gitRoot: string | null;
+  gitRepositories: Record<string, { status: GitStatus; head: GitLogEntry | null }>;
   currentLineBlame: CurrentLineBlame | null;
   diagnostics: Record<string, Diagnostic[]>;
   /** Language-server status keyed by server id (C1: surfaced in the status bar). */
@@ -296,9 +301,11 @@ interface LogosState {
 
   openFolder(): Promise<void>;
   setRoot(path: string): Promise<void>;
+  addWorkspaceFolder(): Promise<void>;
+  removeWorkspaceFolder(path: string): Promise<void>;
 
   openFile(path: string): void;
-  openGitDiff(path: string, staged: boolean): void;
+  openGitDiff(path: string, staged: boolean, root?: string): void;
   openSpecial(kind: "settings" | "extensions" | "welcome"): void;
   openPreview(path: string): void;
   closeTab(id: string): void;
@@ -319,7 +326,8 @@ interface LogosState {
   closeTerminal(id: string): void;
   setActiveTerminal(id: string): void;
 
-  refreshGit(): Promise<void>;
+  refreshGit(root?: string): Promise<void>;
+  setGitRoot(root: string): void;
   /** Git remote actions shared by the SCM panel and the native menu. */
   gitFetch(): Promise<void>;
   gitPull(): Promise<void>;
@@ -764,6 +772,8 @@ function loadPersistedAgent(): {
         runtimeId: a.runtimeId ?? "claude",
         runtimeName: a.runtimeName,
         workspaceRoot: a.workspaceRoot,
+        workspaceFolders:
+          a.workspaceFolders ?? (a.workspaceRoot ? [a.workspaceRoot] : undefined),
         parentId: a.parentId,
         createdAt: a.createdAt ?? Date.now(),
         updatedAt: a.updatedAt ?? Date.now(),
@@ -806,6 +816,7 @@ function persistAgent(
           runtimeId: a.runtimeId,
           runtimeName: a.runtimeName,
           workspaceRoot: a.workspaceRoot,
+          workspaceFolders: a.workspaceFolders,
           parentId: a.parentId,
           createdAt: a.createdAt,
           updatedAt: a.updatedAt,
@@ -1020,6 +1031,7 @@ export const useStore = create<LogosState>((set, get) => ({
   ready: false,
   settings: { ...DEFAULT_SETTINGS },
   root: null,
+  workspaceFolders: [],
   recent: [],
 
   sidebarView: "explorer",
@@ -1040,6 +1052,8 @@ export const useStore = create<LogosState>((set, get) => ({
 
   git: null,
   gitHead: null,
+  gitRoot: null,
+  gitRepositories: {},
   currentLineBlame: null,
   diagnostics: {},
   lsp: {},
@@ -1058,15 +1072,16 @@ export const useStore = create<LogosState>((set, get) => ({
   paletteOpen: false,
 
   async bootstrap() {
-    const [settings, root, recent, servers, debugSessions, debugAdapters] =
+    const [settings, workspaceFolders, recent, servers, debugSessions, debugAdapters] =
       await Promise.all([
         window.logos.settings.getAll(),
-        window.logos.workspace.getRoot(),
+        window.logos.workspace.getFolders(),
         window.logos.workspace.recent(),
         window.logos.lsp.list().catch(() => []),
         window.logos.debug.list().catch(() => []),
         window.logos.debug.listAdapters().catch(() => []),
       ]);
+    const root = workspaceFolders[0] ?? null;
     const lsp: Record<string, LspProgress> = {};
     for (const s of servers)
       lsp[s.id] = { id: s.id, status: s.status, message: s.message };
@@ -1076,7 +1091,9 @@ export const useStore = create<LogosState>((set, get) => ({
     set((state) => ({
       settings,
       root,
+      workspaceFolders,
       recent,
+      gitRoot: root,
       lsp,
       debug: {
         ...state.debug,
@@ -1088,10 +1105,30 @@ export const useStore = create<LogosState>((set, get) => ({
     }));
 
     window.logos.settings.onChanged((s) => set({ settings: s }));
-    window.logos.workspace.onChanged((r) => {
-      set({ root: r });
+    window.logos.workspace.onChanged((workspace) => {
+      const currentGitRoot = get().gitRoot;
+      const gitRoot =
+        currentGitRoot && workspace.folders.includes(currentGitRoot)
+          ? currentGitRoot
+          : workspace.root;
+      set({
+        root: workspace.root,
+        workspaceFolders: workspace.folders,
+        gitRoot,
+        gitRepositories: Object.fromEntries(
+          Object.entries(get().gitRepositories).filter(([folder]) =>
+            workspace.folders.includes(folder),
+          ),
+        ),
+      });
+      void window.logos.git.watch(workspace.folders);
       void get().refreshGit();
       void get().loadDebugConfigurations();
+    });
+    window.logos.git.onChanged((changedRoot) => {
+      if (get().workspaceFolders.includes(changedRoot)) {
+        void get().refreshGit(changedRoot);
+      }
     });
     window.logos.agent.onEvent((e) => get().applyAgentEvent(e));
     window.logos.debug.onEvent((event) => get().applyDebugEvent(event));
@@ -1105,6 +1142,7 @@ export const useStore = create<LogosState>((set, get) => ({
     if (get().agentSessions.length === 0) get().newAgentSession("Agent 1");
     void get().loadAgentRegistry();
     void get().refreshAgentAuth();
+    void window.logos.git.watch(workspaceFolders);
     if (root) void get().refreshGit();
     void get().loadDebugConfigurations();
   },
@@ -1168,10 +1206,46 @@ export const useStore = create<LogosState>((set, get) => ({
   },
   async setRoot(path) {
     await window.logos.workspace.setRoot(path);
-    const recent = await window.logos.workspace.recent();
-    set({ root: path, recent });
+    const [workspaceFolders, recent] = await Promise.all([
+      window.logos.workspace.getFolders(),
+      window.logos.workspace.recent(),
+    ]);
+    set({
+      root: workspaceFolders[0] ?? null,
+      workspaceFolders,
+      recent,
+      gitRoot: workspaceFolders[0] ?? null,
+    });
+    await window.logos.git.watch(workspaceFolders);
     await get().refreshGit();
     await get().loadDebugConfigurations();
+  },
+
+  async addWorkspaceFolder() {
+    const workspace = await window.logos.workspace.addFolder();
+    if (!workspace) return;
+    const recent = await window.logos.workspace.recent();
+    set({ root: workspace.root, workspaceFolders: workspace.folders, recent });
+    await window.logos.git.watch(workspace.folders);
+    await get().refreshGit();
+  },
+
+  async removeWorkspaceFolder(path) {
+    const workspace = await window.logos.workspace.removeFolder(path);
+    const currentGitRoot = get().gitRoot;
+    const gitRoot =
+      currentGitRoot && workspace.folders.includes(currentGitRoot)
+        ? currentGitRoot
+        : workspace.root;
+    const recent = await window.logos.workspace.recent();
+    set({
+      root: workspace.root,
+      workspaceFolders: workspace.folders,
+      gitRoot,
+      recent,
+    });
+    await window.logos.git.watch(workspace.folders);
+    await get().refreshGit();
   },
 
   openFile(path) {
@@ -1194,17 +1268,17 @@ export const useStore = create<LogosState>((set, get) => ({
       activeTabId: id,
     }));
   },
-  openGitDiff(path, staged) {
-    const root = get().root;
+  openGitDiff(path, staged, requestedRoot) {
+    const root = requestedRoot ?? get().gitRoot ?? get().root;
     if (!root) return;
-    const id = `diff:${staged ? "index" : "worktree"}:${path}`;
+    const id = `diff:${root}:${staged ? "index" : "worktree"}:${path}`;
     const tab: EditorTab = {
       id,
       kind: "diff",
       name: `${basename(path)} (${staged ? "Index" : "Working Tree"})`,
       path: `${root}/${path}`,
       language: languageFromPath(path),
-      diff: { path, staged },
+      diff: { root, path, staged },
     };
     set((state) => ({
       tabs: state.tabs.some((item) => item.id === id)
@@ -1328,42 +1402,83 @@ export const useStore = create<LogosState>((set, get) => ({
     set({ activeTerminalId: id });
   },
 
-  async refreshGit() {
-    const root = get().root;
-    if (!root) {
-      set({ git: null, gitHead: null });
+  async refreshGit(requestedRoot) {
+    const roots = requestedRoot ? [requestedRoot] : get().workspaceFolders;
+    if (roots.length === 0) {
+      set({
+        git: null,
+        gitHead: null,
+        gitRoot: null,
+        gitRepositories: {},
+      });
       return;
     }
-    try {
-      const [git, gitHead] = await Promise.all([
-        window.logos.git.status(root),
-        window.logos.git.head(root).catch(() => null),
-      ]);
-      set({ git, gitHead });
-    } catch {
-      set({ git: null, gitHead: null });
-    }
+    const snapshots = await Promise.all(
+      roots.map(async root => {
+        try {
+          const [status, head] = await Promise.all([
+            window.logos.git.status(root),
+            window.logos.git.head(root).catch(() => null),
+          ]);
+          return { root, status, head };
+        } catch {
+          return { root, status: null, head: null };
+        }
+      }),
+    );
+    set(state => {
+      const gitRepositories = { ...state.gitRepositories };
+      for (const snapshot of snapshots) {
+        if (snapshot.status) {
+          gitRepositories[snapshot.root] = {
+            status: snapshot.status,
+            head: snapshot.head,
+          };
+        } else {
+          delete gitRepositories[snapshot.root];
+        }
+      }
+      const gitRoot =
+        state.gitRoot && state.workspaceFolders.includes(state.gitRoot)
+          ? state.gitRoot
+          : state.workspaceFolders[0] ?? null;
+      const active = gitRoot ? gitRepositories[gitRoot] : undefined;
+      return {
+        gitRepositories,
+        gitRoot,
+        git: active?.status ?? null,
+        gitHead: active?.head ?? null,
+      };
+    });
+  },
+  setGitRoot(root) {
+    const repository = get().gitRepositories[root];
+    set({
+      gitRoot: root,
+      git: repository?.status ?? null,
+      gitHead: repository?.head ?? null,
+    });
   },
   async gitFetch() {
-    const root = get().root;
+    const root = get().gitRoot ?? get().root;
     if (!root) return;
     notifyResult(await window.logos.git.fetch(root), "Fetched");
     await get().refreshGit();
   },
   async gitPull() {
-    const root = get().root;
+    const root = get().gitRoot ?? get().root;
     if (!root) return;
     notifyResult(await window.logos.git.pull(root), "Pulled");
     await get().refreshGit();
   },
   async gitPush() {
-    const root = get().root;
+    const root = get().gitRoot ?? get().root;
     if (!root) return;
     notifyResult(await window.logos.git.push(root), "Pushed");
     await get().refreshGit();
   },
   async gitSync() {
-    const root = get().root;
+    const root = get().gitRoot ?? get().root;
     if (!root) return;
     notifyResult(await window.logos.git.sync(root), "Synced");
     await get().refreshGit();
@@ -2458,6 +2573,7 @@ export const useStore = create<LogosState>((set, get) => ({
       status: "idle",
       runtimeId: selectedRuntime,
       workspaceRoot: undefined,
+      workspaceFolders: undefined,
       parentId,
       createdAt: now,
       updatedAt: now,
@@ -2516,6 +2632,7 @@ export const useStore = create<LogosState>((set, get) => ({
               runtimeId,
               runtimeName: undefined,
               workspaceRoot: undefined,
+              workspaceFolders: undefined,
               sdkSessionId: undefined,
               modeId:
                 runtimeId === "claude" || runtimeId === "logos"
@@ -2659,10 +2776,19 @@ export const useStore = create<LogosState>((set, get) => ({
     if (!id) id = get().newAgentSession();
     state = get();
     const root = state.root ?? ".";
+    const workspaceFolders = state.workspaceFolders.length
+      ? state.workspaceFolders
+      : [root];
     const s = state.settings;
     // sdkSessionId survives restarts (F2): resume the CLI session if present.
     const session = state.agentSessions.find((a) => a.id === id);
-    if (session?.workspaceRoot && session.workspaceRoot !== root) {
+    const sessionFolders =
+      session?.workspaceFolders ??
+      (session?.workspaceRoot ? [session.workspaceRoot] : undefined);
+    if (
+      sessionFolders &&
+      JSON.stringify(sessionFolders) !== JSON.stringify(workspaceFolders)
+    ) {
       set((current) => ({
         agentSessions: current.agentSessions.map((thread) =>
           thread.id === id
@@ -2690,6 +2816,7 @@ export const useStore = create<LogosState>((set, get) => ({
               ...a,
               status: "running",
               workspaceRoot: a.workspaceRoot ?? root,
+              workspaceFolders: a.workspaceFolders ?? [...workspaceFolders],
               pendingAsk: undefined,
               pendingPermission: undefined,
               items: [
@@ -2756,6 +2883,7 @@ export const useStore = create<LogosState>((set, get) => ({
         sessionId: id!,
         prompt: text,
         cwd: root,
+        additionalDirectories: workspaceFolders.filter(folder => folder !== root),
         // `|| undefined` everywhere => "empty means no override", mirroring model.
         model:
           session?.currentModelId ||

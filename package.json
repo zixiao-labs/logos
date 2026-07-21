@@ -19,6 +19,7 @@
     "electron:build": "npm run dist",
     "postinstall": "electron-rebuild",
     "test": "lightning run",
+    "test:e2e": "lightning run --config lightning.e2e.config.ts",
     "test:watch": "lightning watch",
     "test:coverage": "lightning run --config lightning.coverage.config.ts --coverage",
     "typecheck": "tsc --noEmit && npm -w @logos-editor/extension-api run typecheck"
@@ -144,6 +145,7 @@
     "@types/yauzl": "^3.4.0",
     "electron": "^41.0.0",
     "electron-builder": "^26.8.1",
+    "playwright": "^1.61.1",
     "tailwindcss": "^4.3.1",
     "typescript": "^7.0.2"
   },

@@ -4,6 +4,7 @@ import { useStore } from "../state/store";
 import { useT } from "../i18n";
 
 interface GitDiffEditorProps {
+  root: string;
   path: string;
   staged: boolean;
   language: string;
@@ -17,7 +18,7 @@ function clearDiffModels(editor: monaco.editor.IStandaloneDiffEditor) {
   if (model.modified !== model.original) model.modified.dispose();
 }
 
-export function GitDiffEditor({ path, staged, language }: GitDiffEditorProps) {
+export function GitDiffEditor({ root, path, staged, language }: GitDiffEditorProps) {
   const t = useT();
   const diffLoadFailed = t("git.diffLoadFailed");
   const hostRef = useRef<HTMLDivElement>(null);
@@ -25,8 +26,7 @@ export function GitDiffEditor({ path, staged, language }: GitDiffEditorProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadVersion, setReloadVersion] = useState(0);
-  const root = useStore((state) => state.root);
-  const git = useStore((state) => state.git);
+  const repository = useStore((state) => state.gitRepositories[root]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -80,7 +80,7 @@ export function GitDiffEditor({ path, staged, language }: GitDiffEditorProps) {
     return () => {
       cancelled = true;
     };
-  }, [diffLoadFailed, git, language, path, reloadVersion, root, staged]);
+  }, [diffLoadFailed, language, path, reloadVersion, repository, root, staged]);
 
   return (
     <>

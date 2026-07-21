@@ -38,6 +38,16 @@ const LEGACY_TOOL_NAMES: Record<string, string> = {
   write_file: "Write",
   run_command: "Bash",
 };
+
+function sameRootSet(left: Iterable<string>, right: Iterable<string>): boolean {
+  const leftRoots = new Set(left);
+  const rightRoots = new Set(right);
+  return (
+    leftRoots.size === rightRoots.size &&
+    [...leftRoots].every(root => rightRoots.has(root))
+  );
+}
+
 const GREP_WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 const constants = require("node:fs").constants;
@@ -51,7 +61,7 @@ async function walk(current) {
   if (matches.length >= 100) return;
   const real = await fs.realpath(current);
   const relativeToRoot = path.relative(workerData.workspaceRoot, real);
-  if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
+  if (relativeToRoot === ".." || relativeToRoot.startsWith(".." + path.sep) || path.isAbsolute(relativeToRoot)) {
     throw new Error("Grep path resolves outside the workspace");
   }
   const stat = await fs.lstat(real);
@@ -432,6 +442,7 @@ export class LogosAgentRuntime {
     private readonly auth: OpenAIAuthStore,
     private readonly sessionsDir: string,
     private readonly workspaceRoot: string,
+    private readonly workspaceRoots: readonly string[],
   ) {
     this.sessionId =
       request.resume && /^[A-Za-z0-9_-]{1,128}$/.test(request.resume)
@@ -452,12 +463,19 @@ export class LogosAgentRuntime {
     sessionsDir: string,
   ): Promise<LogosAgentRuntime> {
     const workspaceRoot = await fs.realpath(request.cwd);
+    const workspaceRoots = [
+      workspaceRoot,
+      ...(await Promise.all(
+        (request.additionalDirectories ?? []).map(directory => fs.realpath(directory)),
+      )),
+    ].filter((root, index, roots) => roots.indexOf(root) === index);
     const runtime = new LogosAgentRuntime(
       request,
       hooks,
       auth,
       sessionsDir,
       workspaceRoot,
+      workspaceRoots,
     );
     await runtime.restore();
     await runtime.emitReady();
@@ -639,11 +657,23 @@ export class LogosAgentRuntime {
     }
   }
 
-  async matchesWorkspace(cwd: string): Promise<boolean> {
-    return fs
-      .realpath(cwd)
-      .then((candidate) => candidate === this.workspaceRoot)
-      .catch(() => false);
+  async matchesWorkspace(
+    cwd: string,
+    additionalDirectories: readonly string[] = [],
+  ): Promise<boolean> {
+    try {
+      const workspaceRoot = await fs.realpath(cwd);
+      if (workspaceRoot !== this.workspaceRoot) return false;
+      const additionalRoots = await Promise.all(
+        additionalDirectories.map(directory => fs.realpath(directory)),
+      );
+      return sameRootSet(
+        additionalRoots.filter(root => root !== workspaceRoot),
+        this.workspaceRoots.slice(1),
+      );
+    } catch {
+      return false;
+    }
   }
 
   async setMode(modeId: string): Promise<void> {
@@ -1006,6 +1036,8 @@ export class LogosAgentRuntime {
         );
       case "Write": {
         let target = await this.workspacePath(String(input.path ?? ""), false);
+        const targetRoot = this.workspaceRootForPath(target);
+        if (!targetRoot) throw new Error("Write target is outside the workspace");
         const content = String(input.content ?? "");
         if (Buffer.byteLength(content) > 5 * MAX_FILE_BYTES) {
           throw new Error("File exceeds the 5 MiB write limit");
@@ -1025,8 +1057,12 @@ export class LogosAgentRuntime {
           }
           throw error;
         });
-        const parentRelative = path.relative(this.workspaceRoot, realParent);
-        if (parentRelative.startsWith("..") || path.isAbsolute(parentRelative)) {
+        const parentRelative = path.relative(targetRoot, realParent);
+        if (
+          parentRelative === ".." ||
+          parentRelative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(parentRelative)
+        ) {
           throw new Error(`Path resolves outside the workspace: ${String(input.path ?? "")}`);
         }
         target = path.join(realParent, path.basename(target));
@@ -1046,8 +1082,12 @@ export class LogosAgentRuntime {
             await handle.close();
           }
           const realTemp = await fs.realpath(temp);
-          const tempRelative = path.relative(this.workspaceRoot, realTemp);
-          if (tempRelative.startsWith("..") || path.isAbsolute(tempRelative)) {
+          const tempRelative = path.relative(targetRoot, realTemp);
+          if (
+            tempRelative === ".." ||
+            tempRelative.startsWith(`..${path.sep}`) ||
+            path.isAbsolute(tempRelative)
+          ) {
             throw new Error(`Path resolves outside the workspace: ${String(input.path ?? "")}`);
           }
           if (existingMode !== undefined) await fs.chmod(temp, existingMode);
@@ -1094,6 +1134,8 @@ export class LogosAgentRuntime {
     if (!pattern) throw new Error("Grep pattern is required");
     if (pattern.length > 2_000) throw new Error("Grep pattern exceeds 2,000 characters");
     const root = await this.workspacePath(inputPath, true);
+    const workspaceRoot = this.workspaceRootForPath(root);
+    if (!workspaceRoot) throw new Error("Grep path is outside the workspace");
     new RegExp(pattern, caseSensitive ? "" : "i");
     const includeMatcher = include ? this.globMatcher(include) : null;
     const matches = await new Promise<Array<{ path: string; line: number; text: string }>>(
@@ -1102,7 +1144,7 @@ export class LogosAgentRuntime {
           eval: true,
           workerData: {
             root,
-            workspaceRoot: this.workspaceRoot,
+            workspaceRoot,
             pattern,
             caseSensitive,
             includeSource: includeMatcher?.source,
@@ -1161,7 +1203,10 @@ export class LogosAgentRuntime {
         ? {
             locations: [
               {
-                path: await this.workspacePath(first.path, true),
+                path: await this.workspacePath(
+                  path.join(workspaceRoot, first.path),
+                  true,
+                ),
                 line: first.line,
               },
             ],
@@ -1255,7 +1300,11 @@ export class LogosAgentRuntime {
     const requested = String(input.path ?? "SKILL.md");
     const target = await fs.realpath(path.resolve(skill.directory, requested));
     const relative = path.relative(skill.directory, target);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
       throw new Error(`Skill path is outside '${name}': ${requested}`);
     }
     const stat = await fs.stat(target);
@@ -1269,11 +1318,13 @@ export class LogosAgentRuntime {
   > {
     const roots: Array<{ source: "project" | "user"; directory: string }> = [];
     if (this.request.settingSources?.includes("project")) {
-      roots.push(
-        { source: "project", directory: path.join(this.workspaceRoot, ".agents", "skills") },
-        { source: "project", directory: path.join(this.workspaceRoot, ".claude", "skills") },
-        { source: "project", directory: path.join(this.workspaceRoot, ".logos", "skills") },
-      );
+      for (const workspaceRoot of this.workspaceRoots) {
+        roots.push(
+          { source: "project", directory: path.join(workspaceRoot, ".agents", "skills") },
+          { source: "project", directory: path.join(workspaceRoot, ".claude", "skills") },
+          { source: "project", directory: path.join(workspaceRoot, ".logos", "skills") },
+        );
+      }
     }
     if (this.request.settingSources?.includes("user")) {
       roots.push(
@@ -1295,8 +1346,7 @@ export class LogosAgentRuntime {
         throw error;
       }
       if (root.source === "project") {
-        const relative = path.relative(this.workspaceRoot, realRoot);
-        if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        if (!this.workspaceRootForPath(realRoot)) continue;
       }
       const entries = await fs.readdir(realRoot, { withFileTypes: true });
       for (const entry of entries) {
@@ -1304,7 +1354,11 @@ export class LogosAgentRuntime {
         const directory = await fs.realpath(path.join(realRoot, entry.name)).catch(() => "");
         if (!directory) continue;
         const relative = path.relative(realRoot, directory);
-        if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        if (
+          relative === ".." ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) continue;
         const skillFile = path.join(directory, "SKILL.md");
         const exists = await fs.stat(skillFile).then((stat) => stat.isFile()).catch(() => false);
         if (exists && !result.some((skill) => skill.name === entry.name)) {
@@ -1368,50 +1422,68 @@ export class LogosAgentRuntime {
     return session;
   }
 
-  private async workspacePath(input: string, mustExist: boolean): Promise<string> {
-    const root = this.workspaceRoot;
-    const currentRoot = await fs.realpath(root).catch(() => "");
-    if (currentRoot !== root) {
-      throw new Error("The workspace root changed while the agent was running");
+  private workspaceRootForPath(candidate: string): string | null {
+    let match: string | null = null;
+    for (const root of this.workspaceRoots) {
+      const relative = path.relative(root, candidate);
+      const inside =
+        relative === "" ||
+        (relative !== ".." &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative));
+      if (inside && (!match || root.length > match.length)) match = root;
     }
-    const target = path.resolve(root, input || ".");
-    const relative = path.relative(root, target);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return match;
+  }
+
+  private async workspacePath(input: string, mustExist: boolean): Promise<string> {
+    for (const workspaceRoot of this.workspaceRoots) {
+      const currentRoot = await fs.realpath(workspaceRoot).catch(() => "");
+      if (currentRoot !== workspaceRoot) {
+        throw new Error("A workspace root changed while the agent was running");
+      }
+    }
+    const target = path.isAbsolute(input)
+      ? path.resolve(input)
+      : path.resolve(this.workspaceRoot, input || ".");
+    if (!path.isAbsolute(input) && !this.workspaceRootForPath(target)) {
       throw new Error(`Path is outside the workspace: ${input}`);
     }
-    if (mustExist) {
-      const real = await fs.realpath(target);
-      const realRelative = path.relative(root, real);
-      if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
-        throw new Error(`Path resolves outside the workspace: ${input}`);
-      }
-      return real;
-    }
+    let missingError: unknown;
     try {
       const real = await fs.realpath(target);
-      const realRelative = path.relative(root, real);
-      if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
+      if (!this.workspaceRootForPath(real)) {
         throw new Error(`Path resolves outside the workspace: ${input}`);
       }
       return real;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      missingError = error;
     }
+
     let existing = path.dirname(target);
-    while (existing !== root) {
+    const missing = [path.basename(target)];
+    while (true) {
       try {
         const realParent = await fs.realpath(existing);
-        const parentRelative = path.relative(root, realParent);
-        if (parentRelative.startsWith("..") || path.isAbsolute(parentRelative)) {
+        const parentRoot = this.workspaceRootForPath(realParent);
+        if (!parentRoot) {
+          throw new Error(`Path is outside the workspace: ${input}`);
+        }
+        const candidate = path.join(realParent, ...missing.reverse());
+        if (!this.workspaceRootForPath(candidate)) {
           throw new Error(`Path resolves outside the workspace: ${input}`);
         }
-        break;
+        if (mustExist) throw missingError;
+        return candidate;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        existing = path.dirname(existing);
+        const parent = path.dirname(existing);
+        if (parent === existing) throw error;
+        missing.push(path.basename(existing));
+        existing = parent;
       }
     }
-    return target;
   }
 
   private async readVerifiedFile(
@@ -1427,8 +1499,7 @@ export class LogosAgentRuntime {
         handle.stat(),
         fs.realpath(target),
       ]);
-      const relative = path.relative(this.workspaceRoot, real);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      if (!this.workspaceRootForPath(real)) {
         throw new Error(`Path resolves outside the workspace: ${target}`);
       }
       const pathStat = await fs.stat(real);
@@ -1506,7 +1577,7 @@ export class LogosAgentRuntime {
 
   private instructions(): string {
     return buildLogosAgentSystemPrompt({
-      workspace: this.workspaceRoot,
+      workspace: this.workspaceRoots,
       mode: this.mode,
     });
   }
@@ -1561,11 +1632,13 @@ export class LogosAgentRuntime {
       const raw = await fs.readFile(file, "utf8");
       const value = JSON.parse(raw) as {
         cwd?: string;
+        workspaceFolders?: string[];
         history?: InputItem[];
         model?: string;
         mode?: AgentPermissionMode;
       };
-      if (value.cwd !== this.workspaceRoot) {
+      const savedRoots = value.workspaceFolders ?? (value.cwd ? [value.cwd] : []);
+      if (!sameRootSet(savedRoots, this.workspaceRoots)) {
         throw new Error("Saved agent session belongs to a different workspace");
       }
       this.history = Array.isArray(value.history) ? value.history.slice(-2000) : [];
@@ -1589,6 +1662,7 @@ export class LogosAgentRuntime {
       temp,
       JSON.stringify({
         cwd: this.workspaceRoot,
+        workspaceFolders: this.workspaceRoots,
         history: this.history,
         model: this.model,
         mode: this.mode,

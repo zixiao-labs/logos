@@ -448,6 +448,9 @@ export function registerAgentService(
     const effort = req.effort === "none" ? undefined : req.effort;
     const options: Options = {
       cwd: req.cwd,
+      ...(req.additionalDirectories?.length
+        ? { additionalDirectories: req.additionalDirectories }
+        : {}),
       model: req.model || undefined,
       permissionMode: req.permissionMode ?? "default",
       includePartialMessages: true,
@@ -706,7 +709,11 @@ export function registerAgentService(
       req.runtime?.type === "acp"
         ? `acp:${req.runtime.server.id}`
         : (req.runtime?.type ?? "claude");
-    return JSON.stringify([resolve(req.cwd), runtimeId]);
+    return JSON.stringify([
+      resolve(req.cwd),
+      [...(req.additionalDirectories ?? [])].map(directory => resolve(directory)).sort(),
+      runtimeId,
+    ]);
   }
 
   async function getOrCreateSession(req: AgentStartRequest): Promise<Session> {
@@ -755,7 +762,7 @@ export function registerAgentService(
       let session = sessions.get(req.sessionId);
       if (
         session?.kind === "logos" &&
-        !(await session.runtime.matchesWorkspace(req.cwd))
+        !(await session.runtime.matchesWorkspace(req.cwd, req.additionalDirectories))
       ) {
         emit({
           kind: "error",
@@ -767,7 +774,7 @@ export function registerAgentService(
       if (!session) session = await getOrCreateSession(req);
       if (
         session.kind === "logos" &&
-        !(await session.runtime.matchesWorkspace(req.cwd))
+        !(await session.runtime.matchesWorkspace(req.cwd, req.additionalDirectories))
       ) {
         emit({
           kind: "error",

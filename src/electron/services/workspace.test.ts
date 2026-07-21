@@ -54,7 +54,7 @@ describe("workspace service", () => {
       },
     } as unknown as typeof import("electron").dialog;
     registerWorkspaceService(ctx, dialogService);
-    return { ...ipc, sent };
+    return { ...ipc, sent, workspaceAccess };
   }
 
   it("loads safe defaults for missing and corrupt state", async () => {
@@ -89,7 +89,7 @@ describe("workspace service", () => {
     expect(recent.filter((root) => root === roots[4])).toHaveLength(1);
     expect(service.sent.at(-1)).toEqual([
       CH.workspaceChanged,
-      roots[4],
+      { folders: [roots[4]], root: roots[4] },
     ]);
 
     const reloaded = setup();
@@ -131,5 +131,86 @@ describe("workspace service", () => {
     await expect(service.invoke(CH.workspaceSetRoot, arbitrary)).rejects.toThrow(
       "native folder dialog",
     );
+  });
+
+  it("adds, persists, and removes multiple workspace folders", async () => {
+    const service = setup();
+    const first = path.join(userDataDir, "first");
+    const second = path.join(userDataDir, "second");
+    await Promise.all([fs.mkdir(first), fs.mkdir(second)]);
+    openResult = { canceled: false, filePaths: [first] };
+    await service.invoke(CH.dialogOpenFolder);
+
+    openResult = { canceled: false, filePaths: [second, first] };
+    const added = await service.invoke(CH.workspaceAddFolder);
+    const canonical = await Promise.all([fs.realpath(first), fs.realpath(second)]);
+    expect(added).toEqual({ folders: canonical, root: canonical[0] });
+    expect(await service.invoke(CH.workspaceGetFolders)).toEqual(canonical);
+
+    const reloaded = setup();
+    expect(await reloaded.invoke(CH.workspaceGetFolders)).toEqual(canonical);
+    expect(await reloaded.invoke(CH.workspaceRemoveFolder, canonical[0])).toEqual({
+      folders: [canonical[1]],
+      root: canonical[1],
+    });
+  });
+
+  it("serializes folder writes and continues after a rejected update", async () => {
+    const service = setup();
+    const first = path.join(userDataDir, "first");
+    const second = path.join(userDataDir, "second");
+    await Promise.all([fs.mkdir(first), fs.mkdir(second)]);
+    for (const folder of [first, second]) {
+      openResult = { canceled: false, filePaths: [folder] };
+      await service.invoke(CH.dialogOpenFolder);
+    }
+    const canonical = await Promise.all([fs.realpath(first), fs.realpath(second)]);
+
+    const restoreWorkspaceRoots =
+      service.workspaceAccess.restoreWorkspaceRoots.bind(service.workspaceAccess);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>(resolve => {
+      markFirstStarted = resolve;
+    });
+    let markSecondEntered!: () => void;
+    const secondEntered = new Promise<void>(resolve => {
+      markSecondEntered = resolve;
+    });
+    let blockFirst = true;
+    service.workspaceAccess.restoreWorkspaceRoots = async (candidates) => {
+      if (blockFirst && candidates[0] === canonical[0]) {
+        blockFirst = false;
+        markFirstStarted();
+        await firstGate;
+      } else if (candidates[0] === canonical[1]) {
+        markSecondEntered();
+      }
+      return restoreWorkspaceRoots(candidates);
+    };
+
+    const firstWrite = service.invoke(CH.workspaceSetRoot, canonical[0]);
+    await firstStarted;
+    const secondWrite = service.invoke(CH.workspaceSetRoot, canonical[1]);
+    expect(
+      await Promise.race([
+        secondEntered.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 50)),
+      ]),
+    ).toBe(false);
+    releaseFirst();
+    await Promise.all([firstWrite, secondWrite]);
+    expect(await service.invoke(CH.workspaceGetRoot)).toBe(canonical[1]);
+
+    const unselected = path.join(userDataDir, "unselected");
+    await fs.mkdir(unselected);
+    await expect(service.invoke(CH.workspaceSetRoot, unselected)).rejects.toThrow(
+      "native folder dialog",
+    );
+    await service.invoke(CH.workspaceSetRoot, canonical[0]);
+    expect(await service.invoke(CH.workspaceGetRoot)).toBe(canonical[0]);
   });
 });

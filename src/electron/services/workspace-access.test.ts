@@ -39,6 +39,9 @@ describe("workspace access controller", () => {
     expect(await access.assertPath(inside, "write")).toBe(
       await access.canonicalize(inside),
     );
+    await expect(
+      access.assertPath(path.join(workspace, "..visible.ts"), "write"),
+    ).resolves.toContain("..visible.ts");
     await expect(access.assertPath(sibling)).rejects.toThrow("outside");
     await expect(access.assertPath(path.join(workspace, "escape"))).rejects.toThrow(
       "outside",
@@ -59,5 +62,34 @@ describe("workspace access controller", () => {
     await fs.mkdir(next);
     await access.restoreWorkspaceRoot(next);
     await expect(access.assertPath(granted)).rejects.toThrow("outside");
+  });
+
+  it("authorizes every root in a multi-root workspace", async () => {
+    const second = path.join(temporary, "second");
+    await fs.mkdir(second);
+    const roots = await access.restoreWorkspaceRoots([workspace, second]);
+
+    expect(access.currentRoots()).toEqual(roots);
+    await expect(access.assertPath(path.join(second, "new.ts"), "write")).resolves.toContain(
+      "new.ts",
+    );
+    await expect(access.assertWorkspaceRoot(second)).resolves.toBe(roots[1]);
+    await expect(access.assertPath(path.join(outside, "secret.ts"))).rejects.toThrow("outside");
+  });
+
+  it("skips unavailable roots while retaining directory validation and deduplication", async () => {
+    const second = path.join(temporary, "second");
+    const missing = path.join(temporary, "missing");
+    await fs.mkdir(second);
+
+    const roots = await access.restoreWorkspaceRoots([missing, second, second]);
+    expect(roots).toEqual([await fs.realpath(second)]);
+    expect(access.currentRoots()).toEqual(roots);
+
+    const file = path.join(temporary, "not-a-directory.txt");
+    await fs.writeFile(file, "file", "utf8");
+    await expect(access.restoreWorkspaceRoots([second, file])).rejects.toThrow(
+      "must be directories",
+    );
   });
 });
