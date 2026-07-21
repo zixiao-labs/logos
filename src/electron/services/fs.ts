@@ -123,7 +123,10 @@ export function registerFsService(ctx: ServiceContext): () => void {
         if (current.revision !== expectedRevision) {
           return { status: "conflict", current } as const;
         }
-        const target = await conditionalWriteTarget(p);
+        const target = await workspaceAccess.assertPath(
+          await conditionalWriteTarget(p),
+          "write",
+        );
         await fs.mkdir(path.dirname(target), { recursive: true });
         const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
         try {
@@ -262,7 +265,7 @@ export function registerFsService(ctx: ServiceContext): () => void {
   });
 
   ipcMain.handle(CH.fsUnwatch, async (_e, root: string) => {
-    root = await workspaceAccess.assertPath(root);
+    root = await workspaceAccess.canonicalize(root);
     const entry = watchers.get(root);
     if (!entry) return;
     entry.references--;

@@ -16,6 +16,7 @@ import { registerSettingsService } from "./services/settings";
 import { registerTerminalService } from "./services/terminal";
 import { registerWorkspaceService } from "./services/workspace";
 import { AcpSecretStore } from "./services/acp-secrets";
+import { authorizeDebugConfigurationPaths } from "./services/debug-path-authorization";
 import { setupAutoUpdater } from "./services/updater";
 import { createSecureIpcMain } from "./services/ipc-security";
 import { WorkspaceAccessController } from "./services/workspace-access";
@@ -139,12 +140,10 @@ async function authorizeWorkbenchRequest(
     for (const candidate of Object.keys(request.initialBreakpoints ?? {})) {
       await workspaceAccess.assertPath(candidate);
     }
-    for (const key of ["cwd", "program", "file", "script"]) {
-      const candidate = request.configuration[key];
-      if (typeof candidate === "string" && path.isAbsolute(candidate)) {
-        await workspaceAccess.assertPath(candidate);
-      }
-    }
+    request.configuration = await authorizeDebugConfigurationPaths(
+      workspaceAccess,
+      request.configuration,
+    );
   }
 }
 

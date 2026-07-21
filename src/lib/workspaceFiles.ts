@@ -48,12 +48,15 @@ export async function listWorkspaceFiles(
   const scan = (async () => {
     const files: string[] = [];
     await walk(root, files, limit);
-    cache.set(root, { files, at: Date.now() });
     return files;
   })();
   pending.set(root, scan);
   try {
-    return await scan;
+    const files = await scan;
+    if (pending.get(root) === scan) {
+      cache.set(root, { files, at: Date.now() });
+    }
+    return files;
   } finally {
     if (pending.get(root) === scan) pending.delete(root);
   }

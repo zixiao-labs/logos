@@ -145,10 +145,12 @@ type ExtensionInstanceIdentity = {
 - 状态机：`discovered → policy-pending → starting → handshaking → running → stopping → stopped/quarantined`。
 - 每次启动生成不可复用的 `instanceId`、nonce、连接和有效 capability digest。
 - `extension-protocol` 定义固定 method ID、严格 envelope、最大消息、deadline、取消、错误码、credit/backpressure 和协议版本协商。
+- Supervisor 为每条本地连接生成 256-bit 连接密钥，通过启动时预先打开的一次性继承 pipe/handle 传给 runner；密钥不得进入 argv、环境变量、日志或磁盘。双方以 HKDF 派生方向独立的 MAC key，并用 Supervisor nonce、runner nonce、完整 `ExtensionInstanceIdentity` 和协议版本组成规范化握手 transcript，runner 与 Supervisor 分别返回 HMAC-SHA-256 证明，任一方验证成功前不得收发能力请求。
+- 握手成功后每个请求/响应都携带连接 epoch、方向单调递增 sequence 和 requestId，并对规范化 envelope（含 body）计算 MAC；Router 只接受当前连接 epoch 和未使用的 sequence/requestId。新连接一旦建立就原子吊销并关闭旧连接；握手认证失败、MAC 不匹配、重复/过期 sequence 或 requestId 重放均拒绝该消息、记录安全事件并立即断开对应实例。
 - `RunnerLauncher` 先接假 runner，可注入崩溃、卡死、重放、乱序响应和超大消息。
 - Supervisor 实现 shutdown grace period、强杀、指数退避、连续崩溃 quarantine 和工作区/版本切换。
 
-测试/退出条件：伪造身份、跨实例响应、旧版本重放、握手超时和 IPC 洪泛都只终止对应实例；没有第三方代码进入 Electron 主进程或工作台 renderer。
+测试/退出条件：伪造身份、握手 MAC 错误、请求 MAC 错误、跨实例响应、旧连接/旧版本重放、握手超时和 IPC 洪泛都只终止对应实例；重连后旧连接立即不可用，且没有第三方代码进入 Electron 主进程或工作台 renderer。
 
 ### H3：权限数据库、Workspace Trust 与最小 Broker
 
@@ -178,7 +180,9 @@ type ExtensionInstanceIdentity = {
 
 按架构文档实现目标规范化、DNS/IP 双检查、重定向复核、secret handle 注入和结构化 ToolLaunch。LSP/DAP/formatter 作为 Process Broker 创建的独立工具沙箱，不成为扩展 runner 子进程。
 
-退出条件：所有 socket/spawn/secret 使用都能映射到精确 capability 和审计记录；工具进程不能继承用户 HOME、凭据、网络或未授权写路径。
+Network Broker 不得采用“预先解析检查、随后让通用客户端重新解析”的流程。每次初始连接及每个重定向目标都重新规范化 host 并解析全部 A/AAAA 记录，将 IPv4-mapped IPv6 先归一化为 IPv4，再拒绝 loopback、link-local、private、metadata、multicast 等禁止地址；broker 必须用本轮已验证的地址建立连接（TLS SNI/证书及 HTTP `Host` 仍绑定原 hostname），连接后再把实际 peer 地址归一化并确认其属于本轮已批准集合，否则立即关闭。重定向禁止自动跟随，逐跳重复上述授权、解析、拨号和 peer 校验，以消除 DNS rebinding/TOCTOU 窗口；代理/PAC 也必须提供等价的目标与实际 peer 约束，不能降级绕过。
+
+退出条件：所有 socket/spawn/secret 使用都能映射到精确 capability 和审计记录；测试覆盖初始连接与逐跳重定向、IPv4-mapped IPv6、loopback、link-local、private、metadata、DNS rebinding 和 peer 不匹配；工具进程不能继承用户 HOME、凭据、网络或未授权写路径。
 
 ### H6：VS Code Web Host 与受控 WebView
 
@@ -218,9 +222,8 @@ Wasm Host v1 只承诺：
 - monotonic clock / bounded wall clock / CSPRNG
 - 注册安装期已声明的 command handler、completion provider（先选择一种编辑器回调）
 - `logos-workspace://` 的只读、分块、可取消文件读取
-- 私有 storage 的小型 key/value 或文件接口（二选一，不能同时开放宽接口）
 
-明确不进入 v1：任意 shell、terminal、debug adapter、网络、secret 明文、WebView、native addon、任意 VS Code Node API。先证明身份、取消、配额、撤销和沙箱探针，再扩大 API 面。
+明确不进入 v1：私有 storage、任意 shell、terminal、debug adapter、网络、secret 明文、WebView、native addon、任意 VS Code Node API。storage 必须等独立 capability、命名空间/配额、运行时撤销和跨扩展/回滚测试契约落地后再加入后续 ABI；在此之前 SDK 不声明 storage API、初始 WIT 不导入 storage 接口、产品策略也不向 Wasm v1 实例授予 storage。先证明身份、取消、配额、撤销和沙箱探针，再扩大 API 面。
 
 ## 8. 验证与发布门禁
 

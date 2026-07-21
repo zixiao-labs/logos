@@ -148,4 +148,38 @@ describe("listWorkspaceFiles", () => {
     expect(reads).toBe(1);
     expect(releaseRead).toBe(false);
   });
+
+  it("does not let an invalidated scan overwrite a newer cache entry", async () => {
+    const resolvers: Array<(value: DirListing) => void> = [];
+    let reads = 0;
+    vi.stubGlobal("window", {
+      logos: {
+        fs: {
+          readDir: async () => {
+            reads += 1;
+            return new Promise<DirListing>((resolve) => resolvers.push(resolve));
+          },
+        },
+      },
+    });
+
+    const stale = listWorkspaceFiles("/root");
+    invalidateWorkspaceFiles("/root");
+    const current = listWorkspaceFiles("/root");
+    expect(reads).toBe(2);
+
+    resolvers[1]?.({
+      path: "/root",
+      entries: [file("new.ts", "/root/new.ts")],
+    });
+    expect(await current).toEqual(["/root/new.ts"]);
+
+    resolvers[0]?.({
+      path: "/root",
+      entries: [file("old.ts", "/root/old.ts")],
+    });
+    expect(await stale).toEqual(["/root/old.ts"]);
+    expect(await listWorkspaceFiles("/root")).toEqual(["/root/new.ts"]);
+    expect(reads).toBe(2);
+  });
 });

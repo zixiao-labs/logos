@@ -255,7 +255,7 @@ Installer 把外部格式转换为排序、去歧义的内部 IR 后再签名/�
 无需提示、自动提供：
 
 - 读取自己的已验证只读包。
-- 访问自己的 namespaced storage（建议默认 50 MiB，可由产品策略调整）。
+- storage broker/WIT 在 Wasm v1 之后交付并启用相应 capability 后，访问自己的 namespaced storage（建议默认 50 MiB，可由产品策略调整）；Wasm v1 不自动获得 storage。
 - 写入带扩展 ID 的限速日志。
 - 单调时钟、受控 wall clock、CSPRNG。
 - 注册清单已声明的编辑器贡献。

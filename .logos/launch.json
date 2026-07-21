@@ -1,0 +1,15 @@
+{
+  // Logos uses the Debug Adapter Protocol. Node/Chrome/Electron resolve to the
+  // packaged JavaScript adapter; other runtimes can provide an explicit adapter.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Node: Current File",
+      "type": "node",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole"
+    }
+  ]
+}
