@@ -39,7 +39,7 @@ Logos **当前没有 Extension Host**。仓库已经完成的是扩展包与开�
 
 本次变更完成 Host 之前可独立落地的工作台边界：
 
-- 主 frame 响应强制 CSP，继续拒绝导航、弹窗、页面权限和 `<webview>` attach。
+- 主 frame 响应强制 CSP，继续拒绝导航、弹窗、页面权限和 `<webview>` attach；生产内联启动脚本按生成内容计算 SHA-256，开发态只为本地 Nasti bootstrap 放行内联脚本。
 - 所有 renderer→main handler 必须在集中表中声明 schema；统一检查 main-frame sender、结构深度、对象键、消息大小和每 channel 速率。未声明的新 channel 无法注册。
 - 文件服务只接受 canonical workspace 内路径或原生文件对话框创建的精确会话授权；工作区前缀混淆、外部 symlink 和任意 `workspace.setRoot` 被拒绝。
 - Git、终端 cwd、Agent cwd、LSP root/资源操作和调试源路径与当前工作区绑定。

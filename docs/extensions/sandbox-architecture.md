@@ -32,7 +32,7 @@ Logos 不应把“Extension Host 是独立进程”误当成安全沙箱。安�
 当前仓库仍未实现 Extension Host，但已经具有扩展包安全基础和工作台 workspace 边界：
 
 - manifest/registry 使用有大小和结构上限的严格 schema；本地开发 registry 实现摘要校验、安全 ZIP 检查、只读内容寻址安装和安装记录。只有声明式 runtime 可安装，可执行 runtime 失败关闭。
-- 主窗口使用 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false` 和 `webviewTag: false`，强制工作台 CSP，并拒绝新窗口、非工作台导航、session 权限请求和 `will-attach-webview`。
+- 主窗口使用 `sandbox: true`、`contextIsolation: true`、`nodeIntegration: false` 和 `webviewTag: false`，强制工作台 CSP，并拒绝新窗口、非工作台导航、session 权限请求和 `will-attach-webview`。生产构建只按生成 HTML 的 SHA-256 放行内联启动脚本；开发态仅为本地 Nasti bootstrap 放行内联脚本。
 - 集中 IPC 注册层要求所有 renderer→main channel 预先声明 schema，并统一校验主窗口 main frame、结构/大小和速率；未知 channel 在注册时失败。
 - `WorkspaceAccessController` 将文件服务限制到 canonical workspace 或原生对话框授予的精确路径，拒绝任意 `workspace.setRoot`、路径前缀混淆和指向工作区外的 symlink。Git、终端 cwd、Agent cwd、LSP 与部分调试入口也绑定当前 workspace。
 - `EditorArea` 的页面内 `<webview>` 路径和对应 JSX 类型已删除。通用外部打开只允许规范化 HTTPS/`mailto:`，禁止 `file:`/HTTP，并通过原生确认。

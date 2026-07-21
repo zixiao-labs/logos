@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { CH, type ChannelName } from "../shared/channels";
 import type { WindowControl } from "../shared/types";
@@ -19,6 +20,7 @@ import { setupAutoUpdater } from "./services/updater";
 import { createSecureIpcMain } from "./services/ipc-security";
 import { WorkspaceAccessController } from "./services/workspace-access";
 import {
+  inlineScriptCspSources,
   normalizeExternalUrl,
   workbenchContentSecurityPolicy,
 } from "./services/workbench-security";
@@ -228,6 +230,12 @@ function registerAppHandlers(ctx: ServiceContext) {
 }
 
 async function createWindow() {
+  const devServerUrl = process.env.NASTI_DEV_SERVER_URL;
+  const rendererHtmlPath = path.resolve(__dirname, "renderer/index.html");
+  const inlineScriptSources = devServerUrl
+    ? []
+    : inlineScriptCspSources(await fs.readFile(rendererHtmlPath, "utf8"));
+
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -257,7 +265,8 @@ async function createWindow() {
     (_webContents, _permission, callback) => callback(false),
   );
   const contentSecurityPolicy = workbenchContentSecurityPolicy(
-    process.env.NASTI_DEV_SERVER_URL,
+    devServerUrl,
+    inlineScriptSources,
   );
   mainWindow.webContents.session.webRequest.onHeadersReceived(
     (details, callback) => {
@@ -289,10 +298,10 @@ async function createWindow() {
   mainWindow.on("maximize", notifyState);
   mainWindow.on("unmaximize", notifyState);
 
-  if (process.env.NASTI_DEV_SERVER_URL) {
-    await mainWindow.loadURL(process.env.NASTI_DEV_SERVER_URL);
+  if (devServerUrl) {
+    await mainWindow.loadURL(devServerUrl);
   } else {
-    await mainWindow.loadFile(path.resolve(__dirname, "renderer/index.html"));
+    await mainWindow.loadFile(rendererHtmlPath);
   }
   const workbenchUrl = mainWindow.webContents.getURL();
   mainWindow.webContents.on("will-navigate", (event, url) => {
