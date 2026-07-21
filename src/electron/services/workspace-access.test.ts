@@ -76,4 +76,20 @@ describe("workspace access controller", () => {
     await expect(access.assertWorkspaceRoot(second)).resolves.toBe(roots[1]);
     await expect(access.assertPath(path.join(outside, "secret.ts"))).rejects.toThrow("outside");
   });
+
+  it("skips unavailable roots while retaining directory validation and deduplication", async () => {
+    const second = path.join(temporary, "second");
+    const missing = path.join(temporary, "missing");
+    await fs.mkdir(second);
+
+    const roots = await access.restoreWorkspaceRoots([missing, second, second]);
+    expect(roots).toEqual([await fs.realpath(second)]);
+    expect(access.currentRoots()).toEqual(roots);
+
+    const file = path.join(temporary, "not-a-directory.txt");
+    await fs.writeFile(file, "file", "utf8");
+    await expect(access.restoreWorkspaceRoots([second, file])).rejects.toThrow(
+      "must be directories",
+    );
+  });
 });

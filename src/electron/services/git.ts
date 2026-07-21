@@ -17,6 +17,7 @@ const cache = new Map<string, SimpleGit>();
 const repositoryRootCache = new Map<string, Promise<string>>();
 const GIT_GRAPH_SEPARATOR = "\u001f";
 const GIT_GRAPH_RECORD_SEPARATOR = "\u001e";
+const NO_COMMIT_ERROR = /does not have any commits yet|bad default revision ['"]?HEAD['"]?/i;
 const WATCH_IGNORED = new Set([
   "node_modules",
   "dist",
@@ -205,6 +206,7 @@ export function registerGitService(ctx: ServiceContext): () => void {
   const startWatching = async (root: string) => {
     if (watchers.has(root)) return;
     const active: FSWatcher[] = [];
+    watchers.set(root, active);
     const rootWatcher = addWatcher(root, root, filename => filename);
     if (rootWatcher) active.push(rootWatcher);
     const gitDir = await git(root)
@@ -215,7 +217,6 @@ export function registerGitService(ctx: ServiceContext): () => void {
       const gitWatcher = addWatcher(root, gitDir, filename => `.git/${filename}`);
       if (gitWatcher) active.push(gitWatcher);
     }
-    watchers.set(root, active);
   };
 
   ipcMain.handle(CH.gitStatus, (_e, root: string) => status(root));
@@ -361,13 +362,21 @@ export function registerGitService(ctx: ServiceContext): () => void {
   ipcMain.handle(
     CH.gitGraph,
     async (_e, root: string, limit = 200): Promise<GitGraphEntry[]> => {
-      const output = await git(root).raw([
-        "log",
-        "--all",
-        `--max-count=${limit}`,
-        "--date=iso-strict",
-        `--pretty=format:%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%aI%x1e`,
-      ]);
+      let output: string;
+      try {
+        output = await git(root).raw([
+          "log",
+          "--all",
+          `--max-count=${limit}`,
+          "--date=iso-strict",
+          `--pretty=format:%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%aI%x1e`,
+        ]);
+      } catch (error) {
+        if (NO_COMMIT_ERROR.test(error instanceof Error ? error.message : String(error))) {
+          return [];
+        }
+        throw error;
+      }
       return parseGitGraph(output);
     },
   );

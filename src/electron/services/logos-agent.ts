@@ -38,6 +38,16 @@ const LEGACY_TOOL_NAMES: Record<string, string> = {
   write_file: "Write",
   run_command: "Bash",
 };
+
+function sameRootSet(left: Iterable<string>, right: Iterable<string>): boolean {
+  const leftRoots = new Set(left);
+  const rightRoots = new Set(right);
+  return (
+    leftRoots.size === rightRoots.size &&
+    [...leftRoots].every(root => rightRoots.has(root))
+  );
+}
+
 const GREP_WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 const constants = require("node:fs").constants;
@@ -652,13 +662,14 @@ export class LogosAgentRuntime {
     additionalDirectories: readonly string[] = [],
   ): Promise<boolean> {
     try {
-      const roots = [
-        await fs.realpath(cwd),
-        ...(await Promise.all(additionalDirectories.map(directory => fs.realpath(directory)))),
-      ].filter((root, index, all) => all.indexOf(root) === index);
-      return (
-        roots.length === this.workspaceRoots.length &&
-        roots.every((root, index) => root === this.workspaceRoots[index])
+      const workspaceRoot = await fs.realpath(cwd);
+      if (workspaceRoot !== this.workspaceRoot) return false;
+      const additionalRoots = await Promise.all(
+        additionalDirectories.map(directory => fs.realpath(directory)),
+      );
+      return sameRootSet(
+        additionalRoots.filter(root => root !== workspaceRoot),
+        this.workspaceRoots.slice(1),
       );
     } catch {
       return false;
@@ -1627,10 +1638,7 @@ export class LogosAgentRuntime {
         mode?: AgentPermissionMode;
       };
       const savedRoots = value.workspaceFolders ?? (value.cwd ? [value.cwd] : []);
-      if (
-        savedRoots.length !== this.workspaceRoots.length ||
-        savedRoots.some((root, index) => root !== this.workspaceRoots[index])
-      ) {
+      if (!sameRootSet(savedRoots, this.workspaceRoots)) {
         throw new Error("Saved agent session belongs to a different workspace");
       }
       this.history = Array.isArray(value.history) ? value.history.slice(-2000) : [];

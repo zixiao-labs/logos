@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, type Stats } from "node:fs";
 import path from "node:path";
 
 export type WorkspaceAccessMode = "read" | "write";
@@ -78,8 +78,14 @@ export class WorkspaceAccessController {
   async restoreWorkspaceRoots(candidates: readonly string[]): Promise<string[]> {
     const roots: string[] = [];
     for (const candidate of candidates) {
-      const canonical = await canonicalizeCandidate(candidate);
-      const stat = await fs.stat(canonical);
+      let canonical: string;
+      let stat: Stats;
+      try {
+        canonical = await canonicalizeCandidate(candidate);
+        stat = await fs.stat(canonical);
+      } catch {
+        continue;
+      }
       if (!stat.isDirectory()) throw new Error("Workspace roots must be directories.");
       if (!roots.includes(canonical)) roots.push(canonical);
     }

@@ -210,7 +210,7 @@ export class AcpAgentRuntime {
     request = {
       ...request,
       cwd,
-      ...(additionalDirectories.length ? { additionalDirectories } : {}),
+      additionalDirectories,
     };
     const sdk = await importAcp();
     hooks.emit({

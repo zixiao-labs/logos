@@ -37,6 +37,6 @@ describe("Git graph layout", () => {
     ]);
     expect(rows[0]?.laneCount).toBe(2);
     expect(rows[0]?.edges.map(edge => edge.to)).toEqual([0, 1]);
-    expect(rows[2]?.lane).toBeGreaterThanOrEqual(0);
+    expect(rows[2]?.lane).toBe(1);
   });
 });

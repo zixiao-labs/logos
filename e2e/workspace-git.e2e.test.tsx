@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "@lightning-js/lightning";
 import { createRoot, type Root } from "react-dom/client";
 import { Explorer } from "../src/components/Explorer";
+import { GitPanel } from "../src/components/GitPanel";
 import { GitGraphPanel } from "../src/components/GitGraphPanel";
 import type { LogosAPI } from "../src/shared/api";
 import type { GitGraphEntry, GitStatus } from "../src/shared/types";
@@ -45,6 +46,7 @@ describe("multi-root workbench", () => {
   let host: HTMLDivElement;
   let graph = initialGraph;
   let gitChanged: (root: string) => void = () => undefined;
+  let statusRoots: string[] = [];
 
   beforeEach(() => {
     host = document.createElement("div");
@@ -52,6 +54,7 @@ describe("multi-root workbench", () => {
     document.body.append(host);
     reactRoot = createRoot(host);
     graph = initialGraph;
+    statusRoots = [];
 
     const logos = {
       fs: {
@@ -80,7 +83,10 @@ describe("multi-root workbench", () => {
       },
       git: {
         graph: async () => graph,
-        status: async () => cleanStatus,
+        status: async (root: string) => {
+          statusRoots.push(root);
+          return cleanStatus;
+        },
         head: async () => null,
         watch: async () => undefined,
         onChanged: (listener: (root: string) => void) => {
@@ -130,5 +136,19 @@ describe("multi-root workbench", () => {
     gitChanged(APP);
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(host.textContent).toContain("Realtime watcher refresh");
+  });
+
+  it("refreshes an uncached repository when the selector changes", async () => {
+    reactRoot.render(<GitPanel />);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    const select = host.querySelector<HTMLSelectElement>(".git-repository-select");
+    expect(select).not.toBeNull();
+    select!.value = DOCS;
+    select!.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    expect(useStore.getState().gitRoot).toBe(DOCS);
+    expect(statusRoots).toContain(DOCS);
   });
 });

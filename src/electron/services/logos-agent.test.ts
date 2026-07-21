@@ -645,6 +645,9 @@ describe("Logos agent runtime", () => {
     const additionalRoot = await fs.mkdtemp(
       path.join(os.tmpdir(), "logos-agent-additional-"),
     );
+    const thirdRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "logos-agent-third-"),
+    );
     try {
       await fs.mkdir(path.join(additionalRoot, "src"));
       const sourcePath = path.join(additionalRoot, "src", "secondary.txt");
@@ -697,7 +700,7 @@ describe("Logos agent runtime", () => {
         ]);
       }) as typeof globalThis.fetch;
       const runtime = await LogosAgentRuntime.create(
-        request(root, { additionalDirectories: [additionalRoot] }),
+        request(root, { additionalDirectories: [additionalRoot, thirdRoot] }),
         hooks,
         fakeAuth(),
         sessionsDir,
@@ -717,10 +720,69 @@ describe("Logos agent runtime", () => {
       });
       expect(result("write-secondary")?.isError).toBe(false);
       expect(await fs.readFile(writtenPath, "utf8")).toBe("written from the agent");
-      expect(await runtime.matchesWorkspace(root, [additionalRoot])).toBe(true);
+      expect(
+        await runtime.matchesWorkspace(root, [thirdRoot, additionalRoot, thirdRoot, root]),
+      ).toBe(true);
       expect(await runtime.matchesWorkspace(additionalRoot, [root])).toBe(false);
+      expect(await runtime.matchesWorkspace(root, [path.join(root, "missing")])).toBe(false);
     } finally {
-      await fs.rm(additionalRoot, { recursive: true, force: true });
+      await Promise.all([
+        fs.rm(additionalRoot, { recursive: true, force: true }),
+        fs.rm(thirdRoot, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("restores a multi-root session when saved roots are reordered", async () => {
+    const additionalRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "logos-agent-restore-additional-"),
+    );
+    const thirdRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "logos-agent-restore-third-"),
+    );
+    try {
+      const resume = "saved-session";
+      const [canonicalRoot, canonicalAdditional, canonicalThird] = await Promise.all([
+        fs.realpath(root),
+        fs.realpath(additionalRoot),
+        fs.realpath(thirdRoot),
+      ]);
+      await fs.mkdir(sessionsDir, { recursive: true });
+      await fs.writeFile(
+        path.join(sessionsDir, `${resume}.json`),
+        JSON.stringify({
+          cwd: canonicalRoot,
+          workspaceFolders: [
+            canonicalThird,
+            canonicalRoot,
+            canonicalAdditional,
+            canonicalThird,
+          ],
+          history: [],
+        }),
+        "utf8",
+      );
+
+      await LogosAgentRuntime.create(
+        request(root, {
+          resume,
+          additionalDirectories: [additionalRoot, thirdRoot],
+        }),
+        hooks,
+        fakeAuth(),
+        sessionsDir,
+      );
+
+      expect(
+        events.some(
+          event => event.kind === "system" && event.subtype === "logos-session-restored",
+        ),
+      ).toBe(true);
+    } finally {
+      await Promise.all([
+        fs.rm(additionalRoot, { recursive: true, force: true }),
+        fs.rm(thirdRoot, { recursive: true, force: true }),
+      ]);
     }
   });
 

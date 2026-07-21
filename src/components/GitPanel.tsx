@@ -175,7 +175,11 @@ export function GitPanel() {
             className="field git-repository-select"
             aria-label={t("git.repository")}
             value={root ?? ""}
-            onChange={(event) => setGitRoot(event.target.value)}
+            onChange={(event) => {
+              const nextRoot = event.target.value;
+              setGitRoot(nextRoot);
+              void refreshGit(nextRoot);
+            }}
           >
             {workspaceFolders.map(folder => (
               <option key={folder} value={folder}>{basename(folder)}</option>

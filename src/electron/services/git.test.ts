@@ -90,6 +90,14 @@ describe("git service", () => {
     expect(shouldRefreshGit("node_modules/pkg/index.js")).toBe(false);
   });
 
+  it("returns an empty graph before the first commit and preserves unrelated errors", async () => {
+    await expect(service.invoke(CH.gitGraph, root, 10)).rejects.toThrow();
+    await service.invoke(CH.gitInit, root);
+    await expect(
+      service.invoke<GitGraphEntry[]>(CH.gitGraph, root, 10),
+    ).resolves.toEqual([]);
+  });
+
   it("pushes a debounced refresh when a watched working-tree file changes", async () => {
     const changed = new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(

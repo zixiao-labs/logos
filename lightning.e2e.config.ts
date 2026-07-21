@@ -34,9 +34,9 @@ export default defineConfig({
         return id === "\0logos:lightning-browser-runtime" ? browserRuntime : null;
       },
       configureServer(server) {
-        // Lightning's in-page runner imports this stable URL. Nasti 2.0's bare
-        // module middleware currently wins before Lightning's virtual module,
-        // so serve the package's browser bundle explicitly for E2E only.
+        // Nasti installs its bare-module middleware before configureServer and
+        // exposes no supported prepend API. Keep this compatibility fallback
+        // until ordered middleware registration is available upstream.
         const serveBrowserRuntime = (
           request: IncomingMessage,
           response: ServerResponse,
@@ -56,6 +56,10 @@ export default defineConfig({
         if (middlewareStack) {
           middlewareStack.unshift({ route: "", handle: serveBrowserRuntime });
         } else {
+          console.warn(
+            "[logos:e2e] Ordered middleware registration is unavailable; " +
+              "falling back to server.middlewares.use().",
+          );
           server.middlewares.use(serveBrowserRuntime);
         }
       },

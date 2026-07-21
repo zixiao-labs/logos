@@ -38,6 +38,7 @@ export function registerWorkspaceService(
   const file = path.join(ctx.userDataDir, "workspace.json");
   let state: WorkspaceState = { folders: [], recent: [] };
   let loaded = false;
+  let pendingSetFolders: Promise<void> = Promise.resolve();
 
   const snapshot = (): WorkspaceSnapshot => ({
     folders: [...state.folders],
@@ -105,27 +106,31 @@ export function registerWorkspaceService(
     );
   }
 
-  async function setFolders(folders: readonly string[], allowNew = false) {
-    await load();
-    const canonicalFolders: string[] = [];
-    for (const folder of folders) {
-      const canonical = await workspaceAccess.canonicalize(folder);
-      if (!allowNew) {
-        const allowed =
-          state.recent.includes(canonical) || state.folders.includes(canonical);
-        if (!allowed) {
-          throw new Error("Workspace roots must be selected with the native folder dialog.");
+  function setFolders(folders: readonly string[], allowNew = false): Promise<void> {
+    const operation = pendingSetFolders.then(async () => {
+      await load();
+      const canonicalFolders: string[] = [];
+      for (const folder of folders) {
+        const canonical = await workspaceAccess.canonicalize(folder);
+        if (!allowNew) {
+          const allowed =
+            state.recent.includes(canonical) || state.folders.includes(canonical);
+          if (!allowed) {
+            throw new Error("Workspace roots must be selected with the native folder dialog.");
+          }
         }
+        if (!canonicalFolders.includes(canonical)) canonicalFolders.push(canonical);
       }
-      if (!canonicalFolders.includes(canonical)) canonicalFolders.push(canonical);
-    }
-    state.folders = await workspaceAccess.restoreWorkspaceRoots(canonicalFolders);
-    for (const folder of [...state.folders].reverse()) {
-      state.recent = [folder, ...state.recent.filter((recent) => recent !== folder)];
-    }
-    state.recent = state.recent.slice(0, 10);
-    await persist();
-    ctx.send(CH.workspaceChanged, snapshot());
+      state.folders = await workspaceAccess.restoreWorkspaceRoots(canonicalFolders);
+      for (const folder of [...state.folders].reverse()) {
+        state.recent = [folder, ...state.recent.filter((recent) => recent !== folder)];
+      }
+      state.recent = state.recent.slice(0, 10);
+      await persist();
+      ctx.send(CH.workspaceChanged, snapshot());
+    });
+    pendingSetFolders = operation.catch(() => undefined);
+    return operation;
   }
 
   const initialization = load();
