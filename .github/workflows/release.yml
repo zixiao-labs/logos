@@ -69,6 +69,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+      - name: Stage bundled debug MCP server
+        run: npm run prepackage:debug-mcp
+
       - name: Build (renderer + main + preload)
         run: npm run build:app
 
