@@ -309,6 +309,49 @@ that does not implement VS Code's editor-level behavior. See the
 [VS Code launch configuration documentation](https://code.visualstudio.com/docs/debugtest/debugging-configuration)
 when comparing files.
 
+## Agent and MCP control
+
+The built-in Logos Agent exposes a structured `DAP` tool over the same sessions used by
+the Run and Debug UI. It supports configuration/session discovery, launch, stop,
+restart, continue, pause, step over/in/out, source breakpoints, threads, stack traces,
+scopes, variables, source retrieval, evaluation, and advanced raw DAP requests.
+Read-only inspection does not require approval; actions that can change the debuggee or
+execute code require one-time approval.
+
+Third-party Agents can connect through the standard stdio MCP server in
+`packages/debug-mcp/server.mjs`. This repository's project-level `.mcp.json` registers
+it as `logos-debug`:
+
+```json
+{
+  "mcpServers": {
+    "logos-debug": {
+      "command": "node",
+      "args": ["packages/debug-mcp/server.mjs", "--workspace", "."],
+      "cwd": "."
+    }
+  }
+}
+```
+
+The MCP process does not launch a second debugger. It discovers a running Logos window
+with the same canonical workspace and forwards tools to that window's shared DAP
+controller. The bridge listens only on loopback, uses a random token for every Logos
+launch, and stores discovery data with current-user-only permissions. Keep Logos open
+on the project before calling an MCP debug tool.
+
+## Launch configuration Setup Skill
+
+Invoke the project skill as `$setup-launch-json` to inspect the runtime and entry points,
+select `.logos/launch.json` or the VS Code-compatible fallback without changing
+precedence accidentally, create or repair configurations, and run deterministic
+validation. Its validator can also be run directly:
+
+```bash
+node .logos/skills/setup-launch-json/scripts/validate-launch-json.mjs \
+  --workspace /absolute/path/to/workspace
+```
+
 ## Generate with AI
 
 Paste the following prompt into the Logos agent or another coding agent. It

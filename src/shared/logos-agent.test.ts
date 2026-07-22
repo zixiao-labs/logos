@@ -19,6 +19,7 @@ describe("Logos agent contract", () => {
       "Bash",
       "Skill",
       "MCP",
+      "DAP",
       "DAP_REPL",
       "Finish",
     ]);
@@ -46,7 +47,7 @@ describe("Logos agent contract", () => {
   it("makes plan mode explicitly read-only", () => {
     const prompt = buildLogosAgentSystemPrompt({ workspace: "/workspace", mode: "plan" });
     expect(prompt).toContain("Plan mode is read-only");
-    expect(prompt).toContain("Do not call Write, Bash, MCP, or DAP_REPL");
+    expect(prompt).toContain("Do not call Write, Bash, MCP, mutating DAP actions, or DAP_REPL");
     expect(prompt).toContain("Finish is the only way to end the loop");
   });
 

@@ -23,6 +23,7 @@ import type {
   GitBranch,
   GitBlameLine,
   GitFileDiff,
+  GitCommitDetails,
   GitGraphEntry,
   GitLogEntry,
   GitStatus,
@@ -121,11 +122,14 @@ export interface LogosAPI {
     undoLastCommit(root: string): Promise<void>;
     branches(root: string): Promise<GitBranch[]>;
     checkout(root: string, branch: string): Promise<void>;
-    createBranch(root: string, name: string): Promise<void>;
+    createBranch(root: string, name: string, startPoint?: string): Promise<void>;
     diff(root: string, path: string, staged: boolean): Promise<string>;
     fileDiff(root: string, path: string, staged: boolean): Promise<GitFileDiff>;
     log(root: string, limit?: number): Promise<GitLogEntry[]>;
     graph(root: string, limit?: number): Promise<GitGraphEntry[]>;
+    commitDetails(root: string, hash: string): Promise<GitCommitDetails>;
+    cherryPick(root: string, hash: string): Promise<void>;
+    revert(root: string, hash: string): Promise<void>;
     /** Blame one 1-based line in an absolute working-tree file path. */
     blame(root: string, path: string, line: number): Promise<GitBlameLine | null>;
     init(root: string): Promise<void>;

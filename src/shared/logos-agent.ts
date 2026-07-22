@@ -237,6 +237,13 @@ export const LOGOS_AGENT_TOOLS: readonly LogosAgentToolInfo[] = [
     constraints: "Servers start lazily; connections and calls require one-time approval.",
   },
   {
+    name: "DAP",
+    title: "Debugger",
+    description: "Control shared Logos debug sessions through DAP, including launch, execution, breakpoints, stack frames, variables, source, and evaluation.",
+    mutating: true,
+    constraints: "Read-only inspection is immediate; execution-changing actions and evaluation require one-time approval.",
+  },
+  {
     name: "DAP_REPL",
     title: "DAP REPL",
     description: "Evaluate an expression in a running Debug Adapter Protocol session.",
@@ -258,13 +265,13 @@ export function buildLogosAgentSystemPrompt(input: {
 }): string {
   const modeInstruction: Record<AgentPermissionMode, string> = {
     default:
-      "Ask for client approval before Write. Bash, MCP execution, and DAP_REPL always require one-time approval. Read-only inspection does not require approval.",
+      "Ask for client approval before Write. Bash, MCP execution, mutating DAP actions, and DAP_REPL always require one-time approval. Read-only inspection does not require approval.",
     acceptEdits:
-      "File edits are pre-approved, but Bash, MCP execution, and DAP_REPL still require one-time approval.",
+      "File edits are pre-approved, but Bash, MCP execution, mutating DAP actions, and DAP_REPL still require one-time approval.",
     bypassPermissions:
-      "The user explicitly enabled bypassPermissions. Write may run without approval, but Bash, MCP execution, and DAP_REPL still require one-time approval. All safety and workspace rules still apply.",
+      "The user explicitly enabled bypassPermissions. Write may run without approval, but Bash, MCP execution, mutating DAP actions, and DAP_REPL still require one-time approval. All safety and workspace rules still apply.",
     plan:
-      "Plan mode is read-only. Do not call Write, Bash, MCP, or DAP_REPL and do not claim that changes were applied.",
+      "Plan mode is read-only. Do not call Write, Bash, MCP, mutating DAP actions, or DAP_REPL and do not claim that changes were applied.",
   };
   const toolContract = LOGOS_AGENT_TOOLS.map(
     (tool) =>
@@ -296,7 +303,7 @@ ${modeInstruction[input.mode]}
 # Tool Contract
 ${toolContract}
 
-Call tools only with valid JSON matching their schemas. Write replaces the whole file, so preserve all intended existing content. Grep uses JavaScript regular-expression syntax. MCP servers are discovered from .mcp.json and must be listed before use. Skill with no name lists available skills; load a relevant skill before following it. DAP_REPL targets an existing debug session and can execute code in the debuggee.
+Call tools only with valid JSON matching their schemas. Write replaces the whole file, so preserve all intended existing content. Grep uses JavaScript regular-expression syntax. MCP servers are discovered from .mcp.json and must be listed before use. Skill with no name lists available skills; load a relevant skill before following it. DAP controls the shared debugger; prefer its structured actions and use DAP_REPL only as a legacy evaluation shortcut.
 
 # Communication
 Be direct and factual. Distinguish observations, actions, and unverified assumptions. Ask one focused question only when a missing decision blocks safe progress.`;

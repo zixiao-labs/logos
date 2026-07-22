@@ -11,6 +11,14 @@ const APP = "/workspace/app";
 const DOCS = "/workspace/docs";
 const TOOLS = "/workspace/tools";
 
+function setInputValue(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+    input,
+    value,
+  );
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 const cleanStatus: GitStatus = {
   isRepo: true,
   branch: "main",
@@ -83,6 +91,22 @@ describe("multi-root workbench", () => {
       },
       git: {
         graph: async () => graph,
+        commitDetails: async (_root: string, hash: string) => ({
+          ...graph.find(commit => commit.hash === hash)!,
+          body: "Add workspace support\n\nThis is the expanded commit body.",
+          authorEmail: "logos@example.com",
+          committer: "Logos",
+          committerEmail: "logos@example.com",
+          committedDate: "2026-07-21T08:00:00Z",
+          files: [
+            {
+              path: "src/workspace.ts",
+              additions: 12,
+              deletions: 2,
+              binary: false,
+            },
+          ],
+        }),
         status: async (root: string) => {
           statusRoots.push(root);
           return cleanStatus;
@@ -131,6 +155,21 @@ describe("multi-root workbench", () => {
       "Add multi-root workspace",
     );
     expect(host.textContent).toContain("HEAD -> main");
+
+    host.querySelector<HTMLElement>(`[data-git-commit="${initialGraph[0]!.hash}"]`)!.click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(host.querySelector('[data-testid="git-commit-details"]')?.textContent).toContain(
+      "src/workspace.ts",
+    );
+
+    const search = host.querySelector<HTMLInputElement>('input[aria-label="Search commits"]')!;
+    setInputValue(search, "initial");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(host.querySelector('[data-testid="git-graph"]')?.textContent).not.toContain(
+      "Add multi-root workspace",
+    );
+    setInputValue(search, "");
+    await new Promise(resolve => setTimeout(resolve, 10));
 
     graph = [{ ...initialGraph[0]!, message: "Realtime watcher refresh" }];
     gitChanged(APP);

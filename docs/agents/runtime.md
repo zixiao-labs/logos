@@ -36,13 +36,13 @@ uses the explicit `gpt-5.6-sol` model ID as its cross-authentication default.
 ## Workspace Tools
 
 The Logos runtime provides `Read`, `Glob`, `Grep`, `Write`, `Bash`, `Skill`, `MCP`,
-`DAP_REPL`, and the loop-control tool `Finish`. The exact tool contract and the
+`DAP`, the legacy `DAP_REPL` shortcut, and the loop-control tool `Finish`. The exact tool contract and the
 mode-specific system prompt are shown at the top of every Logos thread before its
 first prompt. A turn remains active until the model explicitly calls `Finish`; an
 assistant-only planning message therefore cannot end a task before tool work begins.
 Paths are constrained to the active workspace, including real-path checks that reject
 symbolic-link escapes. `Write` follows the selected permission mode. Every `Bash`
-command, MCP connection/tool call, and `DAP_REPL` expression requires one-time approval,
+command, MCP connection/tool call, mutating `DAP` action, and `DAP_REPL` expression requires one-time approval,
 including in bypass mode. Threads are bound to the workspace where they started and
 cannot silently continue in another folder.
 
@@ -60,10 +60,20 @@ standard `mcpServers` key and VS Code-style `servers` key are accepted. Stdio an
 Streamable HTTP transports are supported. Reading the configuration does not launch a
 server; a server is connected only after the user approves `list_tools` or `call_tool`.
 
-`DAP_REPL` evaluates expressions through an existing Logos debug session. When exactly
-one session is active it is selected automatically; otherwise the tool requires an
-explicit session id. Evaluation always requires approval because expressions can have
-side effects in the debuggee.
+`DAP` controls the same debug sessions as the workbench UI. It can discover and start
+`launch.json` configurations, list/stop/restart sessions, continue, pause and step,
+replace source breakpoints, inspect threads/stacks/scopes/variables/source, evaluate
+expressions, and send advanced raw DAP requests. When exactly one session is active it
+is selected automatically; otherwise the tool requires an explicit session id.
+Read-only inspection is available in Plan mode. Process control, breakpoint changes,
+evaluation, launch, and raw requests require one-time approval. `DAP_REPL` remains as a
+compatibility shortcut for `DAP` evaluation.
+
+Third-party Agents can use the same control plane through the project `logos-debug`
+MCP server. Its stdio proxy discovers an authenticated loopback bridge published by a
+running Logos process; it only connects when that Logos window has the same canonical
+workspace open. Discovery files are private to the current OS user and contain a
+per-launch random token. See [Debugging with `launch.json`](../debugging/launch-json.md#agent-and-mcp-control).
 
 ## ACP Registry
 

@@ -9,8 +9,12 @@ import type {
 } from "../../shared/types";
 import type {
   DapArguments,
+  DapBreakpoint,
   DapResponse,
+  DapSourceBreakpoint,
   DebugSessionInfo,
+  DebugStartRequest,
+  DebugLaunchConfiguration,
 } from "../../shared/dap";
 import type { WorkspaceAccessController } from "./workspace-access";
 import type { IpcRegistration } from "./ipc-security";
@@ -44,6 +48,25 @@ export interface ServiceContext {
   debug?: {
     list(): DebugSessionInfo[];
     generation(sessionId: string): string | undefined;
+    start(request: DebugStartRequest): Promise<DebugSessionInfo>;
+    stop(sessionId: string, terminateDebuggee?: boolean): Promise<void>;
+    restart(sessionId: string): Promise<DebugSessionInfo>;
+    configurations(workspaceRoot: string): Promise<{
+      path: string | null;
+      configurations: DebugLaunchConfiguration[];
+    }>;
+    startConfiguration(
+      workspaceRoot: string,
+      name?: string,
+      activeFile?: string,
+      initialBreakpoints?: Record<string, DapSourceBreakpoint[]>,
+      expectedConfigurationFingerprint?: string,
+    ): Promise<DebugSessionInfo>;
+    setBreakpoints(
+      sessionId: string,
+      sourcePath: string,
+      breakpoints: DapSourceBreakpoint[],
+    ): Promise<DapBreakpoint[]>;
     request<T = unknown>(
       sessionId: string,
       command: string,

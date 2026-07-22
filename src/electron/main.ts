@@ -7,6 +7,7 @@ import type { ServiceContext } from "./services/context";
 import { registerAgentService } from "./services/agent";
 import { registerAcpRegistryService } from "./services/acp-registry";
 import { registerDebugService } from "./services/debug";
+import { registerDebugMcpBridge } from "./services/debug-mcp-bridge";
 import { registerFsService } from "./services/fs";
 import { registerExtensionService } from "./services/extensions";
 import { registerGitService } from "./services/git";
@@ -46,6 +47,9 @@ const GIT_ROOT_CHANNELS = new Set<ChannelName>([
   CH.gitFileDiff,
   CH.gitLog,
   CH.gitGraph,
+  CH.gitCommitDetails,
+  CH.gitCherryPick,
+  CH.gitRevert,
   CH.gitBlame,
   CH.gitInit,
   CH.gitFetch,
@@ -319,10 +323,11 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const ctx = createContext();
   const acpSecrets = new AcpSecretStore(ctx.userDataDir);
   const disposeDebug = registerDebugService(ctx);
+  const disposeDebugMcp = await registerDebugMcpBridge(ctx);
   registerAppHandlers(ctx);
   disposers.push(
     registerWorkspaceService(ctx, dialog),
@@ -334,6 +339,7 @@ app.whenReady().then(() => {
     registerExtensionService(ctx),
     registerAgentService(ctx, acpSecrets),
     registerLspService(ctx),
+    disposeDebugMcp,
     disposeDebug,
     registerMenu(ctx),
   );

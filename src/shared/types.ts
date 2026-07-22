@@ -99,6 +99,23 @@ export interface GitGraphEntry extends GitLogEntry {
   refs: string[];
 }
 
+export interface GitCommitFile {
+  path: string;
+  additions: number | null;
+  deletions: number | null;
+  binary: boolean;
+}
+
+/** Metadata and changed paths shown when a Git Graph commit is expanded. */
+export interface GitCommitDetails extends GitGraphEntry {
+  body: string;
+  authorEmail: string;
+  committer: string;
+  committerEmail: string;
+  committedDate: string;
+  files: GitCommitFile[];
+}
+
 export interface GitBlameLine {
   hash: string;
   shortHash: string;

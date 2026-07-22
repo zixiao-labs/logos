@@ -171,13 +171,17 @@ const api: LogosAPI = {
     undoLastCommit: (root) => ipcRenderer.invoke(CH.gitUndoLastCommit, root),
     branches: (root) => ipcRenderer.invoke(CH.gitBranches, root),
     checkout: (root, branch) => ipcRenderer.invoke(CH.gitCheckout, root, branch),
-    createBranch: (root, name) =>
-      ipcRenderer.invoke(CH.gitCreateBranch, root, name),
+    createBranch: (root, name, startPoint) =>
+      ipcRenderer.invoke(CH.gitCreateBranch, root, name, startPoint),
     diff: (root, p, staged) => ipcRenderer.invoke(CH.gitDiff, root, p, staged),
     fileDiff: (root, p, staged) =>
       ipcRenderer.invoke(CH.gitFileDiff, root, p, staged),
     log: (root, limit) => ipcRenderer.invoke(CH.gitLog, root, limit),
     graph: (root, limit) => ipcRenderer.invoke(CH.gitGraph, root, limit),
+    commitDetails: (root, hash) =>
+      ipcRenderer.invoke(CH.gitCommitDetails, root, hash),
+    cherryPick: (root, hash) => ipcRenderer.invoke(CH.gitCherryPick, root, hash),
+    revert: (root, hash) => ipcRenderer.invoke(CH.gitRevert, root, hash),
     blame: (root, p, line) => ipcRenderer.invoke(CH.gitBlame, root, p, line),
     init: (root) => ipcRenderer.invoke(CH.gitInit, root),
     fetch: (root) => ipcRenderer.invoke(CH.gitFetch, root),

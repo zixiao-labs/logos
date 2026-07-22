@@ -6,6 +6,7 @@ const DEBUG_PATH_KEYS = ["program", "file", "script"] as const;
 export async function authorizeDebugConfigurationPaths(
   workspaceAccess: WorkspaceAccessController,
   configuration: Readonly<Record<string, unknown>>,
+  workspaceRoot?: string,
 ): Promise<Record<string, unknown>> {
   const normalized = { ...configuration };
   const hasRelativePath = DEBUG_PATH_KEYS.some((key) => {
@@ -16,7 +17,7 @@ export async function authorizeDebugConfigurationPaths(
   let controlledCwd: string | undefined;
 
   if (typeof configuredCwd === "string" || hasRelativePath) {
-    const root = workspaceAccess.currentRoot();
+    const root = workspaceRoot ?? workspaceAccess.currentRoot();
     const cwdCandidate =
       typeof configuredCwd === "string" && path.isAbsolute(configuredCwd)
         ? configuredCwd

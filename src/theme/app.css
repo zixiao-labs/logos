@@ -2041,6 +2041,55 @@ textarea.field {
   min-height: 0;
 }
 
+.git-graph-controls {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.git-graph-controls .git-repository-select {
+  max-width: 34%;
+}
+
+.git-graph-search {
+  min-width: 0;
+  flex: 1;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 5px 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--input);
+  color: var(--muted);
+}
+
+.git-graph-search:focus-within {
+  border-color: var(--accent);
+}
+
+.git-graph-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 11px;
+}
+
+.git-graph-error {
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--danger);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
 .git-graph-row {
   min-height: 42px;
   display: flex;
@@ -2051,6 +2100,16 @@ textarea.field {
 
 .git-graph-row:hover {
   background: var(--surface-secondary);
+}
+
+.git-graph-row.selected {
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface));
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.git-graph-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .git-graph-row svg {
@@ -2065,6 +2124,18 @@ textarea.field {
   flex-direction: column;
   justify-content: center;
   gap: 3px;
+}
+
+.git-graph-more {
+  align-self: center;
+  flex: none;
+  opacity: 0;
+}
+
+.git-graph-row:hover .git-graph-more,
+.git-graph-row:focus-within .git-graph-more,
+.git-graph-row.selected .git-graph-more {
+  opacity: 1;
 }
 
 .git-graph-subject,
@@ -2102,4 +2173,79 @@ textarea.field {
   padding: 0 5px;
   color: var(--accent);
   font-size: 9px;
+}
+
+.git-commit-details {
+  padding: 10px 12px 12px 30px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-secondary) 72%, var(--background));
+  font-size: 11px;
+}
+
+.git-commit-details pre {
+  margin: 0 0 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+.git-commit-identity {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+
+.git-commit-identity time {
+  white-space: nowrap;
+}
+
+.git-commit-files {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.git-commit-file {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.git-commit-file > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-commit-file code {
+  flex: none;
+  color: var(--muted);
+}
+
+.git-commit-file b {
+  color: var(--success);
+  font-weight: 500;
+}
+
+.git-commit-file i {
+  color: var(--danger);
+  font-style: normal;
+}
+
+.git-graph-load-more {
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-secondary);
+  color: var(--foreground);
+  font-size: 11px;
+}
+
+.git-graph-load-more:hover:not(:disabled) {
+  border-color: var(--accent);
 }

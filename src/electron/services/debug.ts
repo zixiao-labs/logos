@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
@@ -9,6 +9,10 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { CH } from "../../shared/channels";
+import {
+  parseDebugConfigurationFile,
+  resolveDebugConfiguration,
+} from "../../lib/debug-config";
 import type {
   DapArguments,
   DapBreakpoint,
@@ -28,6 +32,7 @@ import type {
 } from "../../shared/dap";
 import type { ServiceContext } from "./context";
 import { DapConnection } from "./dap-transport";
+import { authorizeDebugConfigurationPaths } from "./debug-path-authorization";
 import { augmentPath } from "./path-env";
 
 type SpawnProcess = typeof spawn;
@@ -1544,11 +1549,143 @@ export function registerDebugService(
     }
     return response;
   };
-  ctx.debug = {
+  const setSessionBreakpoints = async (
+    sessionId: string,
+    sourcePath: string,
+    breakpoints: DapSourceBreakpoint[],
+  ) => {
+    const session = sessions.get(sessionId);
+    if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
+    const controlledPath = await ctx.workspaceAccess?.assertPath(sourcePath);
+    return sendBreakpointsToSessionTree(
+      session,
+      controlledPath ?? sourcePath,
+      breakpoints,
+    );
+  };
+  const stopSessionById = async (
+    sessionId: string,
+    terminateDebuggee = true,
+  ) => {
+    const pendingStart = pendingStarts.get(sessionId);
+    if (pendingStart) {
+      cancelPendingStart(pendingStart);
+      return;
+    }
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    await stopSession(session, terminateDebuggee);
+  };
+  const restartSessionById = async (sessionId: string) => {
+    const session = sessions.get(sessionId);
+    if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
+    if (session.info.parentSessionId) {
+      throw new Error("Restart the root debug session instead of a child session");
+    }
+    const request: DebugStartRequest = {
+      sessionId,
+      configuration: session.configuration,
+      initialBreakpoints: Object.fromEntries(session.breakpoints),
+      exceptionBreakpoints: [...session.exceptionBreakpoints],
+    };
+    await stopSession(session, session.info.request === "launch", true, true);
+    return startSession(request);
+  };
+  const loadConfigurations = async (workspaceRoot: string) => {
+    const root = await realpath(workspaceRoot);
+    await ctx.workspaceAccess?.assertWorkspaceRoot(root);
+    for (const relative of [".logos/launch.json", ".vscode/launch.json"]) {
+      const candidate = path.join(root, relative);
+      try {
+        const real = await realpath(candidate);
+        const boundary = path.relative(root, real);
+        if (boundary.startsWith("..") || path.isAbsolute(boundary)) {
+          throw new Error(`${relative} resolves outside the workspace`);
+        }
+        if ((await stat(real)).size > 1024 * 1024) {
+          throw new Error(`${relative} exceeds 1 MiB`);
+        }
+        return {
+          path: real,
+          configurations: parseDebugConfigurationFile(
+            await readFile(real, "utf8"),
+          ).configurations,
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+    }
+    return { path: null, configurations: [] as DebugLaunchConfiguration[] };
+  };
+  const startConfiguredSession = async (
+    workspaceRoot: string,
+    name?: string,
+    activeFile?: string,
+    initialBreakpoints?: Record<string, DapSourceBreakpoint[]>,
+    expectedConfigurationFingerprint?: string,
+  ) => {
+    const root = await realpath(workspaceRoot);
+    const file = await loadConfigurations(root);
+    const selected = name
+      ? file.configurations.find(configuration => configuration.name === name)
+      : file.configurations.length === 1
+        ? file.configurations[0]
+        : undefined;
+    if (!selected) {
+      const available = file.configurations.map(configuration => configuration.name).join(", ");
+      throw new Error(
+        name
+          ? `Debug configuration '${name}' was not found${available ? `; available: ${available}` : ""}`
+          : file.configurations.length === 0
+            ? "No launch configurations are available"
+            : `Multiple launch configurations are available; choose configuration: ${available}`,
+      );
+    }
+    const configurationFingerprint = JSON.stringify({
+      path: file.path,
+      configuration: selected,
+    });
+    if (
+      expectedConfigurationFingerprint &&
+      configurationFingerprint !== expectedConfigurationFingerprint
+    ) {
+      throw new Error(
+        "The launch configuration changed after approval; review and approve it again",
+      );
+    }
+    const controlledFile = activeFile
+      ? await ctx.workspaceAccess?.assertPath(activeFile)
+      : undefined;
+    let configuration = resolveDebugConfiguration(selected, {
+      workspaceFolder: root,
+      file: controlledFile,
+    });
+    if (ctx.workspaceAccess) {
+      configuration = await authorizeDebugConfigurationPaths(
+        ctx.workspaceAccess,
+        configuration,
+        root,
+      ) as DebugLaunchConfiguration;
+    }
+    for (const sourcePath of Object.keys(initialBreakpoints ?? {})) {
+      if (!sourcePath) throw new Error("A source path is required for initial breakpoints");
+      await ctx.workspaceAccess?.assertPath(sourcePath);
+    }
+    return startSession({ configuration, initialBreakpoints });
+  };
+  const debugController = {
     list: listSessions,
-    generation: (sessionId) => sessions.get(sessionId)?.agentGeneration,
+    generation: (sessionId: string) => sessions.get(sessionId)?.agentGeneration,
+    start: (request: DebugStartRequest) => startSession(request),
+    stop: stopSessionById,
+    restart: restartSessionById,
+    configurations: loadConfigurations,
+    startConfiguration: startConfiguredSession,
+    setBreakpoints: setSessionBreakpoints,
     request: requestSession,
   };
+  ctx.debug = debugController;
 
   ipcMain.handle(CH.debugList, listSessions);
   ipcMain.handle(CH.debugListAdapters, () => adapterInfo(ctx));
@@ -1571,28 +1708,16 @@ export function registerDebugService(
       sessionId: string,
       sourcePath: string,
       breakpoints: DapSourceBreakpoint[],
-    ) => {
-      const session = sessions.get(sessionId);
-      if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
-      return sendBreakpointsToSessionTree(session, sourcePath, breakpoints);
-    },
+    ) => setSessionBreakpoints(sessionId, sourcePath, breakpoints),
   );
   ipcMain.handle(
     CH.debugStop,
-    async (_event, sessionId: string, terminateDebuggee = true) => {
-      const pendingStart = pendingStarts.get(sessionId);
-      if (pendingStart) {
-        cancelPendingStart(pendingStart);
-        return;
-      }
-      const session = sessions.get(sessionId);
-      if (!session) return;
-      await stopSession(session, terminateDebuggee);
-    },
+    (_event, sessionId: string, terminateDebuggee = true) =>
+      stopSessionById(sessionId, terminateDebuggee),
   );
 
   return () => {
-    if (ctx.debug?.request === requestSession) ctx.debug = undefined;
+    if (ctx.debug === debugController) ctx.debug = undefined;
     for (const pendingStart of pendingStarts.values()) {
       cancelPendingStart(pendingStart);
     }
