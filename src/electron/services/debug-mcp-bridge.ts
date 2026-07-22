@@ -156,16 +156,23 @@ export async function registerDebugMcpBridge(
               workspace,
               input,
             );
-            const allowed = await approveMutation({
-              ...input,
-              ...(approval.session ? { session: approval.session } : {}),
-              ...(approval.configurationDetails
-                ? {
-                    configurationPath: approval.configurationPath,
-                    configurationDetails: approval.configurationDetails,
-                  }
-                : {}),
-            });
+            let allowed: boolean;
+            socket.setTimeout(0);
+            try {
+              allowed = await approveMutation({
+                ...input,
+                ...(approval.session ? { session: approval.session } : {}),
+                ...(approval.configurationDetails
+                  ? {
+                      configurationPath: approval.configurationPath,
+                      configurationDetails: approval.configurationDetails,
+                    }
+                  : {}),
+              });
+            } finally {
+              if (!socket.destroyed) socket.setTimeout(REQUEST_TIMEOUT_MS);
+            }
+            if (socket.destroyed) return;
             if (!allowed) throw new Error("The debug action was not approved");
             input = applyDebugControlMutationApproval(controller, input, approval);
           }
