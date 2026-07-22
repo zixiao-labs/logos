@@ -23,6 +23,7 @@ import type {
   GitBranch,
   GitBlameLine,
   GitFileDiff,
+  GitCommitDetails,
   GitGraphEntry,
   GitLogEntry,
   GitStatus,
@@ -36,6 +37,9 @@ import type {
   TerminalCreated,
   WindowControl,
   WorkspaceSnapshot,
+  WorkspaceAgentSetupRequest,
+  WorkspaceAgentSetupResult,
+  WorkspaceAgentSetupStatus,
 } from "./types";
 import type { ServerCapabilities } from "vscode-languageserver-protocol";
 import type {
@@ -49,6 +53,10 @@ import type {
   DebugStartRequest,
 } from "./dap";
 import type { ExtensionRegistrySnapshot } from "./extensions";
+import type {
+  DebugMcpApprovalRequest,
+  DebugMcpApprovalResponse,
+} from "./debug-control";
 
 /** Unsubscribe handle returned by every `on…` subscription. */
 export type Unsubscribe = () => void;
@@ -100,6 +108,8 @@ export interface LogosAPI {
     addFolder(): Promise<WorkspaceSnapshot | null>;
     removeFolder(path: string): Promise<WorkspaceSnapshot>;
     recent(): Promise<string[]>;
+    agentSetupStatus(path: string): Promise<WorkspaceAgentSetupStatus>;
+    setupAgents(request: WorkspaceAgentSetupRequest): Promise<WorkspaceAgentSetupResult>;
     onChanged(cb: (workspace: WorkspaceSnapshot) => void): Unsubscribe;
   };
   extensions: {
@@ -121,11 +131,14 @@ export interface LogosAPI {
     undoLastCommit(root: string): Promise<void>;
     branches(root: string): Promise<GitBranch[]>;
     checkout(root: string, branch: string): Promise<void>;
-    createBranch(root: string, name: string): Promise<void>;
+    createBranch(root: string, name: string, startPoint?: string): Promise<void>;
     diff(root: string, path: string, staged: boolean): Promise<string>;
     fileDiff(root: string, path: string, staged: boolean): Promise<GitFileDiff>;
     log(root: string, limit?: number): Promise<GitLogEntry[]>;
     graph(root: string, limit?: number): Promise<GitGraphEntry[]>;
+    commitDetails(root: string, hash: string): Promise<GitCommitDetails>;
+    cherryPick(root: string, hash: string): Promise<void>;
+    revert(root: string, hash: string): Promise<void>;
     /** Blame one 1-based line in an absolute working-tree file path. */
     blame(root: string, path: string, line: number): Promise<GitBlameLine | null>;
     init(root: string): Promise<void>;
@@ -226,6 +239,9 @@ export interface LogosAPI {
       sourcePath: string,
       breakpoints: DapSourceBreakpoint[],
     ): Promise<DapBreakpoint[]>;
+    pendingMcpApprovals(): Promise<DebugMcpApprovalRequest[]>;
+    respondMcpApproval(response: DebugMcpApprovalResponse): Promise<void>;
+    onMcpApproval(cb: (request: DebugMcpApprovalRequest) => void): Unsubscribe;
     onEvent(cb: (event: DebugSessionEvent) => void): Unsubscribe;
   };
   app: {

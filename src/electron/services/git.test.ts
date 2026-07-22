@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import { CH } from "../../shared/channels";
 import type {
   GitBlameLine,
+  GitCommitDetails,
   GitFileDiff,
   GitGraphEntry,
   GitLogEntry,
@@ -22,6 +23,7 @@ import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import {
   parseGitBlamePorcelain,
+  parseGitCommitFiles,
   parseGitGraph,
   registerGitService,
   shouldRefreshGit,
@@ -88,6 +90,20 @@ describe("git service", () => {
     expect(shouldRefreshGit(".git/HEAD")).toBe(true);
     expect(shouldRefreshGit(".git/objects/12/object")).toBe(false);
     expect(shouldRefreshGit("node_modules/pkg/index.js")).toBe(false);
+    expect(parseGitCommitFiles("3\t1\tsrc/app.ts\n-\t-\timage.png\n")).toEqual([
+      {
+        path: "src/app.ts",
+        additions: 3,
+        deletions: 1,
+        binary: false,
+      },
+      {
+        path: "image.png",
+        additions: null,
+        deletions: null,
+        binary: true,
+      },
+    ]);
   });
 
   it("returns an empty graph before the first commit and preserves unrelated errors", async () => {
@@ -384,5 +400,31 @@ describe("git service", () => {
     const graph = await service.invoke<GitGraphEntry[]>(CH.gitGraph, root, 10);
     expect(graph[0]).toMatchObject({ message: "Graph commit", parents: [] });
     expect(graph[0]?.refs.some(ref => ref.includes("HEAD"))).toBe(true);
+
+    const details = await service.invoke<GitCommitDetails>(
+      CH.gitCommitDetails,
+      root,
+      graph[0]!.hash,
+    );
+    expect(details).toMatchObject({
+      message: "Graph commit",
+      author: "Logos Tests",
+      authorEmail: "tests@logos.local",
+      files: [{ path: "graph.txt", additions: 1, deletions: 0, binary: false }],
+    });
+    await expect(
+      service.invoke(CH.gitCommitDetails, root, "--all"),
+    ).rejects.toThrow("Invalid commit hash");
+    await expect(
+      service.invoke(CH.gitCherryPick, root, "--all"),
+    ).rejects.toThrow("Invalid commit hash");
+    await expect(
+      service.invoke(CH.gitRevert, root, "--all"),
+    ).rejects.toThrow("Invalid commit hash");
+
+    await service.invoke(CH.gitCreateBranch, root, "from-graph", graph[0]!.hash);
+    expect((await service.invoke<GitStatus>(CH.gitStatus, root)).branch).toBe(
+      "from-graph",
+    );
   });
 });

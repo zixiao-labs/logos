@@ -9,8 +9,12 @@ import type {
 } from "../../shared/types";
 import type {
   DapArguments,
+  DapBreakpoint,
   DapResponse,
+  DapSourceBreakpoint,
   DebugSessionInfo,
+  DebugStartRequest,
+  DebugLaunchConfiguration,
 } from "../../shared/dap";
 import type { WorkspaceAccessController } from "./workspace-access";
 import type { IpcRegistration } from "./ipc-security";
@@ -33,6 +37,10 @@ export interface ServiceContext {
   appVersion?: string;
   /** Development-only, read-only extension registry root. */
   extensionRegistryDir?: string;
+  /** Bundled stdio MCP entry used by workspace auto-configuration. */
+  debugMcpServerPath?: string;
+  /** Trusted project-skill templates copied only after explicit user opt-in. */
+  agentSkillsDir?: string;
   /** Runtime supplies this to bind privileged invokes to the workbench main frame. */
   isTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): boolean;
   /** Main-process authority for workspace and native-dialog file grants. */
@@ -44,6 +52,25 @@ export interface ServiceContext {
   debug?: {
     list(): DebugSessionInfo[];
     generation(sessionId: string): string | undefined;
+    start(request: DebugStartRequest): Promise<DebugSessionInfo>;
+    stop(sessionId: string, terminateDebuggee?: boolean): Promise<void>;
+    restart(sessionId: string): Promise<DebugSessionInfo>;
+    configurations(workspaceRoot: string): Promise<{
+      path: string | null;
+      configurations: DebugLaunchConfiguration[];
+    }>;
+    startConfiguration(
+      workspaceRoot: string,
+      name?: string,
+      activeFile?: string,
+      initialBreakpoints?: Record<string, DapSourceBreakpoint[]>,
+      expectedConfigurationFingerprint?: string,
+    ): Promise<DebugSessionInfo>;
+    setBreakpoints(
+      sessionId: string,
+      sourcePath: string,
+      breakpoints: DapSourceBreakpoint[],
+    ): Promise<DapBreakpoint[]>;
     request<T = unknown>(
       sessionId: string,
       command: string,

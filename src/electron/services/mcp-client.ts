@@ -243,11 +243,13 @@ export class WorkspaceMcpClient {
     }
     const document = JSON.parse(raw) as unknown;
     if (!isRecord(document)) throw new Error(".mcp.json must contain an object");
-    const source = isRecord(document.mcpServers)
-      ? document.mcpServers
-      : isRecord(document.servers)
-        ? document.servers
-        : {};
+    // Accept both common project formats. When both are present, the
+    // mcpServers entry wins for a duplicate name without hiding VS Code-only
+    // servers from Logos.
+    const source = {
+      ...(isRecord(document.servers) ? document.servers : {}),
+      ...(isRecord(document.mcpServers) ? document.mcpServers : {}),
+    };
     return Object.fromEntries(
       Object.entries(source).flatMap(([name, value]) => {
         const config = parseServer(value);

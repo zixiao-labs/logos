@@ -32,6 +32,8 @@ export const CH = {
   workspaceAddFolder: "workspace:addFolder",
   workspaceRemoveFolder: "workspace:removeFolder",
   workspaceRecent: "workspace:recent",
+  workspaceAgentSetupStatus: "workspace:agentSetupStatus",
+  workspaceSetupAgents: "workspace:setupAgents",
   workspaceChanged: "workspace:changed", // push
 
   // extensions (local development registry; invoke)
@@ -55,6 +57,9 @@ export const CH = {
   gitFileDiff: "git:fileDiff",
   gitLog: "git:log",
   gitGraph: "git:graph",
+  gitCommitDetails: "git:commitDetails",
+  gitCherryPick: "git:cherryPick",
+  gitRevert: "git:revert",
   gitBlame: "git:blame",
   gitInit: "git:init",
   gitFetch: "git:fetch",
@@ -132,6 +137,9 @@ export const CH = {
   debugRequest: "debug:request",
   debugSetBreakpoints: "debug:setBreakpoints",
   debugEvent: "debug:event", // push
+  debugMcpPendingApprovals: "debug:mcpPendingApprovals",
+  debugMcpRespondApproval: "debug:mcpRespondApproval",
+  debugMcpApprovalRequest: "debug:mcpApprovalRequest", // push
 
   // app / window
   appVersions: "app:versions",

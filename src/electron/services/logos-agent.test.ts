@@ -865,6 +865,33 @@ describe("Logos agent runtime", () => {
         },
       ],
       generation: () => "debug-generation-1",
+      start: async request => ({
+        id: request.sessionId ?? "debug-started",
+        name: request.configuration.name,
+        debugType: request.configuration.type,
+        request: request.configuration.request,
+        status: "running",
+        capabilities: {},
+      }),
+      stop: async () => undefined,
+      restart: async () => ({
+        id: "debug-1",
+        name: "Node",
+        debugType: "node",
+        request: "launch",
+        status: "running",
+        capabilities: {},
+      }),
+      configurations: async () => ({ path: null, configurations: [] }),
+      startConfiguration: async () => ({
+        id: "debug-started",
+        name: "Node",
+        debugType: "node",
+        request: "launch",
+        status: "running",
+        capabilities: {},
+      }),
+      setBreakpoints: async () => [],
       request: async <T = unknown>(sessionId: string, command: string, args?: Record<string, unknown>) => {
         debugRequests.push({ sessionId, command, args });
         return {
@@ -924,6 +951,98 @@ describe("Logos agent runtime", () => {
         args: { expression: "6 * 7", context: "repl", frameId: 3 },
       },
     ]);
+  });
+
+  it("inspects with DAP without approval and approves mutating DAP actions", async () => {
+    const approvals: Array<{ name: string; input: unknown }> = [];
+    hooks.requestPermission = async (_sessionId, name, input) => {
+      approvals.push({ name, input });
+      return true;
+    };
+    const session = {
+      id: "debug-structured",
+      name: "Node",
+      debugType: "node",
+      request: "launch" as const,
+      status: "stopped" as const,
+      capabilities: {},
+    };
+    const requests: unknown[] = [];
+    hooks.debug = {
+      list: () => [session],
+      generation: () => "structured-generation",
+      start: async () => session,
+      stop: async () => undefined,
+      restart: async () => session,
+      configurations: async () => ({ path: null, configurations: [] }),
+      startConfiguration: async () => session,
+      setBreakpoints: async () => [],
+      request: async <T = unknown>(sessionId: string, command: string, args?: Record<string, unknown>) => {
+        requests.push({ sessionId, command, args });
+        return {
+          seq: 1,
+          type: "response",
+          request_seq: 1,
+          success: true,
+          command,
+          body: { result: "42", variablesReference: 0 } as T,
+        };
+      },
+    };
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      const output = calls === 1
+        ? [{
+            type: "function_call",
+            call_id: "dap-list",
+            name: "DAP",
+            arguments: JSON.stringify({ action: "list_sessions" }),
+          }]
+        : calls === 2
+          ? [{
+              type: "function_call",
+              call_id: "dap-evaluate",
+              name: "DAP",
+              arguments: JSON.stringify({ action: "evaluate", expression: "6 * 7" }),
+            }]
+          : [{
+              type: "function_call",
+              call_id: "finish-dap",
+              name: "Finish",
+              arguments: JSON.stringify({ summary: "Debug inspection complete" }),
+            }];
+      return responseStream([
+        {
+          type: "response.completed",
+          response: { id: `resp-dap-${calls}`, output },
+        },
+      ]);
+    }) as typeof globalThis.fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root, { permissionMode: "bypassPermissions" }),
+      hooks,
+      fakeAuth(),
+      sessionsDir,
+    );
+
+    await runtime.prompt("inspect and evaluate the debugger");
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      name: "DAP",
+      input: { action: "evaluate", session_id: "debug-structured" },
+    });
+    expect(requests).toEqual([
+      {
+        sessionId: "debug-structured",
+        command: "evaluate",
+        args: { expression: "6 * 7", context: "repl" },
+      },
+    ]);
+    expect(
+      events.find(event => event.kind === "tool-result" && event.toolUseId === "dap-list"),
+    ).toMatchObject({ content: expect.stringContaining("debug-structured") });
   });
 
   it("lists and calls a workspace MCP server behind one-time approvals", async () => {

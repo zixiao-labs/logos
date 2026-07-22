@@ -5,6 +5,8 @@ import { CH } from "../../shared/channels";
 import type {
   GitBlameLine,
   GitBranch,
+  GitCommitDetails,
+  GitCommitFile,
   GitFileChange,
   GitFileDiff,
   GitGraphEntry,
@@ -18,6 +20,7 @@ const repositoryRootCache = new Map<string, Promise<string>>();
 const GIT_GRAPH_SEPARATOR = "\u001f";
 const GIT_GRAPH_RECORD_SEPARATOR = "\u001e";
 const NO_COMMIT_ERROR = /does not have any commits yet|bad default revision ['"]?HEAD['"]?/i;
+const COMMIT_HASH = /^[0-9a-f]{7,64}$/i;
 const WATCH_IGNORED = new Set([
   "node_modules",
   "dist",
@@ -59,6 +62,27 @@ export function parseGitGraph(output: string): GitGraphEntry[] {
         date,
       };
     });
+}
+
+export function parseGitCommitFiles(output: string): GitCommitFile[] {
+  return output
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .flatMap((line) => {
+      const match = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
+      if (!match) return [];
+      const binary = match[1] === "-" || match[2] === "-";
+      return [{
+        path: match[3],
+        additions: binary ? null : Number(match[1]),
+        deletions: binary ? null : Number(match[2]),
+        binary,
+      }];
+    });
+}
+
+function assertCommitHash(hash: string): void {
+  if (!COMMIT_HASH.test(hash)) throw new Error("Invalid commit hash");
 }
 
 function git(root: string): SimpleGit {
@@ -300,8 +324,18 @@ export function registerGitService(ctx: ServiceContext): () => void {
     git(root).checkout(branch).then(() => undefined),
   );
 
-  ipcMain.handle(CH.gitCreateBranch, (_e, root: string, name: string) =>
-    git(root).checkoutLocalBranch(name).then(() => undefined),
+  ipcMain.handle(
+    CH.gitCreateBranch,
+    async (_e, root: string, name: string, startPoint?: string) => {
+      const g = git(root);
+      await g.raw(["check-ref-format", "--branch", name]);
+      if (startPoint) {
+        assertCommitHash(startPoint);
+        await g.raw(["checkout", "-b", name, startPoint]);
+      } else {
+        await g.checkoutLocalBranch(name);
+      }
+    },
   );
 
   ipcMain.handle(
@@ -380,6 +414,70 @@ export function registerGitService(ctx: ServiceContext): () => void {
       return parseGitGraph(output);
     },
   );
+
+  ipcMain.handle(
+    CH.gitCommitDetails,
+    async (_e, root: string, hash: string): Promise<GitCommitDetails> => {
+      assertCommitHash(hash);
+      const g = git(root);
+      const [metadata, fileOutput] = await Promise.all([
+        g.raw([
+          "show",
+          "--no-patch",
+          "--date=iso-strict",
+          "--format=%H%x00%P%x00%D%x00%s%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%b",
+          hash,
+        ]),
+        g.raw([
+          "diff-tree",
+          "--root",
+          "--no-commit-id",
+          "--numstat",
+          "-r",
+          "-M",
+          hash,
+        ]),
+      ]);
+      const [
+        commitHash = "",
+        parents = "",
+        refs = "",
+        message = "",
+        author = "",
+        authorEmail = "",
+        date = "",
+        committer = "",
+        committerEmail = "",
+        committedDate = "",
+        body = "",
+      ] = metadata.trimEnd().split("\0");
+      return {
+        hash: commitHash,
+        shortHash: commitHash.slice(0, 7),
+        parents: parents.split(" ").filter(Boolean),
+        refs: refs.split(",").map(ref => ref.trim()).filter(Boolean),
+        message,
+        author,
+        authorEmail,
+        date,
+        committer,
+        committerEmail,
+        committedDate,
+        body: body.trim(),
+        files: parseGitCommitFiles(fileOutput),
+      };
+    },
+  );
+
+  ipcMain.handle(CH.gitCherryPick, async (_e, root: string, hash: string) => {
+    assertCommitHash(hash);
+    await git(root).raw(["cherry-pick", hash]);
+  });
+
+  ipcMain.handle(CH.gitRevert, async (_e, root: string, hash: string) => {
+    assertCommitHash(hash);
+    await git(root).raw(["revert", "--no-edit", hash]);
+  });
 
   ipcMain.handle(
     CH.gitBlame,

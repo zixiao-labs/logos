@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "logos-debug": {
+      "command": "node",
+      "args": ["packages/debug-mcp/server.mjs", "--workspace", "."],
+      "cwd": "."
+    }
+  }
+}

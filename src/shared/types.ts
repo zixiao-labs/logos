@@ -56,6 +56,27 @@ export interface WorkspaceSnapshot {
   root: string | null;
 }
 
+export interface WorkspaceAgentSetupStatus {
+  root: string;
+  mcp: {
+    mcpJson: boolean;
+    cursor: boolean;
+    vscode: boolean;
+    codex: boolean;
+  };
+  skill: boolean;
+}
+
+export interface WorkspaceAgentSetupRequest {
+  root: string;
+  installMcp: boolean;
+  installSkill: boolean;
+}
+
+export interface WorkspaceAgentSetupResult extends WorkspaceAgentSetupStatus {
+  changedFiles: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------
@@ -97,6 +118,23 @@ export interface GitLogEntry {
 export interface GitGraphEntry extends GitLogEntry {
   parents: string[];
   refs: string[];
+}
+
+export interface GitCommitFile {
+  path: string;
+  additions: number | null;
+  deletions: number | null;
+  binary: boolean;
+}
+
+/** Metadata and changed paths shown when a Git Graph commit is expanded. */
+export interface GitCommitDetails extends GitGraphEntry {
+  body: string;
+  authorEmail: string;
+  committer: string;
+  committerEmail: string;
+  committedDate: string;
+  files: GitCommitFile[];
 }
 
 export interface GitBlameLine {

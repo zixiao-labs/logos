@@ -61,6 +61,8 @@ const oneText = z.tuple([text()]);
 const oneId = z.tuple([identifier]);
 const onePath = z.tuple([absolutePath]);
 const rootAndPaths = z.tuple([absolutePath, stringList]);
+const commitHash = text(64).regex(/^[0-9a-f]{7,64}$/i, "must be a commit hash");
+const rootAndCommitHash = z.tuple([absolutePath, commitHash]);
 const optionalBoolean = z.union([z.tuple([]), z.tuple([bool.optional()])]);
 const optionalText = (schema = text()) =>
   z.union([z.tuple([]), z.tuple([schema.optional()])]);
@@ -221,6 +223,19 @@ const debugStart = z
     exceptionBreakpoints: z.array(identifier).max(256).optional(),
   })
   .strict();
+const workspaceAgentSetup = z
+  .object({
+    root: absolutePath,
+    installMcp: bool,
+    installSkill: bool,
+  })
+  .strict();
+const debugMcpApprovalResponse = z
+  .object({
+    requestId: identifier,
+    approved: bool,
+  })
+  .strict();
 
 const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = {
   [CH.fsReadDir]: { schema: onePath },
@@ -246,6 +261,8 @@ const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = 
   [CH.workspaceAddFolder]: { schema: noArgs, maxRequests: 30 },
   [CH.workspaceRemoveFolder]: { schema: onePath, maxRequests: 60 },
   [CH.workspaceRecent]: { schema: noArgs },
+  [CH.workspaceAgentSetupStatus]: { schema: onePath, maxRequests: 60 },
+  [CH.workspaceSetupAgents]: { schema: z.tuple([workspaceAgentSetup]), maxRequests: 30 },
 
   [CH.extensionsList]: { schema: noArgs },
   [CH.extensionsInstall]: { schema: oneId, maxRequests: 30 },
@@ -261,11 +278,14 @@ const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = 
   [CH.gitUndoLastCommit]: { schema: onePath },
   [CH.gitBranches]: { schema: onePath },
   [CH.gitCheckout]: { schema: z.tuple([absolutePath, text(1_024)]) },
-  [CH.gitCreateBranch]: { schema: z.tuple([absolutePath, text(1_024)]) },
+  [CH.gitCreateBranch]: { schema: z.tuple([absolutePath, text(1_024), commitHash.optional()]) },
   [CH.gitDiff]: { schema: z.tuple([absolutePath, text(4_096), bool]) },
   [CH.gitFileDiff]: { schema: z.tuple([absolutePath, text(4_096), bool]) },
   [CH.gitLog]: { schema: z.tuple([absolutePath, positiveInteger.max(10_000).optional()]) },
   [CH.gitGraph]: { schema: z.tuple([absolutePath, positiveInteger.max(10_000).optional()]) },
+  [CH.gitCommitDetails]: { schema: rootAndCommitHash },
+  [CH.gitCherryPick]: { schema: rootAndCommitHash },
+  [CH.gitRevert]: { schema: rootAndCommitHash },
   [CH.gitBlame]: { schema: z.tuple([absolutePath, absolutePath, positiveInteger]) },
   [CH.gitInit]: { schema: onePath },
   [CH.gitFetch]: { schema: onePath },
@@ -327,6 +347,8 @@ const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = 
   [CH.debugStop]: { schema: z.tuple([identifier, bool.optional()]) },
   [CH.debugRequest]: { schema: z.tuple([identifier, identifier, z.unknown().optional()]), maxRequests: HIGH_FREQUENCY_MAX_REQUESTS },
   [CH.debugSetBreakpoints]: { schema: z.tuple([identifier, absolutePath, z.array(sourceBreakpoint).max(10_000)]) },
+  [CH.debugMcpPendingApprovals]: { schema: noArgs },
+  [CH.debugMcpRespondApproval]: { schema: z.tuple([debugMcpApprovalResponse]), maxRequests: 120 },
 
   [CH.appVersions]: { schema: noArgs },
   [CH.appPlatform]: { schema: noArgs },

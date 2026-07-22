@@ -68,4 +68,33 @@ exports.default = async function afterPack(context) {
   );
   cpSync(adapterSrc, adapterDest, { recursive: true });
   console.log(`[afterPack] bundled debug adapters → ${adapterDest}`);
+
+  const debugMcpSrc = path.join(
+    context.packager.projectDir,
+    "build",
+    "debug-mcp",
+  );
+  if (!existsSync(path.join(debugMcpSrc, "server.mjs"))) {
+    throw new Error(
+      `[afterPack] ${debugMcpSrc}/server.mjs missing — run \`npm run prepackage:debug-mcp\` before packaging`,
+    );
+  }
+  const debugMcpDest = path.join(
+    context.packager.getResourcesDir(context.appOutDir),
+    "debug-mcp",
+  );
+  cpSync(debugMcpSrc, debugMcpDest, { recursive: true });
+  console.log(`[afterPack] bundled debug MCP server → ${debugMcpDest}`);
+
+  const agentSkillsSrc = path.join(
+    context.packager.projectDir,
+    ".agents",
+    "skills",
+  );
+  const agentSkillsDest = path.join(
+    context.packager.getResourcesDir(context.appOutDir),
+    "agent-skills",
+  );
+  cpSync(agentSkillsSrc, agentSkillsDest, { recursive: true });
+  console.log(`[afterPack] bundled Agent Skills → ${agentSkillsDest}`);
 };

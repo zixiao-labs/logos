@@ -20,6 +20,10 @@ import type {
   DebugSessionEvent,
   DebugStartRequest,
 } from "../shared/dap";
+import type {
+  DebugMcpApprovalRequest,
+  DebugMcpApprovalResponse,
+} from "../shared/debug-control";
 
 /** Subscribe to a broadcast channel; returns an unsubscribe handle. */
 function on<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
@@ -152,6 +156,8 @@ const api: LogosAPI = {
     addFolder: () => ipcRenderer.invoke(CH.workspaceAddFolder),
     removeFolder: (p) => ipcRenderer.invoke(CH.workspaceRemoveFolder, p),
     recent: () => ipcRenderer.invoke(CH.workspaceRecent),
+    agentSetupStatus: (p) => ipcRenderer.invoke(CH.workspaceAgentSetupStatus, p),
+    setupAgents: (request) => ipcRenderer.invoke(CH.workspaceSetupAgents, request),
     onChanged: (cb) => on<import("../shared/types").WorkspaceSnapshot>(CH.workspaceChanged, cb),
   },
   extensions: {
@@ -171,13 +177,17 @@ const api: LogosAPI = {
     undoLastCommit: (root) => ipcRenderer.invoke(CH.gitUndoLastCommit, root),
     branches: (root) => ipcRenderer.invoke(CH.gitBranches, root),
     checkout: (root, branch) => ipcRenderer.invoke(CH.gitCheckout, root, branch),
-    createBranch: (root, name) =>
-      ipcRenderer.invoke(CH.gitCreateBranch, root, name),
+    createBranch: (root, name, startPoint) =>
+      ipcRenderer.invoke(CH.gitCreateBranch, root, name, startPoint),
     diff: (root, p, staged) => ipcRenderer.invoke(CH.gitDiff, root, p, staged),
     fileDiff: (root, p, staged) =>
       ipcRenderer.invoke(CH.gitFileDiff, root, p, staged),
     log: (root, limit) => ipcRenderer.invoke(CH.gitLog, root, limit),
     graph: (root, limit) => ipcRenderer.invoke(CH.gitGraph, root, limit),
+    commitDetails: (root, hash) =>
+      ipcRenderer.invoke(CH.gitCommitDetails, root, hash),
+    cherryPick: (root, hash) => ipcRenderer.invoke(CH.gitCherryPick, root, hash),
+    revert: (root, hash) => ipcRenderer.invoke(CH.gitRevert, root, hash),
     blame: (root, p, line) => ipcRenderer.invoke(CH.gitBlame, root, p, line),
     init: (root) => ipcRenderer.invoke(CH.gitInit, root),
     fetch: (root) => ipcRenderer.invoke(CH.gitFetch, root),
@@ -340,6 +350,11 @@ const api: LogosAPI = {
         sourcePath,
         breakpoints,
       ),
+    pendingMcpApprovals: () => ipcRenderer.invoke(CH.debugMcpPendingApprovals),
+    respondMcpApproval: (response: DebugMcpApprovalResponse) =>
+      ipcRenderer.invoke(CH.debugMcpRespondApproval, response),
+    onMcpApproval: (cb) =>
+      on<DebugMcpApprovalRequest>(CH.debugMcpApprovalRequest, cb),
     onEvent: (cb) => on<DebugSessionEvent>(CH.debugEvent, cb),
   },
   app: {

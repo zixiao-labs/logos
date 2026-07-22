@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from "electron";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { CH, type ChannelName } from "../shared/channels";
@@ -7,6 +7,8 @@ import type { ServiceContext } from "./services/context";
 import { registerAgentService } from "./services/agent";
 import { registerAcpRegistryService } from "./services/acp-registry";
 import { registerDebugService } from "./services/debug";
+import { registerDebugMcpBridge } from "./services/debug-mcp-bridge";
+import { registerDebugMcpApprovalService } from "./services/debug-mcp-approval";
 import { registerFsService } from "./services/fs";
 import { registerExtensionService } from "./services/extensions";
 import { registerGitService } from "./services/git";
@@ -46,6 +48,9 @@ const GIT_ROOT_CHANNELS = new Set<ChannelName>([
   CH.gitFileDiff,
   CH.gitLog,
   CH.gitGraph,
+  CH.gitCommitDetails,
+  CH.gitCherryPick,
+  CH.gitRevert,
   CH.gitBlame,
   CH.gitInit,
   CH.gitFetch,
@@ -143,6 +148,16 @@ async function authorizeWorkbenchRequest(
     await workspaceAccess.assertPath(String(args[1]));
     return;
   }
+  if (channel === CH.workspaceAgentSetupStatus) {
+    await workspaceAccess.assertWorkspaceRoot(String(args[0]));
+    return;
+  }
+  if (channel === CH.workspaceSetupAgents) {
+    await workspaceAccess.assertWorkspaceRoot(
+      String((args[0] as { root: string }).root),
+    );
+    return;
+  }
   if (channel === CH.debugStart) {
     const request = args[0] as {
       configuration: Record<string, unknown>;
@@ -182,6 +197,12 @@ function createContext(): ServiceContext {
     isPackaged: app.isPackaged,
     appVersion: app.getVersion(),
     extensionRegistryDir,
+    debugMcpServerPath: app.isPackaged
+      ? path.join(process.resourcesPath, "debug-mcp", "server.mjs")
+      : path.resolve(app.getAppPath(), "packages", "debug-mcp", "server.mjs"),
+    agentSkillsDir: app.isPackaged
+      ? path.join(process.resourcesPath, "agent-skills")
+      : path.resolve(app.getAppPath(), ".agents", "skills"),
     isTrustedSender,
     workspaceAccess,
   };
@@ -319,10 +340,31 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const ctx = createContext();
   const acpSecrets = new AcpSecretStore(ctx.userDataDir);
   const disposeDebug = registerDebugService(ctx);
+  const debugMcpNotifications = new Set<Notification>();
+  const debugMcpApprovals = registerDebugMcpApprovalService(ctx, request => {
+    if (!Notification.isSupported()) return;
+    const action = String(request.details.action ?? "debug");
+    const notification = new Notification({
+      title: "Logos · Debug approval required",
+      body: `An external MCP agent wants to run '${action}'. Open Logos to allow or deny it.`,
+      silent: false,
+    });
+    debugMcpNotifications.add(notification);
+    notification.on("close", () => debugMcpNotifications.delete(notification));
+    notification.on("click", () => {
+      const window = ctx.getWindow();
+      if (!window || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+      ctx.send(CH.debugMcpApprovalRequest, request);
+    });
+    notification.show();
+  });
   registerAppHandlers(ctx);
   disposers.push(
     registerWorkspaceService(ctx, dialog),
@@ -334,10 +376,20 @@ app.whenReady().then(() => {
     registerExtensionService(ctx),
     registerAgentService(ctx, acpSecrets),
     registerLspService(ctx),
+    debugMcpApprovals.dispose,
     disposeDebug,
     registerMenu(ctx),
   );
-  void createWindow();
+  await createWindow();
+  try {
+    disposers.push(
+      await registerDebugMcpBridge(ctx, details =>
+        debugMcpApprovals.request(details),
+      ),
+    );
+  } catch (error) {
+    console.warn("Debug MCP bridge is unavailable:", error);
+  }
 
   // Background self-update from GitHub Releases (packaged builds only).
   setupAutoUpdater();

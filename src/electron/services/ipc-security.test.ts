@@ -76,4 +76,45 @@ describe("secure IPC registration", () => {
       ),
     ).toBe(512 * 1024);
   });
+
+  it("declares and validates the interactive Git graph channels", async () => {
+    const raw = createIpcHarness();
+    const secure = createSecureIpcMain(raw.ipcMain, {
+      isTrustedSender: () => true,
+    });
+    const handler = (_event: unknown, ...args: unknown[]) => args;
+
+    secure.handle(CH.gitCommitDetails, handler);
+    secure.handle(CH.gitCherryPick, handler);
+    secure.handle(CH.gitRevert, handler);
+    secure.handle(CH.gitCreateBranch, handler);
+
+    const root = "/workspace/project";
+    const hash = "abcdef1234567890";
+    await expect(raw.invoke(CH.gitCommitDetails, root, hash)).resolves.toEqual([
+      root,
+      hash,
+    ]);
+    await expect(raw.invoke(CH.gitCherryPick, root, hash)).resolves.toEqual([
+      root,
+      hash,
+    ]);
+    await expect(raw.invoke(CH.gitRevert, root, hash)).resolves.toEqual([
+      root,
+      hash,
+    ]);
+    await expect(
+      raw.invoke(CH.gitCreateBranch, root, "from-graph", hash),
+    ).resolves.toEqual([root, "from-graph", hash]);
+    await expect(
+      raw.invoke(CH.gitCreateBranch, root, "from-head", undefined),
+    ).resolves.toEqual([root, "from-head", undefined]);
+
+    await expect(
+      raw.invoke(CH.gitCommitDetails, root, "--all"),
+    ).rejects.toThrow("Invalid IPC payload");
+    await expect(
+      raw.invoke(CH.gitCreateBranch, root, "unsafe", "HEAD~1"),
+    ).rejects.toThrow("Invalid IPC payload");
+  });
 });

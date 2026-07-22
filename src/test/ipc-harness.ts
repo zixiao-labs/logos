@@ -17,6 +17,9 @@ export function createIpcHarness() {
       listeners.set(channel, listener);
       return ipcMain;
     },
+    removeHandler(channel: string) {
+      handlers.delete(channel);
+    },
   } as unknown as IpcMain;
 
   return {
