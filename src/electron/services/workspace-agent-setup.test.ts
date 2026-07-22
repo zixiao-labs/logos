@@ -3,16 +3,10 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  SKILL_FILES,
   setupWorkspaceAgents,
   workspaceAgentSetupStatus,
 } from "./workspace-agent-setup";
-
-const SKILL_FILES = [
-  "SKILL.md",
-  "agents/openai.yaml",
-  "references/compatibility.md",
-  "scripts/validate-launch-json.mjs",
-];
 
 describe("workspace Agent setup", () => {
   let temporary: string;

@@ -7,12 +7,19 @@ import type {
 } from "../../shared/types";
 
 const SERVER_NAME = "logos-debug";
-const SKILL_FILES = [
+export const SKILL_FILES = [
   "SKILL.md",
   "agents/openai.yaml",
   "references/compatibility.md",
   "scripts/validate-launch-json.mjs",
 ] as const;
+export const MCP_FILES = [
+  ".mcp.json",
+  ".cursor/mcp.json",
+  ".vscode/mcp.json",
+  ".codex/config.toml",
+] as const;
+const [MCP_JSON_FILE, CURSOR_MCP_FILE, VSCODE_MCP_FILE, CODEX_MCP_FILE] = MCP_FILES;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -119,12 +126,12 @@ export async function workspaceAgentSetupStatus(
   const skillRoot = path.join(root, ".agents", "skills", "setup-launch-json");
   const [mcpJson, cursor, vscode, codex, skillFiles] = await Promise.all([
     Promise.all([
-      jsonHasServer(path.join(root, ".mcp.json"), "mcpServers"),
-      jsonHasServer(path.join(root, ".mcp.json"), "servers"),
+      jsonHasServer(path.join(root, MCP_JSON_FILE), "mcpServers"),
+      jsonHasServer(path.join(root, MCP_JSON_FILE), "servers"),
     ]).then(values => values.some(Boolean)),
-    jsonHasServer(path.join(root, ".cursor", "mcp.json"), "mcpServers"),
-    jsonHasServer(path.join(root, ".vscode", "mcp.json"), "servers"),
-    codexHasServer(path.join(root, ".codex", "config.toml")),
+    jsonHasServer(path.join(root, CURSOR_MCP_FILE), "mcpServers"),
+    jsonHasServer(path.join(root, VSCODE_MCP_FILE), "servers"),
+    codexHasServer(path.join(root, CODEX_MCP_FILE)),
     Promise.all(SKILL_FILES.map(file => exists(path.join(skillRoot, file)))),
   ]);
   return {
@@ -146,36 +153,36 @@ export async function setupWorkspaceAgents(
     const common = mcpServerConfig(request.root, options.debugMcpServerPath);
     recordChange(
       await mergeJsonServer(
-        path.join(request.root, ".mcp.json"),
+        path.join(request.root, MCP_JSON_FILE),
         "mcpServers",
         common,
         "servers",
       ),
-      ".mcp.json",
+      MCP_JSON_FILE,
     );
     recordChange(
       await mergeJsonServer(
-        path.join(request.root, ".cursor", "mcp.json"),
+        path.join(request.root, CURSOR_MCP_FILE),
         "mcpServers",
         common,
       ),
-      ".cursor/mcp.json",
+      CURSOR_MCP_FILE,
     );
     recordChange(
       await mergeJsonServer(
-        path.join(request.root, ".vscode", "mcp.json"),
+        path.join(request.root, VSCODE_MCP_FILE),
         "servers",
         { type: "stdio", ...common },
       ),
-      ".vscode/mcp.json",
+      VSCODE_MCP_FILE,
     );
     recordChange(
       await mergeCodexServer(
-        path.join(request.root, ".codex", "config.toml"),
+        path.join(request.root, CODEX_MCP_FILE),
         request.root,
         options.debugMcpServerPath,
       ),
-      ".codex/config.toml",
+      CODEX_MCP_FILE,
     );
   }
   if (request.installSkill) {

@@ -50,4 +50,45 @@ describe("setup-launch-json skill validator", () => {
     }
     expect(stderr).toContain("preLaunchTask is not supported");
   });
+
+  it("validates Electron renderer configuration and port", async () => {
+    temporary = await fs.mkdtemp(path.join(os.tmpdir(), "logos-launch-skill-"));
+    await fs.mkdir(path.join(temporary, ".logos"));
+    await fs.writeFile(
+      path.join(temporary, ".logos/launch.json"),
+      JSON.stringify({
+        version: "0.2.0",
+        configurations: [
+          {
+            name: "Invalid renderer",
+            type: "electron",
+            request: "launch",
+            renderer: true,
+          },
+          {
+            name: "Missing renderer port",
+            type: "electron",
+            request: "launch",
+            renderer: {},
+          },
+          {
+            name: "Invalid renderer port",
+            type: "electron",
+            request: "launch",
+            renderer: { port: 65536 },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    let stderr = "";
+    try {
+      await exec(process.execPath, [validator, "--workspace", temporary]);
+    } catch (error) {
+      stderr = String((error as { stderr?: string }).stderr ?? error);
+    }
+    expect(stderr).toContain("renderer must be an object");
+    expect(stderr).toContain("renderer.port is required for renderer debugging");
+    expect(stderr).toContain("renderer.port must be an integer from 1 through 65535");
+  });
 });

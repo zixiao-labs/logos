@@ -13,6 +13,8 @@ import { WorkspaceAccessController } from "./workspace-access";
 import type { WorkspaceSnapshot } from "../../shared/types";
 import type { WorkspaceAgentSetupRequest } from "../../shared/types";
 import {
+  MCP_FILES,
+  SKILL_FILES,
   setupWorkspaceAgents,
   workspaceAgentSetupStatus,
 } from "./workspace-agent-setup";
@@ -22,18 +24,11 @@ interface WorkspaceState {
   recent: string[];
 }
 
-const MCP_SETUP_FILES = [
-  ".mcp.json",
-  ".cursor/mcp.json",
-  ".vscode/mcp.json",
-  ".codex/config.toml",
-] as const;
-const SKILL_SETUP_FILES = [
-  ".agents/skills/setup-launch-json/SKILL.md",
-  ".agents/skills/setup-launch-json/agents/openai.yaml",
-  ".agents/skills/setup-launch-json/references/compatibility.md",
-  ".agents/skills/setup-launch-json/scripts/validate-launch-json.mjs",
-] as const;
+function skillSetupFiles(): string[] {
+  return SKILL_FILES.map(relative =>
+    path.join(".agents", "skills", "setup-launch-json", relative)
+  );
+}
 
 interface WorkspaceDialog {
   showOpenDialog(
@@ -160,7 +155,7 @@ export function registerWorkspaceService(
   ipcMain.handle(CH.workspaceRecent, async () => (await load()).recent);
   ipcMain.handle(CH.workspaceAgentSetupStatus, async (_event, root: string) => {
     const canonical = await workspaceAccess.assertWorkspaceRoot(root);
-    for (const relative of [...MCP_SETUP_FILES, ...SKILL_SETUP_FILES]) {
+    for (const relative of [...MCP_FILES, ...skillSetupFiles()]) {
       await workspaceAccess.assertPath(path.join(canonical, relative));
     }
     return workspaceAgentSetupStatus(canonical);
@@ -169,11 +164,12 @@ export function registerWorkspaceService(
     CH.workspaceSetupAgents,
     async (_event, request: WorkspaceAgentSetupRequest) => {
       const root = await workspaceAccess.assertWorkspaceRoot(request.root);
+      const skillFiles = skillSetupFiles();
       const writeTargets = [
-        ...(request.installMcp ? MCP_SETUP_FILES : []),
-        ...(request.installSkill ? SKILL_SETUP_FILES : []),
+        ...(request.installMcp ? MCP_FILES : []),
+        ...(request.installSkill ? skillFiles : []),
       ];
-      for (const relative of [...MCP_SETUP_FILES, ...SKILL_SETUP_FILES]) {
+      for (const relative of [...MCP_FILES, ...skillFiles]) {
         await workspaceAccess.assertPath(path.join(root, relative));
       }
       for (const relative of writeTargets) {

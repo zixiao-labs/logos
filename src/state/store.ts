@@ -1211,7 +1211,12 @@ export const useStore = create<LogosState>((set, get) => ({
     if (!path) return;
     await get().setRoot(path);
     if (knownWorkspace.has(path)) return;
-    const status = await window.logos.workspace.agentSetupStatus(path);
+    let status: WorkspaceAgentSetupStatus;
+    try {
+      status = await window.logos.workspace.agentSetupStatus(path);
+    } catch {
+      return;
+    }
     if (!Object.values(status.mcp).every(Boolean) || !status.skill) {
       set({ workspaceAgentSetup: status });
     }
@@ -1227,6 +1232,7 @@ export const useStore = create<LogosState>((set, get) => ({
       workspaceFolders,
       recent,
       gitRoot: workspaceFolders[0] ?? null,
+      workspaceAgentSetup: null,
     });
     await window.logos.git.watch(workspaceFolders);
     await get().refreshGit();
@@ -1237,7 +1243,12 @@ export const useStore = create<LogosState>((set, get) => ({
     const workspace = await window.logos.workspace.addFolder();
     if (!workspace) return;
     const recent = await window.logos.workspace.recent();
-    set({ root: workspace.root, workspaceFolders: workspace.folders, recent });
+    set({
+      root: workspace.root,
+      workspaceFolders: workspace.folders,
+      recent,
+      workspaceAgentSetup: null,
+    });
     await window.logos.git.watch(workspace.folders);
     await get().refreshGit();
   },
@@ -1255,6 +1266,7 @@ export const useStore = create<LogosState>((set, get) => ({
       workspaceFolders: workspace.folders,
       gitRoot,
       recent,
+      workspaceAgentSetup: null,
     });
     await window.logos.git.watch(workspace.folders);
     await get().refreshGit();
@@ -1265,12 +1277,21 @@ export const useStore = create<LogosState>((set, get) => ({
   async setupWorkspaceAgents(installMcp, installSkill) {
     const prompt = get().workspaceAgentSetup;
     if (!prompt) return;
+    if (prompt.root !== get().root) {
+      set({ workspaceAgentSetup: null });
+      return;
+    }
     const result = await window.logos.workspace.setupAgents({
       root: prompt.root,
       installMcp,
       installSkill,
     });
-    set({ workspaceAgentSetup: null });
+    set((state) => ({
+      workspaceAgentSetup:
+        state.workspaceAgentSetup?.root === prompt.root
+          ? null
+          : state.workspaceAgentSetup,
+    }));
     notifyResult(
       result.changedFiles.length
         ? `Agent setup updated ${result.changedFiles.length} file(s)`

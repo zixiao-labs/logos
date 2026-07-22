@@ -180,6 +180,20 @@ for (const [index, configuration] of configurations.entries()) {
       errors.push(`${label}.adapter.port must be an integer from 1 through 65535.`);
     }
   }
+  if (configuration.renderer !== undefined) {
+    if (!object(configuration.renderer)) {
+      errors.push(`${label}.renderer must be an object.`);
+    } else {
+      const renderer = configuration.renderer;
+      if (!Number.isInteger(renderer.port)) {
+        errors.push(`${label}.renderer.port is required for renderer debugging.`);
+      }
+      if (renderer.port !== undefined &&
+          (!Number.isInteger(renderer.port) || renderer.port < 1 || renderer.port > 65535)) {
+        errors.push(`${label}.renderer.port must be an integer from 1 through 65535.`);
+      }
+    }
+  }
   strings(configuration, (value, keyPath) => {
     for (const match of value.matchAll(/\$\{([^}]+)\}/g)) {
       const variable = match[1];

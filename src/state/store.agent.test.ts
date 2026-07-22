@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "@lightning-js/lightning";
-import type { AcpRegistryAgent } from "../shared/types";
+import type {
+  AcpRegistryAgent,
+  WorkspaceAgentSetupStatus,
+} from "../shared/types";
 import { type AgentThread, useStore } from "./store";
 
 const initialStoreState = useStore.getInitialState();
@@ -35,6 +38,14 @@ function agentThread(id = "agent"): AgentThread {
     commands: [],
     canConfigureProviders: false,
     trace: [],
+  };
+}
+
+function workspaceAgentPrompt(root: string): WorkspaceAgentSetupStatus {
+  return {
+    root,
+    mcp: { mcpJson: false, cursor: false, vscode: false, codex: false },
+    skill: false,
   };
 }
 
@@ -163,5 +174,101 @@ describe("agent store", () => {
     fail = false;
     await useStore.getState().loadAgentRegistry();
     expect(useStore.getState().agentRegistry).toEqual([]);
+  });
+});
+
+describe("workspace Agent setup store", () => {
+  it("clears the setup prompt when the workspace changes", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        logos: {
+          workspace: {
+            setRoot: async () => undefined,
+            getFolders: async () => ["/next"],
+            recent: async () => [],
+            addFolder: async () => ({
+              root: "/next",
+              folders: ["/next", "/second"],
+            }),
+            removeFolder: async () => ({
+              root: "/second",
+              folders: ["/second"],
+            }),
+          },
+          git: { watch: async () => undefined },
+        },
+      },
+    });
+    useStore.setState({
+      workspaceAgentSetup: workspaceAgentPrompt("/old"),
+      refreshGit: async () => undefined,
+      loadDebugConfigurations: async () => undefined,
+    });
+
+    await useStore.getState().setRoot("/next");
+    expect(useStore.getState().workspaceAgentSetup).toBeNull();
+
+    useStore.setState({ workspaceAgentSetup: workspaceAgentPrompt("/next") });
+    await useStore.getState().addWorkspaceFolder();
+    expect(useStore.getState().workspaceAgentSetup).toBeNull();
+
+    useStore.setState({ workspaceAgentSetup: workspaceAgentPrompt("/next") });
+    await useStore.getState().removeWorkspaceFolder("/next");
+    expect(useStore.getState().workspaceAgentSetup).toBeNull();
+  });
+
+  it("keeps a successful folder switch when setup status lookup fails", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        logos: {
+          dialog: { openFolder: async () => "/next" },
+          workspace: {
+            setRoot: async () => undefined,
+            getFolders: async () => ["/next"],
+            recent: async () => [],
+            agentSetupStatus: async () => {
+              throw new Error("status failed");
+            },
+          },
+          git: { watch: async () => undefined },
+        },
+      },
+    });
+    useStore.setState({
+      recent: [],
+      refreshGit: async () => undefined,
+      loadDebugConfigurations: async () => undefined,
+    });
+
+    await expect(useStore.getState().openFolder()).resolves.toBeUndefined();
+    expect(useStore.getState().root).toBe("/next");
+    expect(useStore.getState().workspaceAgentSetup).toBeNull();
+  });
+
+  it("does not apply a setup prompt from a stale workspace", async () => {
+    let setupCalls = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        logos: {
+          workspace: {
+            setupAgents: async () => {
+              setupCalls++;
+            },
+          },
+        },
+      },
+    });
+    useStore.setState({
+      root: "/current",
+      workspaceAgentSetup: workspaceAgentPrompt("/old"),
+    });
+
+    await useStore.getState().setupWorkspaceAgents(true, true);
+
+    expect(setupCalls).toBe(0);
+    expect(useStore.getState().workspaceAgentSetup).toBeNull();
   });
 });
