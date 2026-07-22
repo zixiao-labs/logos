@@ -415,6 +415,12 @@ describe("git service", () => {
     await expect(
       service.invoke(CH.gitCommitDetails, root, "--all"),
     ).rejects.toThrow("Invalid commit hash");
+    await expect(
+      service.invoke(CH.gitCherryPick, root, "--all"),
+    ).rejects.toThrow("Invalid commit hash");
+    await expect(
+      service.invoke(CH.gitRevert, root, "--all"),
+    ).rejects.toThrow("Invalid commit hash");
 
     await service.invoke(CH.gitCreateBranch, root, "from-graph", graph[0]!.hash);
     expect((await service.invoke<GitStatus>(CH.gitStatus, root)).branch).toBe(
