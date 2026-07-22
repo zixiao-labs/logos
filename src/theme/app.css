@@ -1018,6 +1018,9 @@ textarea.field {
   flex-direction: column;
   gap: 12px;
 }
+.agent-log > * {
+  flex-shrink: 0;
+}
 .agent-empty {
   margin: auto;
   text-align: center;

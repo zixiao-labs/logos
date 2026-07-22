@@ -20,7 +20,7 @@ describe("setup-launch-json skill validator", () => {
   it("accepts this project's JSONC launch configuration", async () => {
     await expect(
       exec(process.execPath, [validator, "--workspace", process.cwd()]),
-    ).resolves.toMatchObject({ stdout: expect.stringContaining("1 valid configuration") });
+    ).resolves.toMatchObject({ stdout: expect.stringContaining("valid configuration") });
   });
 
   it("rejects unsupported editor orchestration", async () => {

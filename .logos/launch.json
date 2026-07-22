@@ -1,0 +1,30 @@
+{
+  // Logos loads this file before .vscode/launch.json. The Node configuration
+  // is retained here so adding Electron renderer debugging does not hide it.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Electron: Logos (main + renderer)",
+      "type": "electron",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "electron"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "autoAttachChildProcesses": true,
+      "renderer": {
+        "port": 9222,
+        "webRoot": "${workspaceFolder}",
+        "urlFilter": "http://localhost:3000/*"
+      }
+    },
+    {
+      "name": "Node: Current File",
+      "type": "node",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole"
+    }
+  ]
+}

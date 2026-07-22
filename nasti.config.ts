@@ -48,6 +48,10 @@ export default defineConfig({
   electron: {
     main: "src/electron/main.ts",
     preload: "src/electron/preload.ts",
+    // Keep Chromium's inspector available for the Logos Electron launch
+    // configuration. The renderer child session in .logos/launch.json uses
+    // the same port.
+    electronArgs: ["--remote-debugging-port=9222"],
     mainFormat: "cjs",
     preloadFormat: "cjs",
     nodeTarget: "node22",
