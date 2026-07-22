@@ -10,6 +10,8 @@ import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
 import { LspMessageDialog } from "./components/LspMessageDialog";
 import { LspSymbolResultsDialog } from "./components/LspSymbolResultsDialog";
+import { DebugMcpApprovalDialog } from "./components/DebugMcpApprovalDialog";
+import { WorkspaceAgentSetupDialog } from "./components/WorkspaceAgentSetupDialog";
 import { VSCodeLayout } from "./layouts/VSCodeLayout";
 import { CursorLayout } from "./layouts/CursorLayout";
 
@@ -213,6 +215,8 @@ export function App() {
       <CommandPalette />
       <LspMessageDialog />
       <LspSymbolResultsDialog />
+      <WorkspaceAgentSetupDialog />
+      <DebugMcpApprovalDialog />
       <Toast.Provider placement="bottom end" />
     </div>
   );

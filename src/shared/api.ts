@@ -37,6 +37,9 @@ import type {
   TerminalCreated,
   WindowControl,
   WorkspaceSnapshot,
+  WorkspaceAgentSetupRequest,
+  WorkspaceAgentSetupResult,
+  WorkspaceAgentSetupStatus,
 } from "./types";
 import type { ServerCapabilities } from "vscode-languageserver-protocol";
 import type {
@@ -50,6 +53,10 @@ import type {
   DebugStartRequest,
 } from "./dap";
 import type { ExtensionRegistrySnapshot } from "./extensions";
+import type {
+  DebugMcpApprovalRequest,
+  DebugMcpApprovalResponse,
+} from "./debug-control";
 
 /** Unsubscribe handle returned by every `on…` subscription. */
 export type Unsubscribe = () => void;
@@ -101,6 +108,8 @@ export interface LogosAPI {
     addFolder(): Promise<WorkspaceSnapshot | null>;
     removeFolder(path: string): Promise<WorkspaceSnapshot>;
     recent(): Promise<string[]>;
+    agentSetupStatus(path: string): Promise<WorkspaceAgentSetupStatus>;
+    setupAgents(request: WorkspaceAgentSetupRequest): Promise<WorkspaceAgentSetupResult>;
     onChanged(cb: (workspace: WorkspaceSnapshot) => void): Unsubscribe;
   };
   extensions: {
@@ -230,6 +239,9 @@ export interface LogosAPI {
       sourcePath: string,
       breakpoints: DapSourceBreakpoint[],
     ): Promise<DapBreakpoint[]>;
+    pendingMcpApprovals(): Promise<DebugMcpApprovalRequest[]>;
+    respondMcpApproval(response: DebugMcpApprovalResponse): Promise<void>;
+    onMcpApproval(cb: (request: DebugMcpApprovalRequest) => void): Unsubscribe;
     onEvent(cb: (event: DebugSessionEvent) => void): Unsubscribe;
   };
   app: {

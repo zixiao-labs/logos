@@ -11,11 +11,29 @@ import { CH } from "../../shared/channels";
 import type { ServiceContext } from "./context";
 import { WorkspaceAccessController } from "./workspace-access";
 import type { WorkspaceSnapshot } from "../../shared/types";
+import type { WorkspaceAgentSetupRequest } from "../../shared/types";
+import {
+  setupWorkspaceAgents,
+  workspaceAgentSetupStatus,
+} from "./workspace-agent-setup";
 
 interface WorkspaceState {
   folders: string[];
   recent: string[];
 }
+
+const MCP_SETUP_FILES = [
+  ".mcp.json",
+  ".cursor/mcp.json",
+  ".vscode/mcp.json",
+  ".codex/config.toml",
+] as const;
+const SKILL_SETUP_FILES = [
+  ".agents/skills/setup-launch-json/SKILL.md",
+  ".agents/skills/setup-launch-json/agents/openai.yaml",
+  ".agents/skills/setup-launch-json/references/compatibility.md",
+  ".agents/skills/setup-launch-json/scripts/validate-launch-json.mjs",
+] as const;
 
 interface WorkspaceDialog {
   showOpenDialog(
@@ -140,6 +158,39 @@ export function registerWorkspaceService(
   ipcMain.handle(CH.workspaceGetFolders, async () => [...(await load()).folders]);
   ipcMain.handle(CH.workspaceSetRoot, (_e, root: string) => setFolders([root]));
   ipcMain.handle(CH.workspaceRecent, async () => (await load()).recent);
+  ipcMain.handle(CH.workspaceAgentSetupStatus, async (_event, root: string) => {
+    const canonical = await workspaceAccess.assertWorkspaceRoot(root);
+    for (const relative of [...MCP_SETUP_FILES, ...SKILL_SETUP_FILES]) {
+      await workspaceAccess.assertPath(path.join(canonical, relative));
+    }
+    return workspaceAgentSetupStatus(canonical);
+  });
+  ipcMain.handle(
+    CH.workspaceSetupAgents,
+    async (_event, request: WorkspaceAgentSetupRequest) => {
+      const root = await workspaceAccess.assertWorkspaceRoot(request.root);
+      const writeTargets = [
+        ...(request.installMcp ? MCP_SETUP_FILES : []),
+        ...(request.installSkill ? SKILL_SETUP_FILES : []),
+      ];
+      for (const relative of [...MCP_SETUP_FILES, ...SKILL_SETUP_FILES]) {
+        await workspaceAccess.assertPath(path.join(root, relative));
+      }
+      for (const relative of writeTargets) {
+        await workspaceAccess.assertPath(path.join(root, relative), "write");
+      }
+      const debugMcpServerPath = ctx.debugMcpServerPath ??
+        path.resolve("packages/debug-mcp/server.mjs");
+      const skillTemplateRoot = path.join(
+        ctx.agentSkillsDir ?? path.resolve(".agents/skills"),
+        "setup-launch-json",
+      );
+      return setupWorkspaceAgents(
+        { ...request, root },
+        { debugMcpServerPath, skillTemplateRoot },
+      );
+    },
+  );
 
   ipcMain.handle(CH.dialogOpenFolder, async () => {
     const win = ctx.getWindow();

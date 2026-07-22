@@ -17,7 +17,7 @@ Create a minimal, evidence-based debug configuration that Logos can load and the
    - Update `.logos/launch.json` when it exists; Logos always loads it first.
    - Otherwise update `.vscode/launch.json` only when every new field belongs to the compatible subset.
    - When a Logos-only feature is required while `.vscode/launch.json` exists, explain that a new `.logos/launch.json` will shadow it and preserve every configuration the user still needs.
-   - Prefer `.logos/launch.json` when neither file exists.
+   - Prefer `.vscode/launch.json` when the configuration uses the shared VS Code subset, so mainstream editors and coding agents can discover it. Use `.logos/launch.json` when Logos-specific fields are required.
 3. Choose `request` and `type` from project evidence.
    - Use `launch` when Logos should start the debuggee and `attach` when another process owns its lifecycle.
    - Use `node`/`pwa-node` for Node.js and `chrome`/`pwa-chrome` for Chromium.

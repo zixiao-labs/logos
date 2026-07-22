@@ -72,4 +72,4 @@ Use `.vscode/launch.json` when the configuration:
 - contains no Logos `adapter` or `renderer` object; and
 - does not depend on unsupported editor orchestration.
 
-Prefer `.logos/launch.json` for the `electron` alias, custom adapter descriptors, or any Logos-specific behavior.
+Prefer `.vscode/launch.json` for the shared subset. Use `.logos/launch.json` for the `electron` alias, custom adapter descriptors, or any Logos-specific behavior.

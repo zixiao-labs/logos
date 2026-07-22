@@ -24,9 +24,9 @@ Use `.logos/launch.json` for Logos-specific configuration. Use
 must also work in VS Code. If both files exist, `.logos/launch.json` wins. An
 invalid `.logos/launch.json` also prevents fallback to `.vscode/launch.json`.
 
-The **Create launch.json** action creates `.logos/launch.json`. After editing a
-configuration, use **Reload Configurations** in the Debug sidebar to load the
-latest version.
+The **Create launch.json** action creates `.vscode/launch.json` because the
+default Node configuration uses the shared subset. After editing a configuration,
+use **Reload Configurations** in the Debug sidebar to load the latest version.
 
 The file accepts JSONC: `//` and `/* */` comments and trailing commas are
 allowed. A minimal Node.js configuration is:
@@ -340,15 +340,23 @@ controller. The bridge listens only on loopback, uses a random token for every L
 launch, and stores discovery data with current-user-only permissions. Keep Logos open
 on the project before calling an MCP debug tool.
 
+Mutating external MCP requests open a non-dismissable, full-screen approval dialog
+in Logos and post a system notification. The dialog exposes the complete action,
+configuration, session, and argument details and requires **Allow once** or **Deny**.
+See [MCP project configuration](../agents/mcp-json.md) for Claude, Cursor, VS Code,
+and Codex project formats and the automatic folder setup flow.
+
 ## Launch configuration Setup Skill
 
-Invoke the project skill as `$setup-launch-json` to inspect the runtime and entry points,
+The project Skill lives at `.agents/skills/setup-launch-json`, the open Agent Skills
+repository location recognized by compatible external Agents. Invoke it as
+`$setup-launch-json` to inspect the runtime and entry points,
 select `.logos/launch.json` or the VS Code-compatible fallback without changing
 precedence accidentally, create or repair configurations, and run deterministic
 validation. Its validator can also be run directly:
 
 ```bash
-node .logos/skills/setup-launch-json/scripts/validate-launch-json.mjs \
+node .agents/skills/setup-launch-json/scripts/validate-launch-json.mjs \
   --workspace /absolute/path/to/workspace
 ```
 
@@ -375,7 +383,8 @@ Follow these Logos rules:
    configuration is required instead, ask before creating .logos/launch.json;
    explain that it will take precedence, and migrate all configurations the
    user still needs so the existing .vscode entries do not disappear in Logos.
-   If neither file exists, prefer .logos/launch.json.
+   If neither file exists, prefer .vscode/launch.json when the configuration uses
+   the shared subset. Use .logos/launch.json for Logos-specific fields.
 2. Generate one complete JSONC file with "version": "0.2.0" and a
    "configurations" array. Every configuration must have a unique string
    "name", a string "type", and "request" set to "launch" or "attach".

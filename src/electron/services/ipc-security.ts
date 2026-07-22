@@ -223,6 +223,19 @@ const debugStart = z
     exceptionBreakpoints: z.array(identifier).max(256).optional(),
   })
   .strict();
+const workspaceAgentSetup = z
+  .object({
+    root: absolutePath,
+    installMcp: bool,
+    installSkill: bool,
+  })
+  .strict();
+const debugMcpApprovalResponse = z
+  .object({
+    requestId: identifier,
+    approved: bool,
+  })
+  .strict();
 
 const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = {
   [CH.fsReadDir]: { schema: onePath },
@@ -248,6 +261,8 @@ const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = 
   [CH.workspaceAddFolder]: { schema: noArgs, maxRequests: 30 },
   [CH.workspaceRemoveFolder]: { schema: onePath, maxRequests: 60 },
   [CH.workspaceRecent]: { schema: noArgs },
+  [CH.workspaceAgentSetupStatus]: { schema: onePath, maxRequests: 60 },
+  [CH.workspaceSetupAgents]: { schema: z.tuple([workspaceAgentSetup]), maxRequests: 30 },
 
   [CH.extensionsList]: { schema: noArgs },
   [CH.extensionsInstall]: { schema: oneId, maxRequests: 30 },
@@ -332,6 +347,8 @@ const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = 
   [CH.debugStop]: { schema: z.tuple([identifier, bool.optional()]) },
   [CH.debugRequest]: { schema: z.tuple([identifier, identifier, z.unknown().optional()]), maxRequests: HIGH_FREQUENCY_MAX_REQUESTS },
   [CH.debugSetBreakpoints]: { schema: z.tuple([identifier, absolutePath, z.array(sourceBreakpoint).max(10_000)]) },
+  [CH.debugMcpPendingApprovals]: { schema: noArgs },
+  [CH.debugMcpRespondApproval]: { schema: z.tuple([debugMcpApprovalResponse]), maxRequests: 120 },
 
   [CH.appVersions]: { schema: noArgs },
   [CH.appPlatform]: { schema: noArgs },

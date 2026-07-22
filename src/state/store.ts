@@ -27,6 +27,7 @@ import type {
   Settings,
   TerminalCreateOptions,
   ThemeMode,
+  WorkspaceAgentSetupStatus,
 } from "../shared/types";
 import { basename, languageFromPath } from "../lib/language";
 import { notifyResult } from "../lib/toast";
@@ -247,6 +248,7 @@ interface LogosState {
   root: string | null;
   workspaceFolders: string[];
   recent: string[];
+  workspaceAgentSetup: WorkspaceAgentSetupStatus | null;
 
   sidebarView: SidebarView;
   sidebarVisible: boolean;
@@ -303,6 +305,8 @@ interface LogosState {
   setRoot(path: string): Promise<void>;
   addWorkspaceFolder(): Promise<void>;
   removeWorkspaceFolder(path: string): Promise<void>;
+  dismissWorkspaceAgentSetup(): void;
+  setupWorkspaceAgents(installMcp: boolean, installSkill: boolean): Promise<void>;
 
   openFile(path: string): void;
   openGitDiff(path: string, staged: boolean, root?: string): void;
@@ -1033,6 +1037,7 @@ export const useStore = create<LogosState>((set, get) => ({
   root: null,
   workspaceFolders: [],
   recent: [],
+  workspaceAgentSetup: null,
 
   sidebarView: "explorer",
   sidebarVisible: true,
@@ -1201,8 +1206,15 @@ export const useStore = create<LogosState>((set, get) => ({
   },
 
   async openFolder() {
+    const knownWorkspace = new Set(get().recent);
     const path = await window.logos.dialog.openFolder();
-    if (path) await get().setRoot(path);
+    if (!path) return;
+    await get().setRoot(path);
+    if (knownWorkspace.has(path)) return;
+    const status = await window.logos.workspace.agentSetupStatus(path);
+    if (!Object.values(status.mcp).every(Boolean) || !status.skill) {
+      set({ workspaceAgentSetup: status });
+    }
   },
   async setRoot(path) {
     await window.logos.workspace.setRoot(path);
@@ -1246,6 +1258,24 @@ export const useStore = create<LogosState>((set, get) => ({
     });
     await window.logos.git.watch(workspace.folders);
     await get().refreshGit();
+  },
+  dismissWorkspaceAgentSetup() {
+    set({ workspaceAgentSetup: null });
+  },
+  async setupWorkspaceAgents(installMcp, installSkill) {
+    const prompt = get().workspaceAgentSetup;
+    if (!prompt) return;
+    const result = await window.logos.workspace.setupAgents({
+      root: prompt.root,
+      installMcp,
+      installSkill,
+    });
+    set({ workspaceAgentSetup: null });
+    notifyResult(
+      result.changedFiles.length
+        ? `Agent setup updated ${result.changedFiles.length} file(s)`
+        : "Agent setup is already complete",
+    );
   },
 
   openFile(path) {
@@ -1615,9 +1645,14 @@ export const useStore = create<LogosState>((set, get) => ({
     }
   },
   async createDebugConfiguration() {
-    const root = get().root;
+    const state = get();
+    const root = state.root;
     if (!root) return;
-    const directory = `${root}/.logos`;
+    if (state.debug.configurationPath) {
+      get().openFile(state.debug.configurationPath);
+      return;
+    }
+    const directory = `${root}/.vscode`;
     const configurationPath = `${directory}/launch.json`;
     if (!(await window.logos.fs.exists(directory))) {
       await window.logos.fs.createDir(directory);

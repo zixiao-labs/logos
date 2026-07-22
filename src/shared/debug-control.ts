@@ -23,6 +23,17 @@ export const DEBUG_CONTROL_ACTIONS = [
 
 export type DebugControlAction = (typeof DEBUG_CONTROL_ACTIONS)[number];
 
+export interface DebugMcpApprovalRequest {
+  requestId: string;
+  requestedAt: number;
+  details: Record<string, unknown>;
+}
+
+export interface DebugMcpApprovalResponse {
+  requestId: string;
+  approved: boolean;
+}
+
 /** Shared control contract used by the built-in Agent and the MCP bridge. */
 export interface DebugControlInput extends Record<string, unknown> {
   action: DebugControlAction;

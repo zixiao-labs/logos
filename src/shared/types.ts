@@ -56,6 +56,27 @@ export interface WorkspaceSnapshot {
   root: string | null;
 }
 
+export interface WorkspaceAgentSetupStatus {
+  root: string;
+  mcp: {
+    mcpJson: boolean;
+    cursor: boolean;
+    vscode: boolean;
+    codex: boolean;
+  };
+  skill: boolean;
+}
+
+export interface WorkspaceAgentSetupRequest {
+  root: string;
+  installMcp: boolean;
+  installSkill: boolean;
+}
+
+export interface WorkspaceAgentSetupResult extends WorkspaceAgentSetupStatus {
+  changedFiles: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------

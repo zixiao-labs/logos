@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "logos-debug": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["packages/debug-mcp/server.mjs", "--workspace", "."],
+      "cwd": "."
+    }
+  }
+}

@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 const validator = path.resolve(
-  ".logos/skills/setup-launch-json/scripts/validate-launch-json.mjs",
+  ".agents/skills/setup-launch-json/scripts/validate-launch-json.mjs",
 );
 
 describe("setup-launch-json skill validator", () => {

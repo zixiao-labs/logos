@@ -37,6 +37,10 @@ export interface ServiceContext {
   appVersion?: string;
   /** Development-only, read-only extension registry root. */
   extensionRegistryDir?: string;
+  /** Bundled stdio MCP entry used by workspace auto-configuration. */
+  debugMcpServerPath?: string;
+  /** Trusted project-skill templates copied only after explicit user opt-in. */
+  agentSkillsDir?: string;
   /** Runtime supplies this to bind privileged invokes to the workbench main frame. */
   isTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): boolean;
   /** Main-process authority for workspace and native-dialog file grants. */

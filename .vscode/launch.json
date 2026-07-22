@@ -1,6 +1,5 @@
 {
-  // Logos uses the Debug Adapter Protocol. Node/Chrome/Electron resolve to the
-  // packaged JavaScript adapter; other runtimes can provide an explicit adapter.
+  // Shared VS Code/Logos DAP configuration. Open a source file before launch.
   "version": "0.2.0",
   "configurations": [
     {

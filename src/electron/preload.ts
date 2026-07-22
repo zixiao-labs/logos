@@ -20,6 +20,10 @@ import type {
   DebugSessionEvent,
   DebugStartRequest,
 } from "../shared/dap";
+import type {
+  DebugMcpApprovalRequest,
+  DebugMcpApprovalResponse,
+} from "../shared/debug-control";
 
 /** Subscribe to a broadcast channel; returns an unsubscribe handle. */
 function on<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
@@ -152,6 +156,8 @@ const api: LogosAPI = {
     addFolder: () => ipcRenderer.invoke(CH.workspaceAddFolder),
     removeFolder: (p) => ipcRenderer.invoke(CH.workspaceRemoveFolder, p),
     recent: () => ipcRenderer.invoke(CH.workspaceRecent),
+    agentSetupStatus: (p) => ipcRenderer.invoke(CH.workspaceAgentSetupStatus, p),
+    setupAgents: (request) => ipcRenderer.invoke(CH.workspaceSetupAgents, request),
     onChanged: (cb) => on<import("../shared/types").WorkspaceSnapshot>(CH.workspaceChanged, cb),
   },
   extensions: {
@@ -344,6 +350,11 @@ const api: LogosAPI = {
         sourcePath,
         breakpoints,
       ),
+    pendingMcpApprovals: () => ipcRenderer.invoke(CH.debugMcpPendingApprovals),
+    respondMcpApproval: (response: DebugMcpApprovalResponse) =>
+      ipcRenderer.invoke(CH.debugMcpRespondApproval, response),
+    onMcpApproval: (cb) =>
+      on<DebugMcpApprovalRequest>(CH.debugMcpApprovalRequest, cb),
     onEvent: (cb) => on<DebugSessionEvent>(CH.debugEvent, cb),
   },
   app: {

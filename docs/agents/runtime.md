@@ -56,9 +56,12 @@ in the project, plus enabled user setting sources. Skill reads are restricted to
 selected skill directory.
 
 The built-in runtime reads MCP server definitions from workspace `.mcp.json`. Both the
-standard `mcpServers` key and VS Code-style `servers` key are accepted. Stdio and
+standard `mcpServers` key and VS Code-style `servers` key are accepted and merged,
+with `mcpServers` winning duplicate names. Stdio and
 Streamable HTTP transports are supported. Reading the configuration does not launch a
 server; a server is connected only after the user approves `list_tools` or `call_tool`.
+See [MCP project configuration](mcp-json.md) for the complete schema, external-client
+file mappings, and automatic setup offered after opening a new folder.
 
 `DAP` controls the same debug sessions as the workbench UI. It can discover and start
 `launch.json` configurations, list/stop/restart sessions, continue, pause and step,
