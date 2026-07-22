@@ -19,7 +19,7 @@ describe("debug MCP stdio server", () => {
     try {
       await client.connect(transport);
       const tools = (await client.listTools()).tools;
-      expect(tools.map(tool => tool.name)).toEqual([
+      expect(tools.map(tool => tool.name).sort()).toEqual([
         "debug_list_configurations",
         "debug_list_sessions",
         "debug_start",
@@ -38,7 +38,7 @@ describe("debug MCP stdio server", () => {
         "debug_evaluate",
         "debug_source",
         "debug_request",
-      ]);
+      ].sort());
       expect(
         tools.find(tool => tool.name === "debug_list_sessions")?.annotations,
       ).toMatchObject({ readOnlyHint: true, idempotentHint: true });

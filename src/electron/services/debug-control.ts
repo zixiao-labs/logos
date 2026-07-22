@@ -4,7 +4,10 @@ import type {
   DapResponse,
   DebugSessionInfo,
 } from "../../shared/dap";
-import type { DebugControlInput } from "../../shared/debug-control";
+import {
+  isDebugControlMutation,
+  type DebugControlInput,
+} from "../../shared/debug-control";
 import type { ServiceContext } from "./context";
 
 type DebugController = NonNullable<ServiceContext["debug"]>;
@@ -21,7 +24,7 @@ function integer(value: unknown, name: string, minimum = 0): number {
   return Number(value);
 }
 
-function activeSession(controller: DebugController, requested?: string): DebugSessionInfo {
+export function activeSession(controller: DebugController, requested?: string): DebugSessionInfo {
   const sessions = controller.list().filter(
     session => session.status !== "terminating" && session.status !== "terminated" && session.status !== "error",
   );
@@ -40,6 +43,71 @@ function activeSession(controller: DebugController, requested?: string): DebugSe
         ? "No active debug session"
         : `Multiple debug sessions are active; choose session_id: ${available}`,
   );
+}
+
+export interface DebugControlMutationApproval {
+  action: DebugControlInput["action"];
+  generation: string;
+  session?: DebugSessionInfo;
+  configurationPath?: string | null;
+  configurationDetails?: unknown;
+}
+
+export async function prepareDebugControlMutationApproval(
+  controller: DebugController,
+  defaultWorkspace: string,
+  input: DebugControlInput,
+): Promise<DebugControlMutationApproval> {
+  if (!isDebugControlMutation(input.action)) {
+    throw new Error(`Debug action '${input.action}' does not require approval`);
+  }
+  if (input.action === "start") {
+    const listed = await controller.configurations(input.workspace || defaultWorkspace);
+    const selected = input.configuration
+      ? listed.configurations.find(item => item.name === input.configuration)
+      : listed.configurations.length === 1
+        ? listed.configurations[0]
+        : undefined;
+    if (!selected) {
+      const available = listed.configurations.map(item => item.name).join(", ");
+      throw new Error(
+        input.configuration
+          ? `Debug configuration '${input.configuration}' was not found${available ? `; available: ${available}` : ""}`
+          : listed.configurations.length === 0
+            ? "No launch configurations are available"
+            : `Multiple launch configurations are available; choose configuration: ${available}`,
+      );
+    }
+    return {
+      action: input.action,
+      generation: JSON.stringify({ path: listed.path, configuration: selected }),
+      configurationPath: listed.path,
+      configurationDetails: selected,
+    };
+  }
+
+  const session = activeSession(controller, String(input.session_id ?? ""));
+  const generation = controller.generation(session.id);
+  if (!generation) throw new Error(`Debug session '${session.id}' is not active`);
+  return { action: input.action, generation, session };
+}
+
+export function applyDebugControlMutationApproval(
+  controller: DebugController,
+  input: DebugControlInput,
+  approval: DebugControlMutationApproval,
+): DebugControlInput {
+  if (input.action !== approval.action) throw new Error("The debug action was not approved");
+  if (input.action === "start") {
+    return { ...input, configuration_fingerprint: approval.generation };
+  }
+  if (
+    !approval.session ||
+    controller.generation(approval.session.id) !== approval.generation
+  ) {
+    throw new Error("The debug session changed after approval; review and approve it again");
+  }
+  return { ...input, session_id: approval.session.id };
 }
 
 async function threadId(

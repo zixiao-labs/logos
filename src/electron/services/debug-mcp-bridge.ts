@@ -13,9 +13,16 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { DebugControlInput } from "../../shared/debug-control";
-import { isDebugControlAction } from "../../shared/debug-control";
+import {
+  isDebugControlAction,
+  isDebugControlMutation,
+} from "../../shared/debug-control";
 import type { ServiceContext } from "./context";
-import { executeDebugControl } from "./debug-control";
+import {
+  applyDebugControlMutationApproval,
+  executeDebugControl,
+  prepareDebugControlMutationApproval,
+} from "./debug-control";
 
 const PROTOCOL_VERSION = 1;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -28,6 +35,10 @@ interface BridgeRequest {
   workspace?: string;
   input?: DebugControlInput;
 }
+
+export type DebugMcpMutationApproval = (
+  details: Record<string, unknown>,
+) => Promise<boolean>;
 
 function userKey(): string {
   const identity = String(process.getuid?.() ?? os.userInfo().username);
@@ -61,6 +72,7 @@ async function removeEmptyDirectory(directory: string): Promise<void> {
  */
 export async function registerDebugMcpBridge(
   ctx: ServiceContext,
+  approveMutation: DebugMcpMutationApproval = async () => false,
 ): Promise<() => Promise<void>> {
   if (!ctx.debug) throw new Error("Register the debug service before the MCP bridge");
   const controller = ctx.debug;
@@ -132,14 +144,34 @@ export async function registerDebugMcpBridge(
           ) {
             throw new Error("Invalid debug control request");
           }
+          let input: DebugControlInput = {
+            ...request.input,
+            // Bind every operation to the canonical workspace authenticated above.
+            // A client must not be able to redirect a valid bridge token to another root.
+            workspace,
+          };
+          if (isDebugControlMutation(input.action)) {
+            const approval = await prepareDebugControlMutationApproval(
+              controller,
+              workspace,
+              input,
+            );
+            const allowed = await approveMutation({
+              ...input,
+              ...(approval.session ? { session: approval.session } : {}),
+              ...(approval.configurationDetails
+                ? {
+                    configurationPath: approval.configurationPath,
+                    configurationDetails: approval.configurationDetails,
+                  }
+                : {}),
+            });
+            if (!allowed) throw new Error("The debug action was not approved");
+            input = applyDebugControlMutationApproval(controller, input, approval);
+          }
           respond({
             ok: true,
-            result: await executeDebugControl(controller, workspace, {
-              ...request.input,
-              // Bind every operation to the canonical workspace authenticated above.
-              // A client must not be able to redirect a valid bridge token to another root.
-              workspace,
-            }),
+            result: await executeDebugControl(controller, workspace, input),
           });
         } catch (error) {
           respond({

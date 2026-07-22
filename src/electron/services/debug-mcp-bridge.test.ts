@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import type { DapArguments } from "../../shared/dap";
 import type { ServiceContext } from "./context";
 import {
   debugMcpRegistryDirectory,
@@ -98,5 +99,106 @@ describe("debug MCP bridge", () => {
       input: { action: "list_configurations", workspace: path.dirname(workspace) },
     })).resolves.toMatchObject({ ok: true });
     expect(configurationRoots).toEqual([await fs.realpath(workspace)]);
+  });
+
+  it("requires one-time approval and validates the approved debug generation", async () => {
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-mcp-test-"));
+    const access = new WorkspaceAccessController();
+    await access.restoreWorkspaceRoot(workspace);
+    const session = {
+      id: "debug-1",
+      name: "Node",
+      debugType: "node",
+      request: "launch" as const,
+      status: "stopped" as const,
+      capabilities: {},
+    };
+    let generation = "generation-1";
+    let approvalMode: "allow" | "deny" | "change" = "deny";
+    const approvals: Array<Record<string, unknown>> = [];
+    const requests: unknown[] = [];
+    const starts: unknown[][] = [];
+    const configuration = { name: "Node", type: "node", request: "launch" as const };
+    const configurationPath = path.join(workspace, ".logos", "launch.json");
+    const debug: NonNullable<ServiceContext["debug"]> = {
+      list: () => [session],
+      generation: () => generation,
+      start: async () => session,
+      stop: async () => undefined,
+      restart: async () => session,
+      configurations: async () => ({
+        path: configurationPath,
+        configurations: [configuration],
+      }),
+      startConfiguration: async (...args) => {
+        starts.push(args);
+        return session;
+      },
+      setBreakpoints: async () => [],
+      request: async <T = unknown>(
+        sessionId: string,
+        command: string,
+        args?: DapArguments,
+      ) => {
+        requests.push({ sessionId, command, args });
+        return {
+          seq: 1,
+          type: "response",
+          request_seq: 1,
+          success: true,
+          command,
+          body: { ok: true } as T,
+        };
+      },
+    };
+    dispose = await registerDebugMcpBridge(
+      { debug, workspaceAccess: access } as ServiceContext,
+      async details => {
+        approvals.push(details);
+        if (approvalMode === "change") generation = "generation-2";
+        return approvalMode !== "deny";
+      },
+    );
+
+    const recordPath = path.join(debugMcpRegistryDirectory(), `${process.pid}.json`);
+    const record = JSON.parse(await fs.readFile(recordPath, "utf8")) as {
+      token: string;
+      port: number;
+    };
+    const execute = (input: Record<string, unknown>) => request(record.port, {
+      type: "execute",
+      token: record.token,
+      workspace,
+      input,
+    });
+
+    await expect(execute({ action: "evaluate", expression: "6 * 7" }))
+      .resolves.toMatchObject({
+        ok: false,
+        error: { message: "The debug action was not approved" },
+      });
+    expect(requests).toEqual([]);
+
+    approvalMode = "allow";
+    await expect(execute({ action: "evaluate", expression: "6 * 7" }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(execute({ action: "start", configuration: "Node" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(starts[0]?.[4]).toBe(JSON.stringify({
+      path: configurationPath,
+      configuration,
+    }));
+
+    approvalMode = "change";
+    await expect(execute({ action: "pause" })).resolves.toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("changed after approval") },
+    });
+    expect(requests).toHaveLength(1);
+    expect(approvals).toHaveLength(4);
+    expect(approvals[1]).toMatchObject({
+      action: "evaluate",
+      session: { id: "debug-1" },
+    });
   });
 });

@@ -3,7 +3,7 @@ import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import type { DapEvaluateResult, DapResponse, DebugSessionInfo } from "../../shared/dap";
+import type { DapEvaluateResult, DapResponse } from "../../shared/dap";
 import {
   DEBUG_CONTROL_ACTIONS,
   isDebugControlAction,
@@ -28,7 +28,11 @@ import {
   resolveLogosOpenAIModel,
 } from "../../shared/logos-agent";
 import type { OpenAIAuthStore } from "./openai-auth";
-import { executeDebugControl } from "./debug-control";
+import {
+  activeSession,
+  executeDebugControl,
+  prepareDebugControlMutationApproval,
+} from "./debug-control";
 import type { ServiceContext } from "./context";
 import { WorkspaceMcpClient, type McpToolInput } from "./mcp-client";
 
@@ -1421,7 +1425,7 @@ export class LogosAgentRuntime {
   private async runDapRepl(input: Record<string, unknown>): Promise<ToolResult> {
     const expression = String(input.expression ?? "").trim();
     if (!expression) throw new Error("DAP expression is required");
-    const session = this.resolveDebugSession(input);
+    const session = activeSession(this.hooks.debug!, String(input.session_id ?? ""));
     const approvedGeneration = this.approvedDapGenerations.get(input);
     if (
       !approvedGeneration ||
@@ -1457,7 +1461,10 @@ export class LogosAgentRuntime {
       if (control.action === "start") {
         approvedStartFingerprint = approvedGeneration;
       } else {
-        const session = this.resolveDebugSession(input);
+        const session = activeSession(
+          this.hooks.debug,
+          String(control.session_id ?? ""),
+        );
         if (this.hooks.debug.generation(session.id) !== approvedGeneration) {
           throw new Error("The debug session changed after approval; review and approve it again");
         }
@@ -1474,66 +1481,6 @@ export class LogosAgentRuntime {
       },
     );
     return { output: JSON.stringify(result ?? {}, null, 2) };
-  }
-
-  private resolveDebugSession(input: Record<string, unknown>): DebugSessionInfo {
-    if (!this.hooks.debug) throw new Error("The debug service is unavailable");
-    const active = this.hooks.debug
-      .list()
-      .filter(
-        (session) =>
-          session.status !== "terminated" &&
-          session.status !== "terminating" &&
-          session.status !== "error",
-      );
-    const requestedId = String(input.session_id ?? "").trim();
-    const session = requestedId
-      ? active.find((candidate) => candidate.id === requestedId)
-      : active.length === 1
-        ? active[0]
-        : undefined;
-    if (!session) {
-      const available = active.map((candidate) => `${candidate.id} (${candidate.name})`).join(", ");
-      throw new Error(
-        requestedId
-          ? `Debug session '${requestedId}' is not active${available ? `; available: ${available}` : ""}`
-          : active.length === 0
-            ? "No active debug session"
-            : `Multiple debug sessions are active; choose session_id: ${available}`,
-      );
-    }
-    return session;
-  }
-
-  private async debugStartApproval(input: DebugControlInput): Promise<{
-    fingerprint: string;
-    path: string | null;
-    configuration: unknown;
-  }> {
-    if (!this.hooks.debug) throw new Error("The debug service is unavailable");
-    const listed = await this.hooks.debug.configurations(
-      input.workspace || this.workspaceRoot,
-    );
-    const selected = input.configuration
-      ? listed.configurations.find(item => item.name === input.configuration)
-      : listed.configurations.length === 1
-        ? listed.configurations[0]
-        : undefined;
-    if (!selected) {
-      const available = listed.configurations.map(item => item.name).join(", ");
-      throw new Error(
-        input.configuration
-          ? `Debug configuration '${input.configuration}' was not found${available ? `; available: ${available}` : ""}`
-          : listed.configurations.length === 0
-            ? "No launch configurations are available"
-            : `Multiple launch configurations are available; choose configuration: ${available}`,
-      );
-    }
-    return {
-      fingerprint: JSON.stringify({ path: listed.path, configuration: selected }),
-      path: listed.path,
-      configuration: selected,
-    };
   }
 
   private workspaceRootForPath(candidate: string): string | null {
@@ -1656,7 +1603,10 @@ export class LogosAgentRuntime {
     }
     if (name === "DAP_REPL") {
       const dapInput = input as Record<string, unknown>;
-      const session = this.resolveDebugSession(dapInput);
+      const session = activeSession(
+        this.hooks.debug!,
+        String(dapInput.session_id ?? ""),
+      );
       const generation = this.hooks.debug?.generation(session.id);
       if (!generation) throw new Error(`Debug session '${session.id}' is not active`);
       dapInput.session_id = session.id;
@@ -1681,14 +1631,13 @@ export class LogosAgentRuntime {
       if (!dapAction) throw new Error(`Unsupported debug action: ${String((input as Record<string, unknown>)?.action)}`);
       if (!isDebugControlMutation(dapAction)) return true;
       const dapInput = input as Record<string, unknown>;
-      const session = dapAction === "start" ? undefined : this.resolveDebugSession(dapInput);
-      const startApproval = dapAction === "start"
-        ? await this.debugStartApproval(dapInput as DebugControlInput)
-        : undefined;
-      const generation = session
-        ? this.hooks.debug?.generation(session.id)
-        : startApproval?.fingerprint;
-      if (!generation) throw new Error(`Debug session '${session?.id}' is not active`);
+      if (!this.hooks.debug) throw new Error("The debug service is unavailable");
+      const approval = await prepareDebugControlMutationApproval(
+        this.hooks.debug,
+        this.workspaceRoot,
+        dapInput as DebugControlInput,
+      );
+      const { session, generation } = approval;
       if (session) dapInput.session_id = session.id;
       const allowed = await this.hooks.requestPermission(
         this.request.sessionId,
@@ -1705,10 +1654,10 @@ export class LogosAgentRuntime {
                 },
               }
             : {}),
-          ...(startApproval
+          ...(approval.configurationDetails
             ? {
-                configurationPath: startApproval.path,
-                configurationDetails: startApproval.configuration,
+                configurationPath: approval.configurationPath,
+                configurationDetails: approval.configurationDetails,
               }
             : {}),
         },

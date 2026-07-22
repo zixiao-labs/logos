@@ -327,7 +327,28 @@ app.whenReady().then(async () => {
   const ctx = createContext();
   const acpSecrets = new AcpSecretStore(ctx.userDataDir);
   const disposeDebug = registerDebugService(ctx);
-  const disposeDebugMcp = await registerDebugMcpBridge(ctx);
+  let disposeDebugMcp: () => Promise<void> = async () => undefined;
+  try {
+    disposeDebugMcp = await registerDebugMcpBridge(ctx, async details => {
+      const detail = JSON.stringify(details, null, 2);
+      const options = {
+        type: "warning" as const,
+        buttons: ["Deny", "Allow once"],
+        defaultId: 0,
+        cancelId: 0,
+        message: `Allow debug MCP action '${String(details.action)}'?`,
+        detail: detail.length > 4_000 ? `${detail.slice(0, 4_000)}\n…` : detail,
+        noLink: true,
+      };
+      const window = ctx.getWindow();
+      const result = window
+        ? await dialog.showMessageBox(window, options)
+        : await dialog.showMessageBox(options);
+      return result.response === 1;
+    });
+  } catch (error) {
+    console.warn("Debug MCP bridge is unavailable:", error);
+  }
   registerAppHandlers(ctx);
   disposers.push(
     registerWorkspaceService(ctx, dialog),

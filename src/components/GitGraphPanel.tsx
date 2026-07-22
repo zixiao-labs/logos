@@ -91,7 +91,7 @@ export function GitGraphPanel() {
       ? commits.filter(commit => searchableCommit(commit).includes(needle))
       : commits;
   }, [commits, query]);
-  const rows = layoutGitGraph(filteredCommits);
+  const rows = useMemo(() => layoutGitGraph(filteredCommits), [filteredCommits]);
 
   const selectCommit = useCallback(async (commit: GitGraphEntry) => {
     if (!root) return;
