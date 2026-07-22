@@ -61,6 +61,8 @@ const oneText = z.tuple([text()]);
 const oneId = z.tuple([identifier]);
 const onePath = z.tuple([absolutePath]);
 const rootAndPaths = z.tuple([absolutePath, stringList]);
+const commitHash = text(64).regex(/^[0-9a-f]{7,64}$/i, "must be a commit hash");
+const rootAndCommitHash = z.tuple([absolutePath, commitHash]);
 const optionalBoolean = z.union([z.tuple([]), z.tuple([bool.optional()])]);
 const optionalText = (schema = text()) =>
   z.union([z.tuple([]), z.tuple([schema.optional()])]);
@@ -261,11 +263,14 @@ const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = 
   [CH.gitUndoLastCommit]: { schema: onePath },
   [CH.gitBranches]: { schema: onePath },
   [CH.gitCheckout]: { schema: z.tuple([absolutePath, text(1_024)]) },
-  [CH.gitCreateBranch]: { schema: z.tuple([absolutePath, text(1_024)]) },
+  [CH.gitCreateBranch]: { schema: z.tuple([absolutePath, text(1_024), commitHash.optional()]) },
   [CH.gitDiff]: { schema: z.tuple([absolutePath, text(4_096), bool]) },
   [CH.gitFileDiff]: { schema: z.tuple([absolutePath, text(4_096), bool]) },
   [CH.gitLog]: { schema: z.tuple([absolutePath, positiveInteger.max(10_000).optional()]) },
   [CH.gitGraph]: { schema: z.tuple([absolutePath, positiveInteger.max(10_000).optional()]) },
+  [CH.gitCommitDetails]: { schema: rootAndCommitHash },
+  [CH.gitCherryPick]: { schema: rootAndCommitHash },
+  [CH.gitRevert]: { schema: rootAndCommitHash },
   [CH.gitBlame]: { schema: z.tuple([absolutePath, absolutePath, positiveInteger]) },
   [CH.gitInit]: { schema: onePath },
   [CH.gitFetch]: { schema: onePath },
