@@ -21,6 +21,7 @@ import type {
   DapRequest,
   DapResponse,
   DapSourceBreakpoint,
+  DapSourceResult,
   DebugAdapterDescriptor,
   DebugAdapterExecutable,
   DebugAdapterExecutableServer,
@@ -1563,6 +1564,24 @@ export function registerDebugService(
       breakpoints,
     );
   };
+  /**
+   * Read source that the adapter exposes. `sourcePath` is the only DAP path
+   * argument an agent or MCP client can supply here, so it goes through the
+   * same workspace authority as breakpoints instead of straight to the adapter.
+   */
+  const sourceFromSession = async (
+    sessionId: string,
+    sourceReference: number,
+    sourcePath?: string,
+  ) => {
+    const controlledPath = sourcePath
+      ? ((await ctx.workspaceAccess?.assertPath(sourcePath)) ?? sourcePath)
+      : undefined;
+    return requestSession<DapSourceResult>(sessionId, "source", {
+      source: controlledPath ? { path: controlledPath } : {},
+      sourceReference,
+    });
+  };
   const stopSessionById = async (
     sessionId: string,
     terminateDebuggee = true,
@@ -1683,6 +1702,7 @@ export function registerDebugService(
     configurations: loadConfigurations,
     startConfiguration: startConfiguredSession,
     setBreakpoints: setSessionBreakpoints,
+    source: sourceFromSession,
     request: requestSession,
   };
   ctx.debug = debugController;

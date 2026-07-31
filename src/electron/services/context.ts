@@ -12,6 +12,7 @@ import type {
   DapBreakpoint,
   DapResponse,
   DapSourceBreakpoint,
+  DapSourceResult,
   DebugSessionInfo,
   DebugStartRequest,
   DebugLaunchConfiguration,
@@ -71,6 +72,15 @@ export interface ServiceContext {
       sourcePath: string,
       breakpoints: DapSourceBreakpoint[],
     ): Promise<DapBreakpoint[]>;
+    /**
+     * Read adapter-hosted source. `sourcePath` is bound to the workspace before
+     * it reaches the adapter, so this must not be replaced by a raw `request`.
+     */
+    source(
+      sessionId: string,
+      sourceReference: number,
+      sourcePath?: string,
+    ): Promise<DapResponse<DapSourceResult>>;
     request<T = unknown>(
       sessionId: string,
       command: string,

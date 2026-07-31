@@ -46,6 +46,18 @@ export interface OpenAIRequestAuth {
   headers: Record<string, string>;
 }
 
+/**
+ * Raised when no usable credential exists or a stored one can no longer be
+ * refreshed. Callers surface the sign-in flow for this and only this class, so
+ * an unrelated upstream failure never gets misread as "you are signed out".
+ */
+export class OpenAIAuthRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenAIAuthRequiredError";
+  }
+}
+
 interface JwtClaims {
   email?: string;
   chatgpt_account_id?: string;
@@ -175,7 +187,7 @@ export class OpenAIAuthStore {
 
   async requestAuth(baseUrl: string): Promise<OpenAIRequestAuth> {
     let credential = await this.load();
-    if (!credential) throw new Error("OpenAI authentication required");
+    if (!credential) throw new OpenAIAuthRequiredError("OpenAI authentication required");
     if (credential.type === "api-key") {
       return {
         type: "api-key",
@@ -260,6 +272,14 @@ export class OpenAIAuthStore {
           client_id: CLIENT_ID,
         }),
       )
+        .catch((error: unknown) => {
+          // A refresh token the issuer rejects cannot be recovered without the
+          // user signing in again, so classify it rather than leaving callers
+          // to pattern-match the message.
+          throw new OpenAIAuthRequiredError(
+            error instanceof Error ? error.message : String(error),
+          );
+        })
         .then(async (tokens) => {
           const identity = tokenIdentity(tokens);
           const refreshed: OAuthCredential = {

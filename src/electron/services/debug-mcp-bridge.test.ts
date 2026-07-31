@@ -61,6 +61,7 @@ describe("debug MCP bridge", () => {
       },
       startConfiguration: async () => { throw new Error("not used"); },
       setBreakpoints: async () => [],
+      source: async () => { throw new Error("not used"); },
       request: async () => { throw new Error("not used"); },
     };
     dispose = await registerDebugMcpBridge({
@@ -139,6 +140,7 @@ describe("debug MCP bridge", () => {
         return session;
       },
       setBreakpoints: async () => [],
+      source: async () => { throw new Error("not used"); },
       request: async <T = unknown>(
         sessionId: string,
         command: string,

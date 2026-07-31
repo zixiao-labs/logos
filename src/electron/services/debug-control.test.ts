@@ -24,6 +24,11 @@ function controller() {
     capabilities: {},
   };
   const requests: Array<{ sessionId: string; command: string; args?: DapArguments }> = [];
+  const sources: Array<{
+    sessionId: string;
+    sourceReference: number;
+    sourcePath?: string;
+  }> = [];
   const starts: unknown[] = [];
   const debug: NonNullable<ServiceContext["debug"]> = {
     list: () => [session],
@@ -41,6 +46,10 @@ function controller() {
     },
     setBreakpoints: async (_sessionId, _sourcePath, breakpoints) =>
       breakpoints.map(item => ({ verified: true, line: item.line })),
+    source: async (sessionId, sourceReference, sourcePath) => {
+      sources.push({ sessionId, sourceReference, sourcePath });
+      return response("source", { content: "// bound source" });
+    },
     request: async <T = unknown>(sessionId: string, command: string, args?: DapArguments) => {
       requests.push({ sessionId, command, args });
       if (command === "threads") {
@@ -52,7 +61,7 @@ function controller() {
       return response(command, { ok: true }) as DapResponse<T>;
     },
   };
-  return { debug, requests, starts };
+  return { debug, requests, sources, starts };
 }
 
 describe("debug control", () => {
@@ -113,5 +122,43 @@ describe("debug control", () => {
     await expect(
       executeDebugControl(debug, "/workspace", { action: "variables" }),
     ).rejects.toThrow("variables_reference");
+  });
+
+  it("routes source reads through the workspace-bound controller method", async () => {
+    const { debug, sources, requests } = controller();
+
+    await expect(
+      executeDebugControl(debug, "/workspace", {
+        action: "source",
+        source_reference: 0,
+        source_path: "/etc/passwd",
+      }),
+    ).resolves.toEqual({ content: "// bound source" });
+    expect(sources).toEqual([
+      { sessionId: "debug-1", sourceReference: 0, sourcePath: "/etc/passwd" },
+    ]);
+    // The controller applies the workspace authority, so the raw DAP escape
+    // hatch must not be able to reach the same command around it.
+    expect(requests).toEqual([]);
+  });
+
+  it("rejects raw DAP requests that carry their own source path", async () => {
+    const { debug, requests } = controller();
+
+    await expect(
+      executeDebugControl(debug, "/workspace", {
+        action: "request",
+        command: "source",
+        arguments: { source: { path: "/etc/passwd" }, sourceReference: 0 },
+      }),
+    ).rejects.toThrow("Use the 'source' action");
+    await expect(
+      executeDebugControl(debug, "/workspace", {
+        action: "request",
+        command: "setBreakpoints",
+        arguments: { source: { path: "/etc/shadow" }, breakpoints: [] },
+      }),
+    ).rejects.toThrow("Use the 'set_breakpoints' action");
+    expect(requests).toEqual([]);
   });
 });

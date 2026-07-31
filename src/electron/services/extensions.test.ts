@@ -146,7 +146,7 @@ describe("extension registry and installer", () => {
     return { ipc, digest };
   }
 
-  it("installs a verified declarative package by content digest and removes only its pointer", async () => {
+  it("installs a verified declarative package by content digest and collects it on removal", async () => {
     const body = Buffer.from(JSON.stringify(manifest()));
     const { ipc, digest } = await setup([{ name: "extension.json", body }]);
 
@@ -194,8 +194,10 @@ describe("extension registry and installer", () => {
     );
     expect({
       installed: removed.extensions[0]?.installed,
-      cachedContent: await fs.stat(content).then(stat => stat.isDirectory()),
-    }).toEqual({ installed: false, cachedContent: true });
+      cachedContent: await fs
+        .stat(content)
+        .then(() => "exists", error => (error as NodeJS.ErrnoException).code),
+    }).toEqual({ installed: false, cachedContent: "ENOENT" });
   });
 
   it("reports executable runtimes but fails closed when installation is requested", async () => {
@@ -231,15 +233,18 @@ describe("extension registry and installer", () => {
     });
   });
 
-  it("defers full archive verification until install and still rejects package attacks", async () => {
+  it("verifies the registry digest before listing and defers archive checks to install", async () => {
     const declarative = Buffer.from(JSON.stringify(manifest()));
     const digestMismatch = await setup(
       [{ name: "extension.json", body: declarative }],
       { digest: `sha256:${"0".repeat(64)}` },
     );
+    // Listing renders permissions and a compatibility verdict, so it must not
+    // read them out of an archive the index digest does not cover.
     expect(await digestMismatch.ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsList)).toMatchObject({
-      status: "ready",
-      extensions: [{ id: "example.sample" }],
+      status: "invalid",
+      extensions: [],
+      message: expect.stringContaining("digest mismatch"),
     });
     await expect(digestMismatch.ipc.invoke(CH.extensionsInstall, "example.sample")).rejects.toThrow(
       "digest mismatch",
@@ -298,6 +303,30 @@ describe("extension registry and installer", () => {
     await expect(symlink.ipc.invoke(CH.extensionsInstall, "example.sample")).rejects.toThrow(
       "link or special file",
     );
+  });
+
+  it("collects unreferenced content without touching an installed digest", async () => {
+    const body = Buffer.from(JSON.stringify(manifest()));
+    const { ipc, digest } = await setup([{ name: "extension.json", body }]);
+    await ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsInstall, "example.sample");
+
+    // Stand in for content an interrupted install left behind: read-only, like
+    // the real store, and referenced by no pointer.
+    const contentDir = path.join(userDataDir, "extensions", "content");
+    const orphan = path.join(contentDir, "a".repeat(64));
+    await fs.mkdir(path.join(orphan, "nested"), { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(orphan, "nested", "leftover.txt"), "stale", { mode: 0o444 });
+    await fs.chmod(path.join(orphan, "nested"), 0o555);
+    await fs.chmod(orphan, 0o555);
+
+    await ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsUninstall, "other.thing");
+
+    const exists = (target: string) =>
+      fs.stat(target).then(() => true, () => false);
+    expect({
+      orphan: await exists(orphan),
+      installed: await exists(path.join(contentDir, digest.slice(7))),
+    }).toEqual({ orphan: false, installed: true });
   });
 
   it("does not expose the development registry in packaged mode", async () => {

@@ -225,13 +225,25 @@ export async function executeDebugControl(
       }));
     }
     case "source":
-      return responseBody(await controller.request(session.id, "source", {
-        source: typeof input.source_path === "string" ? { path: input.source_path } : {},
-        sourceReference: integer(input.source_reference, "source_reference"),
-      }));
+      return responseBody(
+        await controller.source(
+          session.id,
+          integer(input.source_reference, "source_reference"),
+          typeof input.source_path === "string" && input.source_path.trim()
+            ? input.source_path
+            : undefined,
+        ),
+      );
     case "request": {
       const command = String(input.command ?? "").trim();
       if (!command) throw new Error("command is required");
+      // These carry workspace paths and have dedicated actions that bind them
+      // to the workspace authority. Allowing them here would reopen that gap.
+      if (command === "source" || command === "setBreakpoints") {
+        throw new Error(
+          `Use the '${command === "source" ? "source" : "set_breakpoints"}' action instead of a raw ${command} request`,
+        );
+      }
       return responseBody(await controller.request(
         session.id,
         command,

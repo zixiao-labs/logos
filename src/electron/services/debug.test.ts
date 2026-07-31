@@ -1,5 +1,8 @@
 import { describe, expect, it } from "@lightning-js/lightning";
 import { EventEmitter } from "node:events";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Duplex, PassThrough } from "node:stream";
 import type { Socket } from "node:net";
 import {
@@ -12,6 +15,7 @@ import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { DapMessageParser, encodeDapMessage } from "./dap-transport";
 import { registerDebugService } from "./debug";
+import { WorkspaceAccessController } from "./workspace-access";
 
 function fakeAdapterProcess() {
   const emitter = new EventEmitter();
@@ -190,6 +194,89 @@ describe("debug service", () => {
     expect(receivedCommands.slice(-2)).toEqual(["terminate", "disconnect"]);
     expect(fake.wasKilled()).toBe(true);
     cleanup();
+  });
+
+  it("binds adapter source reads to the open workspace", async () => {
+    const ipc = createIpcHarness();
+    const fake = fakeAdapterProcess();
+    const parser = new DapMessageParser();
+    let adapterSequence = 1;
+    const sourceArguments: Array<Record<string, unknown> | undefined> = [];
+
+    const send = (message: DapMessage) => fake.stdout.write(encodeDapMessage(message));
+    fake.stdin.on("data", (data: Buffer) => {
+      for (const message of parser.push(data)) {
+        if (message.type !== "request") continue;
+        if (message.command === "source") sourceArguments.push(message.arguments);
+        if (message.command === "launch") {
+          send({ seq: adapterSequence++, type: "event", event: "initialized" });
+        }
+        send({
+          seq: adapterSequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+          ...(message.command === "initialize"
+            ? { body: { supportsConfigurationDoneRequest: true } }
+            : message.command === "source"
+              ? { body: { content: "// adapter source" } }
+              : {}),
+        });
+      }
+    });
+
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-source-"));
+    // The workspace authority hands the adapter canonical paths, so compare
+    // against the realpath rather than the (symlinked on macOS) temp path.
+    const workspace = await fs.realpath(created);
+    const program = path.join(workspace, "app.js");
+    await fs.writeFile(program, "// program\n");
+    const workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(workspace);
+    const ctx: ServiceContext = {
+      ipcMain: ipc.ipcMain,
+      userDataDir: "/tmp/logos-test",
+      getWindow: () => null,
+      isTrustedSender: () => true,
+      send: () => undefined,
+      workspaceAccess,
+    };
+    const cleanup = registerDebugService(ctx, {
+      spawnProcess: ((() => {
+        queueMicrotask(() => fake.proc.emit("spawn"));
+        return fake.proc;
+      }) as unknown) as typeof spawn,
+    });
+
+    try {
+      await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+        sessionId: "debug-source",
+        configuration: {
+          name: "Test",
+          type: "custom",
+          request: "launch",
+          program,
+          adapter: { type: "executable", command: "mock-adapter" },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const inside = await ctx.debug!.source("debug-source", 0, program);
+      expect(inside.body).toEqual({ content: "// adapter source" });
+      expect(sourceArguments).toEqual([
+        { source: { path: program }, sourceReference: 0 },
+      ]);
+
+      // The adapter must never see a path the workspace authority rejected.
+      await expect(
+        ctx.debug!.source("debug-source", 0, "/etc/passwd"),
+      ).rejects.toThrow();
+      expect(sourceArguments).toHaveLength(1);
+    } finally {
+      cleanup();
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
   });
 
   it("does not launch after stop wins the initialize race", async () => {

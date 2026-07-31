@@ -107,6 +107,20 @@ function openZip(file: string): Promise<yauzl.ZipFile> {
   });
 }
 
+/** Parses bytes already held in memory, so no descriptor ownership is involved. */
+function openZipBuffer(archive: Buffer): Promise<yauzl.ZipFile> {
+  return new Promise((resolve, reject) => {
+    yauzl.fromBuffer(
+      archive,
+      { lazyEntries: true, strictFileNames: true },
+      (error, zip) => {
+        if (error || !zip) reject(error ?? new Error("Unable to open extension archive."));
+        else resolve(zip);
+      },
+    );
+  });
+}
+
 function openZipEntry(zip: yauzl.ZipFile, entry: yauzl.Entry): Promise<Readable> {
   return new Promise((resolve, reject) => {
     zip.openReadStream(entry, (error, stream) => {
@@ -224,50 +238,89 @@ async function inspectArchive(file: string): Promise<InspectedArchive> {
   return { manifest, entries };
 }
 
-async function readArchiveManifest(file: string): Promise<LogosExtensionManifest> {
-  const zip = await openZip(file);
-  try {
-    const body = await new Promise<string>((resolve, reject) => {
-      let settled = false;
-      let entries = 0;
-      const fail = (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-      zip.once("error", fail);
-      zip.once("end", () =>
-        fail(new Error("Extension archive is missing extension.json at its root.")),
-      );
-      zip.on("entry", entry => {
-        if (settled) return;
-        entries += 1;
-        if (entries > ARCHIVE_MAX_ENTRIES) {
-          fail(new Error("Extension archive contains too many entries."));
-          return;
-        }
-        if (entry.fileName !== MANIFEST_ENTRY) {
-          zip.readEntry();
-          return;
-        }
-        if (
-          entry.uncompressedSize > 1024 * 1024 ||
-          isUnsafeUnixFileType(entry, false)
-        ) {
-          fail(new Error("Extension manifest entry is invalid."));
-          return;
-        }
-        void readZipEntry(zip, entry, 1024 * 1024)
-          .then(buffer => {
-            if (settled) return;
-            settled = true;
-            resolve(buffer.toString("utf8"));
-          })
-          .catch(fail);
-      });
-      zip.readEntry();
+async function readArchiveManifest(zip: yauzl.ZipFile): Promise<LogosExtensionManifest> {
+  const body = await new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let entries = 0;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    zip.once("error", fail);
+    zip.once("end", () =>
+      fail(new Error("Extension archive is missing extension.json at its root.")),
+    );
+    zip.on("entry", entry => {
+      if (settled) return;
+      entries += 1;
+      if (entries > ARCHIVE_MAX_ENTRIES) {
+        fail(new Error("Extension archive contains too many entries."));
+        return;
+      }
+      if (entry.fileName !== MANIFEST_ENTRY) {
+        zip.readEntry();
+        return;
+      }
+      if (
+        entry.uncompressedSize > 1024 * 1024 ||
+        isUnsafeUnixFileType(entry, false)
+      ) {
+        fail(new Error("Extension manifest entry is invalid."));
+        return;
+      }
+      void readZipEntry(zip, entry, 1024 * 1024)
+        .then(buffer => {
+          if (settled) return;
+          settled = true;
+          resolve(buffer.toString("utf8"));
+        })
+        .catch(fail);
     });
-    return parseExtensionManifestJson(body);
+    zip.readEntry();
+  });
+  return parseExtensionManifestJson(body);
+}
+
+/**
+ * Hash and parse the same in-memory bytes. The listing renders permissions and
+ * a compatibility verdict, so those must come from content the registry digest
+ * actually covers, with no window for the file to change in between.
+ */
+async function verifiedArchiveManifest(
+  source: string,
+  reference: ExtensionRegistryPackage,
+): Promise<LogosExtensionManifest> {
+  const handle = await fs.open(source, "r");
+  let archive: Buffer;
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size > ARCHIVE_MAX_BYTES) {
+      throw new Error("Registry archive is not a regular file within the size limit.");
+    }
+    archive = Buffer.allocUnsafe(metadata.size);
+    let read = 0;
+    while (read < archive.length) {
+      const { bytesRead } = await handle.read(
+        archive,
+        read,
+        archive.length - read,
+        read,
+      );
+      if (bytesRead === 0) {
+        throw new Error("Registry archive was truncated while it was read.");
+      }
+      read += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  if (`sha256:${createHash("sha256").update(archive).digest("hex")}` !== reference.digest) {
+    throw new Error(`Registry package digest mismatch: ${reference.id}`);
+  }
+  const zip = await openZipBuffer(archive);
+  try {
+    return await readArchiveManifest(zip);
   } finally {
     zip.close();
   }
@@ -379,10 +432,31 @@ function readZipEntries(
   });
 }
 
-async function extractArchive(file: string, destination: string): Promise<void> {
+/**
+ * Extraction re-parses the archive, so it re-applies the inspection checks
+ * instead of trusting the first pass, and refuses to write anything the first
+ * pass did not approve.
+ */
+async function extractArchive(
+  file: string,
+  destination: string,
+  approved: readonly ArchiveEntryInfo[],
+): Promise<void> {
+  const pending = new Map(approved.map(entry => [entry.name, entry.directory]));
   const zip = await openZip(file);
   try {
     await readZipEntries(zip, async (entry, info) => {
+      const directory = pending.get(info.name);
+      if (directory === undefined || directory !== info.directory) {
+        throw new Error("Extension archive changed after it was inspected.");
+      }
+      pending.delete(info.name);
+      if (isUnsafeUnixFileType(entry, info.directory)) {
+        throw new Error("Extension archive contains a link or special file.");
+      }
+      if (entry.uncompressedSize > ARCHIVE_MAX_ENTRY_BYTES) {
+        throw new Error("Extension archive entry exceeds its size limit.");
+      }
       const target = path.join(destination, ...info.name.split("/"));
       if (!isInside(destination, target)) {
         throw new Error("Extension archive attempted path traversal.");
@@ -398,6 +472,9 @@ async function extractArchive(file: string, destination: string): Promise<void> 
     });
   } finally {
     zip.close();
+  }
+  if (pending.size > 0) {
+    throw new Error("Extension archive no longer contains every inspected entry.");
   }
 }
 
@@ -416,7 +493,8 @@ async function makeTreeReadOnly(root: string): Promise<void> {
   await fs.chmod(root, 0o555);
 }
 
-async function removeStagingTree(root: string): Promise<void> {
+/** Handles both staging trees and the read-only content store (0o555 dirs). */
+async function removeManagedTree(root: string): Promise<void> {
   let entries;
   try {
     await fs.chmod(root, 0o700);
@@ -427,7 +505,7 @@ async function removeStagingTree(root: string): Promise<void> {
   }
   for (const entry of entries) {
     if (entry.isDirectory()) {
-      await removeStagingTree(path.join(root, entry.name));
+      await removeManagedTree(path.join(root, entry.name));
     }
   }
   await fs.rm(root, { recursive: true, force: true });
@@ -619,6 +697,40 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
   const installs = new Map<string, Promise<void>>();
   const manifestCache = new Map<string, LogosExtensionManifest>();
   const appVersion = ctx.appVersion ?? "0.0.0";
+  let mutations: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Install and uninstall both reason about the shared content store, so they
+   * run one at a time. Otherwise collecting orphans could delete a directory
+   * another install had just moved into place but not yet recorded.
+   */
+  function serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = mutations.then(operation, operation);
+    mutations = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Content is addressed by digest, so anything no pointer references is dead. */
+  async function collectOrphanContent(): Promise<void> {
+    const referenced = new Set(
+      [...(await loadInstallRecords(recordsDir)).values()].map(record =>
+        record.digest.slice("sha256:".length),
+      ),
+    );
+    let names: string[];
+    try {
+      names = await fs.readdir(contentDir);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const name of names) {
+      if (!/^[a-f0-9]{64}$/.test(name) || referenced.has(name)) continue;
+      // Best effort: a directory that cannot be removed right now is retried on
+      // the next mutation rather than failing an otherwise successful install.
+      await removeManagedTree(path.join(contentDir, name)).catch(() => undefined);
+    }
+  }
 
   async function loadRegistry() {
     if (ctx.isPackaged || !ctx.extensionRegistryDir) {
@@ -655,11 +767,12 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
     root: string,
     reference: ExtensionRegistryPackage,
   ): Promise<LogosExtensionManifest> {
-    let manifest = manifestCache.get(reference.digest);
-    if (!manifest) {
-      const { source } = await resolveRegistryArchive(root, reference);
-      manifest = await readArchiveManifest(source);
-    }
+    const manifest =
+      manifestCache.get(reference.digest) ??
+      (await verifiedArchiveManifest(
+        (await resolveRegistryArchive(root, reference)).source,
+        reference,
+      ));
     if (
       extensionManifestId(manifest) !== reference.id ||
       manifest.version !== reference.version
@@ -721,7 +834,7 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
     validateExtensionId(id);
     const active = installs.get(id);
     if (active) return active;
-    const pending = (async () => {
+    const pending = serialize(async () => {
       const { root, index } = await loadRegistry();
       const reference = index.extensions.find(candidate => candidate.id === id);
       if (!reference) throw new Error("Unknown extension id.");
@@ -745,7 +858,7 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
           const stage = path.join(stagingDir, randomUUID());
           await fs.mkdir(stage, { mode: 0o700 });
           try {
-            await extractArchive(prepared.archivePath, stage);
+            await extractArchive(prepared.archivePath, stage, prepared.entries);
             await writeJsonAtomic(path.join(stage, ".logos-package.json"), {
               schemaVersion: 1,
               id,
@@ -762,7 +875,7 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
             }
             await makeTreeReadOnly(contentTarget);
           } finally {
-            await removeStagingTree(stage);
+            await removeManagedTree(stage);
           }
         }
         const record: InstallRecord = {
@@ -773,10 +886,11 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
           installedAt: new Date().toISOString(),
         };
         await writeJsonAtomic(path.join(recordsDir, `${id}.json`), record);
+        await collectOrphanContent();
       } finally {
         await fs.rm(prepared.archivePath, { force: true });
       }
-    })();
+    });
     installs.set(id, pending);
     try {
       await pending;
@@ -787,7 +901,12 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
 
   async function uninstall(id: string): Promise<void> {
     validateExtensionId(id);
-    await fs.rm(path.join(recordsDir, `${id}.json`), { force: true });
+    await serialize(async () => {
+      await fs.rm(path.join(recordsDir, `${id}.json`), { force: true });
+      // Leaving the content behind would keep a removed package on disk forever
+      // and hand the future installed-extension scanner an ambiguous state.
+      await collectOrphanContent();
+    });
   }
 
   ctx.ipcMain.handle(CH.extensionsList, event => {
