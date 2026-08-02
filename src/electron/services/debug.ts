@@ -1630,27 +1630,27 @@ export function registerDebugService(
     "variables",
     "writeMemory",
   ]);
-  const requestWithControlledSourcePath = async (
+  const requestWithControlledSourcePath = async <T = unknown>(
     sessionId: string,
     command: string,
     args?: DapArguments,
-  ): Promise<DapResponse> => {
+  ): Promise<DapResponse<T>> => {
     const source = asArguments(args?.source);
     const sourcePath = typeof source.path === "string" ? source.path : undefined;
     if (!sourcePath) {
-      return requestSession(sessionId, command, args);
+      return requestSession<T>(sessionId, command, args);
     }
     const controlledPath = await assertControlledSourcePath(sourcePath);
-    return requestSession(sessionId, command, {
+    return requestSession<T>(sessionId, command, {
       ...args,
       source: { ...source, path: controlledPath },
     });
   };
-  const handleDebugRequest = async (
+  const handleDebugRequest = async <T = unknown>(
     sessionId: string,
     command: string,
     args?: DapArguments,
-  ): Promise<DapResponse> => {
+  ): Promise<DapResponse<T>> => {
     if (command === "source") {
       const source = asArguments(args?.source);
       const sourcePath = typeof source.path === "string" ? source.path : undefined;
@@ -1660,7 +1660,9 @@ export function registerDebugService(
           : typeof source.sourceReference === "number"
             ? source.sourceReference
             : 0;
-      return sourceFromSession(sessionId, sourceReference, sourcePath);
+      return sourceFromSession(sessionId, sourceReference, sourcePath) as Promise<
+        DapResponse<T>
+      >;
     }
     if (command === "setBreakpoints") {
       const source = asArguments(args?.source);
@@ -1679,15 +1681,15 @@ export function registerDebugService(
         command: "setBreakpoints",
         success: true,
         body: { breakpoints: result },
-      };
+      } as DapResponse<T>;
     }
     if (SOURCE_PATH_DEBUG_REQUEST_COMMANDS.has(command)) {
-      return requestWithControlledSourcePath(sessionId, command, args);
+      return requestWithControlledSourcePath<T>(sessionId, command, args);
     }
     if (!ALLOWED_DEBUG_REQUEST_COMMANDS.has(command)) {
       throw new Error(`DAP command '${command}' is not allowed`);
     }
-    return requestSession(sessionId, command, args);
+    return requestSession<T>(sessionId, command, args);
   };
   const stopSessionById = async (
     sessionId: string,
