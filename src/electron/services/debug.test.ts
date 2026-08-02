@@ -294,6 +294,10 @@ describe("debug service", () => {
     let adapterSequence = 1;
     const sourceArguments: Array<Record<string, unknown> | undefined> = [];
     const breakpointPaths: string[] = [];
+    const pathBearingArguments: Array<{
+      command: string;
+      arguments: Record<string, unknown> | undefined;
+    }> = [];
 
     const send = (message: DapMessage) => fake.stdout.write(encodeDapMessage(message));
     fake.stdin.on("data", (data: Buffer) => {
@@ -303,6 +307,15 @@ describe("debug service", () => {
         if (message.command === "setBreakpoints") {
           const source = message.arguments?.source as { path?: string } | undefined;
           if (source?.path) breakpointPaths.push(source.path);
+        }
+        if (
+          message.command === "breakpointLocations" ||
+          message.command === "gotoTargets"
+        ) {
+          pathBearingArguments.push({
+            command: message.command,
+            arguments: message.arguments,
+          });
         }
         if (message.command === "launch") {
           send({ seq: adapterSequence++, type: "event", event: "initialized" });
@@ -319,7 +332,11 @@ describe("debug service", () => {
               ? { body: { content: "// adapter source" } }
               : message.command === "setBreakpoints"
                 ? { body: { breakpoints: [{ verified: true, line: 3 }] } }
-                : {}),
+                : message.command === "breakpointLocations"
+                  ? { body: { breakpoints: [{ line: 3 }] } }
+                  : message.command === "gotoTargets"
+                    ? { body: { targets: [{ id: 1, label: "line", line: 3 }] } }
+                    : {}),
         });
       }
     });
@@ -373,8 +390,26 @@ describe("debug service", () => {
           breakpoints: [{ line: 3 }],
         }),
       ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "breakpointLocations", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "gotoTargets", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "launch", {
+          program: "/etc/passwd",
+        }),
+      ).rejects.toThrow("not allowed");
       expect(sourceArguments).toEqual([]);
       expect(breakpointPaths).toEqual([]);
+      expect(pathBearingArguments).toEqual([]);
 
       const referenceOnly = await ipc.invoke(
         CH.debugRequest,
@@ -386,6 +421,150 @@ describe("debug service", () => {
         body: { content: "// adapter source" },
       });
       expect(sourceArguments).toEqual([{ source: {}, sourceReference: 42 }]);
+
+      const locationsByReference = await ipc.invoke(
+        CH.debugRequest,
+        "debug-boundary",
+        "breakpointLocations",
+        { source: { sourceReference: 7 }, line: 3 },
+      );
+      expect(locationsByReference).toMatchObject({
+        body: { breakpoints: [{ line: 3 }] },
+      });
+      const targetsByReference = await ipc.invoke(
+        CH.debugRequest,
+        "debug-boundary",
+        "gotoTargets",
+        { source: { sourceReference: 7 }, line: 3 },
+      );
+      expect(targetsByReference).toMatchObject({
+        body: { targets: [{ id: 1, label: "line", line: 3 }] },
+      });
+      expect(pathBearingArguments).toEqual([
+        {
+          command: "breakpointLocations",
+          arguments: { source: { sourceReference: 7 }, line: 3 },
+        },
+        {
+          command: "gotoTargets",
+          arguments: { source: { sourceReference: 7 }, line: 3 },
+        },
+      ]);
+    } finally {
+      cleanup();
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("authorizes path-bearing DAP requests through the workspace boundary", async () => {
+    const ipc = createIpcHarness();
+    const fake = fakeAdapterProcess();
+    const parser = new DapMessageParser();
+    let adapterSequence = 1;
+    const pathBearingArguments: Array<{
+      command: string;
+      arguments: Record<string, unknown> | undefined;
+    }> = [];
+
+    const send = (message: DapMessage) => fake.stdout.write(encodeDapMessage(message));
+    fake.stdin.on("data", (data: Buffer) => {
+      for (const message of parser.push(data)) {
+        if (message.type !== "request") continue;
+        if (
+          message.command === "breakpointLocations" ||
+          message.command === "gotoTargets"
+        ) {
+          pathBearingArguments.push({
+            command: message.command,
+            arguments: message.arguments,
+          });
+        }
+        if (message.command === "launch") {
+          send({ seq: adapterSequence++, type: "event", event: "initialized" });
+        }
+        send({
+          seq: adapterSequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+          ...(message.command === "initialize"
+            ? { body: { supportsConfigurationDoneRequest: true } }
+            : message.command === "breakpointLocations"
+              ? { body: { breakpoints: [{ line: 3 }] } }
+              : message.command === "gotoTargets"
+                ? { body: { targets: [{ id: 1, label: "line", line: 3 }] } }
+                : {}),
+        });
+      }
+    });
+
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-path-bearing-"));
+    const workspace = await fs.realpath(created);
+    const program = path.join(workspace, "app.js");
+    await fs.writeFile(program, "// program\n");
+    const workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(workspace);
+    const ctx: ServiceContext = {
+      ipcMain: ipc.ipcMain,
+      userDataDir: "/tmp/logos-test",
+      getWindow: () => null,
+      isTrustedSender: () => true,
+      send: () => undefined,
+      workspaceAccess,
+    };
+    const cleanup = registerDebugService(ctx, {
+      spawnProcess: ((() => {
+        queueMicrotask(() => fake.proc.emit("spawn"));
+        return fake.proc;
+      }) as unknown) as typeof spawn,
+    });
+
+    try {
+      await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+        sessionId: "debug-path-bearing",
+        configuration: {
+          name: "Test",
+          type: "custom",
+          request: "launch",
+          program,
+          adapter: { type: "executable", command: "mock-adapter" },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-path-bearing", "breakpointLocations", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("outside");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-path-bearing", "gotoTargets", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("outside");
+      expect(pathBearingArguments).toEqual([]);
+
+      await ipc.invoke(CH.debugRequest, "debug-path-bearing", "breakpointLocations", {
+        source: { path: program },
+        line: 3,
+      });
+      await ipc.invoke(CH.debugRequest, "debug-path-bearing", "gotoTargets", {
+        source: { path: program },
+        line: 3,
+      });
+      expect(pathBearingArguments).toEqual([
+        {
+          command: "breakpointLocations",
+          arguments: { source: { path: program }, line: 3 },
+        },
+        {
+          command: "gotoTargets",
+          arguments: { source: { path: program }, line: 3 },
+        },
+      ]);
     } finally {
       cleanup();
       await fs.rm(workspace, { recursive: true, force: true });

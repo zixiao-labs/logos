@@ -1584,6 +1584,68 @@ export function registerDebugService(
       sourceReference,
     });
   };
+  /**
+   * DAP commands that may carry `source.path`. Path-bearing calls reuse the
+   * same workspace authority as `source` / `setBreakpoints`; reference-only
+   * calls (no path) pass through unchanged.
+   */
+  const SOURCE_PATH_DEBUG_REQUEST_COMMANDS = new Set([
+    "breakpointLocations",
+    "gotoTargets",
+  ]);
+  /** Commands that never take a client-supplied workspace path. */
+  const ALLOWED_DEBUG_REQUEST_COMMANDS = new Set([
+    "cancel",
+    "completions",
+    "configurationDone",
+    "continue",
+    "dataBreakpointInfo",
+    "disassemble",
+    "disconnect",
+    "evaluate",
+    "exceptionInfo",
+    "goto",
+    "loadedSources",
+    "modules",
+    "next",
+    "pause",
+    "readMemory",
+    "restartFrame",
+    "reverseContinue",
+    "scopes",
+    "setDataBreakpoints",
+    "setExceptionBreakpoints",
+    "setExpression",
+    "setFunctionBreakpoints",
+    "setInstructionBreakpoints",
+    "setVariable",
+    "stackTrace",
+    "stepBack",
+    "stepIn",
+    "stepInTargets",
+    "stepOut",
+    "terminate",
+    "terminateThreads",
+    "threads",
+    "variables",
+    "writeMemory",
+  ]);
+  const requestWithControlledSourcePath = async (
+    sessionId: string,
+    command: string,
+    args?: DapArguments,
+  ): Promise<DapResponse> => {
+    const source = asArguments(args?.source);
+    const sourcePath = typeof source.path === "string" ? source.path : undefined;
+    if (!sourcePath) {
+      return requestSession(sessionId, command, args);
+    }
+    const controlledPath = await assertControlledSourcePath(sourcePath);
+    return requestSession(sessionId, command, {
+      ...args,
+      source: { ...source, path: controlledPath },
+    });
+  };
   const handleDebugRequest = async (
     sessionId: string,
     command: string,
@@ -1618,6 +1680,12 @@ export function registerDebugService(
         success: true,
         body: { breakpoints: result },
       };
+    }
+    if (SOURCE_PATH_DEBUG_REQUEST_COMMANDS.has(command)) {
+      return requestWithControlledSourcePath(sessionId, command, args);
+    }
+    if (!ALLOWED_DEBUG_REQUEST_COMMANDS.has(command)) {
+      throw new Error(`DAP command '${command}' is not allowed`);
     }
     return requestSession(sessionId, command, args);
   };
@@ -1742,7 +1810,7 @@ export function registerDebugService(
     startConfiguration: startConfiguredSession,
     setBreakpoints: setSessionBreakpoints,
     source: sourceFromSession,
-    request: requestSession,
+    request: handleDebugRequest,
   };
   ctx.debug = debugController;
 
