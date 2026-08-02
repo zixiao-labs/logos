@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     pool: "inline",
+    // Git/MCP integration cases can exceed Lightning's 5s default on cold CI runners.
+    testTimeout: 15_000,
     coverage: {
       reporter: ["text", "lcov"],
       reportsDirectory: "coverage",
