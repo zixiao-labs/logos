@@ -1,5 +1,8 @@
 import { describe, expect, it } from "@lightning-js/lightning";
 import { EventEmitter } from "node:events";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Duplex, PassThrough } from "node:stream";
 import type { Socket } from "node:net";
 import {
@@ -12,6 +15,7 @@ import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
 import { DapMessageParser, encodeDapMessage } from "./dap-transport";
 import { registerDebugService } from "./debug";
+import { WorkspaceAccessController } from "./workspace-access";
 
 function fakeAdapterProcess() {
   const emitter = new EventEmitter();
@@ -118,6 +122,12 @@ describe("debug service", () => {
       queueMicrotask(() => fake.proc.emit("spawn"));
       return fake.proc;
     }) as unknown as typeof spawn;
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-flow-"));
+    const workspace = await fs.realpath(created);
+    const program = path.join(workspace, "app.js");
+    await fs.writeFile(program, "// program\n");
+    const workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(workspace);
     const cleanup = registerDebugService(
       {
         ipcMain: ipc.ipcMain,
@@ -125,6 +135,7 @@ describe("debug service", () => {
         getWindow: () => null,
         isTrustedSender: () => true,
         send: (channel, ...args) => sent.push([channel, ...args]),
+        workspaceAccess,
       } satisfies ServiceContext,
       { spawnProcess },
     );
@@ -135,7 +146,7 @@ describe("debug service", () => {
         name: "Test",
         type: "custom",
         request: "launch",
-        program: "/workspace/app.js",
+        program,
         runtimeExecutable: "npm",
         env: { PATH: "${env:PATH}" },
         adapter: {
@@ -144,7 +155,7 @@ describe("debug service", () => {
           env: { PATH: "/adapter/bin", REMOVED: null },
         },
       },
-      initialBreakpoints: { "/workspace/app.js": [{ line: 7 }] },
+      initialBreakpoints: { [program]: [{ line: 7 }] },
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(session).toMatchObject({
@@ -180,7 +191,7 @@ describe("debug service", () => {
     const breakpoints = await ipc.invoke(
       CH.debugSetBreakpoints,
       "debug-1",
-      "/workspace/app.js",
+      program,
       [{ line: 7 }],
     );
     expect(breakpoints).toEqual([{ verified: true, line: 7 }]);
@@ -190,6 +201,374 @@ describe("debug service", () => {
     expect(receivedCommands.slice(-2)).toEqual(["terminate", "disconnect"]);
     expect(fake.wasKilled()).toBe(true);
     cleanup();
+    await fs.rm(workspace, { recursive: true, force: true });
+  });
+
+  it("binds adapter source reads to the open workspace", async () => {
+    const ipc = createIpcHarness();
+    const fake = fakeAdapterProcess();
+    const parser = new DapMessageParser();
+    let adapterSequence = 1;
+    const sourceArguments: Array<Record<string, unknown> | undefined> = [];
+
+    const send = (message: DapMessage) => fake.stdout.write(encodeDapMessage(message));
+    fake.stdin.on("data", (data: Buffer) => {
+      for (const message of parser.push(data)) {
+        if (message.type !== "request") continue;
+        if (message.command === "source") sourceArguments.push(message.arguments);
+        if (message.command === "launch") {
+          send({ seq: adapterSequence++, type: "event", event: "initialized" });
+        }
+        send({
+          seq: adapterSequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+          ...(message.command === "initialize"
+            ? { body: { supportsConfigurationDoneRequest: true } }
+            : message.command === "source"
+              ? { body: { content: "// adapter source" } }
+              : {}),
+        });
+      }
+    });
+
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-source-"));
+    // The workspace authority hands the adapter canonical paths, so compare
+    // against the realpath rather than the (symlinked on macOS) temp path.
+    const workspace = await fs.realpath(created);
+    const program = path.join(workspace, "app.js");
+    await fs.writeFile(program, "// program\n");
+    const workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(workspace);
+    const ctx: ServiceContext = {
+      ipcMain: ipc.ipcMain,
+      userDataDir: "/tmp/logos-test",
+      getWindow: () => null,
+      isTrustedSender: () => true,
+      send: () => undefined,
+      workspaceAccess,
+    };
+    const cleanup = registerDebugService(ctx, {
+      spawnProcess: ((() => {
+        queueMicrotask(() => fake.proc.emit("spawn"));
+        return fake.proc;
+      }) as unknown) as typeof spawn,
+    });
+
+    try {
+      await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+        sessionId: "debug-source",
+        configuration: {
+          name: "Test",
+          type: "custom",
+          request: "launch",
+          program,
+          adapter: { type: "executable", command: "mock-adapter" },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const inside = await ctx.debug!.source("debug-source", 0, program);
+      expect(inside.body).toEqual({ content: "// adapter source" });
+      expect(sourceArguments).toEqual([
+        { source: { path: program }, sourceReference: 0 },
+      ]);
+
+      // The adapter must never see a path the workspace authority rejected.
+      await expect(
+        ctx.debug!.source("debug-source", 0, "/etc/passwd"),
+      ).rejects.toThrow();
+      expect(sourceArguments).toHaveLength(1);
+    } finally {
+      cleanup();
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects path-based source and breakpoint requests without workspace access", async () => {
+    const ipc = createIpcHarness();
+    const fake = fakeAdapterProcess();
+    const parser = new DapMessageParser();
+    let adapterSequence = 1;
+    const sourceArguments: Array<Record<string, unknown> | undefined> = [];
+    const breakpointPaths: string[] = [];
+    const pathBearingArguments: Array<{
+      command: string;
+      arguments: Record<string, unknown> | undefined;
+    }> = [];
+
+    const send = (message: DapMessage) => fake.stdout.write(encodeDapMessage(message));
+    fake.stdin.on("data", (data: Buffer) => {
+      for (const message of parser.push(data)) {
+        if (message.type !== "request") continue;
+        if (message.command === "source") sourceArguments.push(message.arguments);
+        if (message.command === "setBreakpoints") {
+          const source = message.arguments?.source as { path?: string } | undefined;
+          if (source?.path) breakpointPaths.push(source.path);
+        }
+        if (
+          message.command === "breakpointLocations" ||
+          message.command === "gotoTargets"
+        ) {
+          pathBearingArguments.push({
+            command: message.command,
+            arguments: message.arguments,
+          });
+        }
+        if (message.command === "launch") {
+          send({ seq: adapterSequence++, type: "event", event: "initialized" });
+        }
+        send({
+          seq: adapterSequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+          ...(message.command === "initialize"
+            ? { body: { supportsConfigurationDoneRequest: true } }
+            : message.command === "source"
+              ? { body: { content: "// adapter source" } }
+              : message.command === "setBreakpoints"
+                ? { body: { breakpoints: [{ verified: true, line: 3 }] } }
+                : message.command === "breakpointLocations"
+                  ? { body: { breakpoints: [{ line: 3 }] } }
+                  : message.command === "gotoTargets"
+                    ? { body: { targets: [{ id: 1, label: "line", line: 3 }] } }
+                    : {}),
+        });
+      }
+    });
+
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-boundary-"));
+    const workspace = await fs.realpath(created);
+    const program = path.join(workspace, "app.js");
+    await fs.writeFile(program, "// program\n");
+    const ctx: ServiceContext = {
+      ipcMain: ipc.ipcMain,
+      userDataDir: "/tmp/logos-test",
+      getWindow: () => null,
+      isTrustedSender: () => true,
+      send: () => undefined,
+    };
+    const cleanup = registerDebugService(ctx, {
+      spawnProcess: ((() => {
+        queueMicrotask(() => fake.proc.emit("spawn"));
+        return fake.proc;
+      }) as unknown) as typeof spawn,
+    });
+
+    try {
+      await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+        sessionId: "debug-boundary",
+        configuration: {
+          name: "Test",
+          type: "custom",
+          request: "launch",
+          program,
+          adapter: { type: "executable", command: "mock-adapter" },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      await expect(
+        ctx.debug!.source("debug-boundary", 0, "/etc/passwd"),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "source", {
+          source: { path: "/etc/passwd" },
+          sourceReference: 0,
+        }),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugSetBreakpoints, "debug-boundary", "/etc/passwd", [{ line: 3 }]),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "setBreakpoints", {
+          source: { path: "/etc/passwd" },
+          breakpoints: [{ line: 3 }],
+        }),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "breakpointLocations", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "gotoTargets", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("Workspace access controller is required");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-boundary", "launch", {
+          program: "/etc/passwd",
+        }),
+      ).rejects.toThrow("not allowed");
+      expect(sourceArguments).toEqual([]);
+      expect(breakpointPaths).toEqual([]);
+      expect(pathBearingArguments).toEqual([]);
+
+      const referenceOnly = await ipc.invoke(
+        CH.debugRequest,
+        "debug-boundary",
+        "source",
+        { sourceReference: 42 },
+      );
+      expect(referenceOnly).toMatchObject({
+        body: { content: "// adapter source" },
+      });
+      expect(sourceArguments).toEqual([{ source: {}, sourceReference: 42 }]);
+
+      const locationsByReference = await ipc.invoke(
+        CH.debugRequest,
+        "debug-boundary",
+        "breakpointLocations",
+        { source: { sourceReference: 7 }, line: 3 },
+      );
+      expect(locationsByReference).toMatchObject({
+        body: { breakpoints: [{ line: 3 }] },
+      });
+      const targetsByReference = await ipc.invoke(
+        CH.debugRequest,
+        "debug-boundary",
+        "gotoTargets",
+        { source: { sourceReference: 7 }, line: 3 },
+      );
+      expect(targetsByReference).toMatchObject({
+        body: { targets: [{ id: 1, label: "line", line: 3 }] },
+      });
+      expect(pathBearingArguments).toEqual([
+        {
+          command: "breakpointLocations",
+          arguments: { source: { sourceReference: 7 }, line: 3 },
+        },
+        {
+          command: "gotoTargets",
+          arguments: { source: { sourceReference: 7 }, line: 3 },
+        },
+      ]);
+    } finally {
+      cleanup();
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("authorizes path-bearing DAP requests through the workspace boundary", async () => {
+    const ipc = createIpcHarness();
+    const fake = fakeAdapterProcess();
+    const parser = new DapMessageParser();
+    let adapterSequence = 1;
+    const pathBearingArguments: Array<{
+      command: string;
+      arguments: Record<string, unknown> | undefined;
+    }> = [];
+
+    const send = (message: DapMessage) => fake.stdout.write(encodeDapMessage(message));
+    fake.stdin.on("data", (data: Buffer) => {
+      for (const message of parser.push(data)) {
+        if (message.type !== "request") continue;
+        if (
+          message.command === "breakpointLocations" ||
+          message.command === "gotoTargets"
+        ) {
+          pathBearingArguments.push({
+            command: message.command,
+            arguments: message.arguments,
+          });
+        }
+        if (message.command === "launch") {
+          send({ seq: adapterSequence++, type: "event", event: "initialized" });
+        }
+        send({
+          seq: adapterSequence++,
+          type: "response",
+          request_seq: message.seq,
+          command: message.command,
+          success: true,
+          ...(message.command === "initialize"
+            ? { body: { supportsConfigurationDoneRequest: true } }
+            : message.command === "breakpointLocations"
+              ? { body: { breakpoints: [{ line: 3 }] } }
+              : message.command === "gotoTargets"
+                ? { body: { targets: [{ id: 1, label: "line", line: 3 }] } }
+                : {}),
+        });
+      }
+    });
+
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-path-bearing-"));
+    const workspace = await fs.realpath(created);
+    const program = path.join(workspace, "app.js");
+    await fs.writeFile(program, "// program\n");
+    const workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(workspace);
+    const ctx: ServiceContext = {
+      ipcMain: ipc.ipcMain,
+      userDataDir: "/tmp/logos-test",
+      getWindow: () => null,
+      isTrustedSender: () => true,
+      send: () => undefined,
+      workspaceAccess,
+    };
+    const cleanup = registerDebugService(ctx, {
+      spawnProcess: ((() => {
+        queueMicrotask(() => fake.proc.emit("spawn"));
+        return fake.proc;
+      }) as unknown) as typeof spawn,
+    });
+
+    try {
+      await ipc.invoke<DebugSessionInfo>(CH.debugStart, {
+        sessionId: "debug-path-bearing",
+        configuration: {
+          name: "Test",
+          type: "custom",
+          request: "launch",
+          program,
+          adapter: { type: "executable", command: "mock-adapter" },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-path-bearing", "breakpointLocations", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("outside");
+      await expect(
+        ipc.invoke(CH.debugRequest, "debug-path-bearing", "gotoTargets", {
+          source: { path: "/etc/passwd" },
+          line: 3,
+        }),
+      ).rejects.toThrow("outside");
+      expect(pathBearingArguments).toEqual([]);
+
+      await ipc.invoke(CH.debugRequest, "debug-path-bearing", "breakpointLocations", {
+        source: { path: program },
+        line: 3,
+      });
+      await ipc.invoke(CH.debugRequest, "debug-path-bearing", "gotoTargets", {
+        source: { path: program },
+        line: 3,
+      });
+      expect(pathBearingArguments).toEqual([
+        {
+          command: "breakpointLocations",
+          arguments: { source: { path: program }, line: 3 },
+        },
+        {
+          command: "gotoTargets",
+          arguments: { source: { path: program }, line: 3 },
+        },
+      ]);
+    } finally {
+      cleanup();
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
   });
 
   it("does not launch after stop wins the initialize race", async () => {
@@ -900,6 +1279,12 @@ describe("debug service", () => {
       queueMicrotask(() => fake.proc.emit("spawn"));
       return fake.proc;
     }) as unknown as typeof spawn;
+    const created = await fs.mkdtemp(path.join(os.tmpdir(), "logos-debug-electron-"));
+    const workspace = await fs.realpath(created);
+    const rendererFile = path.join(workspace, "renderer.ts");
+    await fs.writeFile(rendererFile, "// renderer\n");
+    const workspaceAccess = new WorkspaceAccessController();
+    await workspaceAccess.restoreWorkspaceRoot(workspace);
     const cleanup = registerDebugService(
       {
         ipcMain: ipc.ipcMain,
@@ -907,6 +1292,7 @@ describe("debug service", () => {
         getWindow: () => null,
         isTrustedSender: () => true,
         send: () => undefined,
+        workspaceAccess,
       } satisfies ServiceContext,
       {
         spawnProcess,
@@ -943,17 +1329,17 @@ describe("debug service", () => {
         },
         renderer: {
           port: 9333,
-          webRoot: "/workspace",
+          webRoot: workspace,
           urlFilter: "file://*",
         },
       },
-      initialBreakpoints: { "/workspace/renderer.ts": [{ line: 12 }] },
+      initialBreakpoints: { [rendererFile]: [{ line: 12 }] },
     });
     await rendererConnecting;
     await ipc.invoke(
       CH.debugSetBreakpoints,
       "electron-root",
-      "/workspace/renderer.ts",
+      rendererFile,
       [{ line: 24 }],
     );
     releaseRendererConnection();
@@ -969,7 +1355,7 @@ describe("debug service", () => {
       type: "pwa-chrome",
       port: 9333,
       address: "127.0.0.1",
-      webRoot: "/workspace",
+      webRoot: workspace,
       urlFilter: "file://*",
       timeout: 30_000,
     });
@@ -989,6 +1375,7 @@ describe("debug service", () => {
     await ipc.invoke(CH.debugStop, "electron-root", true);
     expect(await ipc.invoke(CH.debugList)).toEqual([]);
     cleanup();
+    await fs.rm(workspace, { recursive: true, force: true });
   });
 
   it("does not restart a renderer after its parent adapter fails", async () => {

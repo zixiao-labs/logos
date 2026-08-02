@@ -45,9 +45,16 @@ function userKey(): string {
   return createHash("sha256").update(identity).digest("hex").slice(0, 16);
 }
 
-/** Shared with the stdio proxy; the directory is private to the OS user. */
+/**
+ * Shared with the stdio proxy; the directory is private to the OS user.
+ *
+ * Anchored to the home directory rather than `os.tmpdir()` on purpose. MCP
+ * clients spawn the proxy with a scrubbed environment that keeps `HOME` and
+ * `USERPROFILE` but drops `TMPDIR`, so a temp-based path resolves differently
+ * on each side of the boundary and discovery silently finds nothing.
+ */
 export function debugMcpRegistryDirectory(): string {
-  return path.join(os.tmpdir(), "logos-debug-mcp", userKey());
+  return path.join(os.homedir(), ".logos", "debug-mcp", userKey());
 }
 
 function errorMessage(error: unknown): string {
@@ -128,8 +135,20 @@ export async function registerDebugMcpBridge(
           return;
         }
         try {
-          const workspace = await realpath(String(request.workspace ?? ""));
-          await ctx.workspaceAccess?.assertWorkspaceRoot(workspace);
+          // Resolved in its own scope so WORKSPACE_NOT_OPEN can only ever mean
+          // "rejected before anything ran". The proxy relies on that to decide
+          // whether resending a request could execute it twice.
+          let workspace: string;
+          try {
+            workspace = await realpath(String(request.workspace ?? ""));
+            await ctx.workspaceAccess?.assertWorkspaceRoot(workspace);
+          } catch (error) {
+            respond({
+              ok: false,
+              error: { code: "WORKSPACE_NOT_OPEN", message: errorMessage(error) },
+            });
+            return;
+          }
           if (request.type === "handshake") {
             respond({
               ok: true,
@@ -183,10 +202,7 @@ export async function registerDebugMcpBridge(
         } catch (error) {
           respond({
             ok: false,
-            error: {
-              code: /workspace/i.test(errorMessage(error)) ? "WORKSPACE_NOT_OPEN" : "DEBUG_ERROR",
-              message: errorMessage(error),
-            },
+            error: { code: "DEBUG_ERROR", message: errorMessage(error) },
           });
         }
       })();

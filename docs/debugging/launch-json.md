@@ -337,12 +337,28 @@ it as `logos-debug`:
 The MCP process does not launch a second debugger. It discovers a running Logos window
 with the same canonical workspace and forwards tools to that window's shared DAP
 controller. The bridge listens only on loopback, uses a random token for every Logos
-launch, and stores discovery data with current-user-only permissions. Keep Logos open
+launch, and stores discovery data under `~/.logos/debug-mcp` with current-user-only
+permissions. That location is deliberately not the temp directory: MCP clients spawn
+servers with a scrubbed environment that keeps `HOME` but drops `TMPDIR`, so a
+temp-based path would not resolve to the same directory on both sides. Keep Logos open
 on the project before calling an MCP debug tool.
+
+Read-only tools (`debug_list_configurations`, `debug_list_sessions`, `debug_threads`,
+`debug_stack_trace`, `debug_scopes`, `debug_variables`, `debug_source`) run without a
+prompt, so any process that can read the discovery file can inspect debuggee state.
+`debug_source` resolves its `source_path` through the same workspace authority as
+breakpoints, and raw `debug_request` refuses `source` and `setBreakpoints` so that
+authority cannot be bypassed.
+
+If Logos accepts a mutating request but its answer never arrives, the proxy reports
+that the action may already have run instead of resending it — a silent retry could
+start a second debuggee or evaluate an expression twice. Read-only tools are
+idempotent and are retried normally.
 
 Mutating external MCP requests open a non-dismissable, full-screen approval dialog
 in Logos and post a system notification. The dialog exposes the complete action,
 configuration, session, and argument details and requires **Allow once** or **Deny**.
+An unanswered request is denied after 60 seconds.
 See [MCP project configuration](../agents/mcp-json.md) for Claude, Cursor, VS Code,
 and Codex project formats and the automatic folder setup flow.
 

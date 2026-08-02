@@ -28,6 +28,7 @@ import {
   resolveLogosOpenAIModel,
 } from "../../shared/logos-agent";
 import type { OpenAIAuthStore } from "./openai-auth";
+import { OpenAIAuthRequiredError } from "./openai-auth";
 import {
   activeSession,
   executeDebugControl,
@@ -363,6 +364,31 @@ const TOOLS = [
   },
 ];
 
+/** Carries the HTTP status so callers never classify errors by message text. */
+class ResponsesApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ResponsesApiError";
+  }
+}
+
+/**
+ * Only a credential problem should discard the user's turn and ask them to sign
+ * in again. Deciding that from the transport status (or an explicit auth-store
+ * error) keeps an upstream 5xx whose body happens to contain "unauthorized"
+ * from silently dropping work.
+ */
+function isAuthenticationFailure(error: unknown): boolean {
+  if (error instanceof OpenAIAuthRequiredError) return true;
+  return (
+    error instanceof ResponsesApiError &&
+    (error.status === 401 || error.status === 403)
+  );
+}
+
 function stringify(value: unknown): string {
   if (typeof value === "string") return value;
   try {
@@ -648,11 +674,7 @@ export class LogosAgentRuntime {
           costUsd: null,
           usage: { stopReason: "cancelled" },
         });
-      } else if (
-        /401|403|unauthor|forbidden|authentication required|invalid.*token|token refresh/i.test(
-          String(error),
-        )
-      ) {
+      } else if (isAuthenticationFailure(error)) {
         this.pendingPrompts.push(text);
         this.history.splice(historyStart);
         await this.persist().catch(() => undefined);
@@ -836,7 +858,10 @@ export class LogosAgentRuntime {
     this.trace("response", { step, status: response.status, ok: response.ok });
     if (!response.ok) {
       const detail = byteLimit(await response.text(), 16 * 1024);
-      throw new Error(`OpenAI Responses API failed (${response.status}): ${detail}`);
+      throw new ResponsesApiError(
+        response.status,
+        `OpenAI Responses API failed (${response.status}): ${detail}`,
+      );
     }
     if (!response.body) throw new Error("OpenAI returned an empty response stream");
 

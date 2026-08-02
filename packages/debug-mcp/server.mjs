@@ -24,8 +24,11 @@ function userKey() {
   return createHash("sha256").update(identity).digest("hex").slice(0, 16);
 }
 
+// Must match `debugMcpRegistryDirectory` in the Logos main process. MCP clients
+// scrub `TMPDIR` out of the spawned environment but keep `HOME`/`USERPROFILE`,
+// so a temp-based path would not resolve to the same directory Logos wrote to.
 function registryDirectory() {
-  return path.join(os.tmpdir(), "logos-debug-mcp", userKey());
+  return path.join(os.homedir(), ".logos", "debug-mcp", userKey());
 }
 
 function processIsAlive(pid) {
@@ -77,19 +80,33 @@ function bridgeRequest(record, type, input) {
     });
     let buffer = "";
     let settled = false;
+    let requestSent = false;
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       socket.destroy();
-      error ? reject(error) : resolve(value);
+      if (!error) {
+        resolve(value);
+        return;
+      }
+      const failure = error instanceof Error ? error : new Error(String(error));
+      // Once the request reaches the socket we can no longer tell whether Logos
+      // ran it, which decides if resending is safe.
+      failure.requestSent = requestSent;
+      reject(failure);
     };
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify({
-        type,
-        token: record.token,
-        workspace,
-        ...(input ? { input } : {}),
-      })}\n`);
+      socket.write(
+        `${JSON.stringify({
+          type,
+          token: record.token,
+          workspace,
+          ...(input ? { input } : {}),
+        })}\n`,
+        () => {
+          requestSent = true;
+        },
+      );
     });
     socket.on("data", chunk => {
       buffer += chunk;
@@ -119,6 +136,9 @@ function bridgeRequest(record, type, input) {
 
 let selectedRecord;
 
+/** Populated by `register` so this never drifts from the published annotations. */
+const readOnlyActions = new Set();
+
 async function discoverBridge() {
   for (const record of await registryRecords()) {
     try {
@@ -134,6 +154,18 @@ async function discoverBridge() {
   );
 }
 
+/**
+ * Rediscovery must not turn one `debug_start`, `debug_stop` or `debug_evaluate`
+ * into two. Resending is only safe when the action is read-only, when the bytes
+ * never reached Logos, or when Logos answered with a code it only produces
+ * before running anything.
+ */
+function mayResend(error, action) {
+  if (readOnlyActions.has(action)) return true;
+  if (!error?.requestSent) return true;
+  return error?.code === "UNAUTHORIZED" || error?.code === "WORKSPACE_NOT_OPEN";
+}
+
 async function callDebug(input) {
   const record = selectedRecord || await discoverBridge();
   try {
@@ -141,6 +173,13 @@ async function callDebug(input) {
   } catch (error) {
     if (error?.code === "DEBUG_ERROR") throw error;
     selectedRecord = undefined;
+    if (!mayResend(error, input.action)) {
+      throw new Error(
+        `Logos did not confirm '${input.action}' and it may already have run: ${
+          error?.message ?? String(error)
+        }. Check debug_list_sessions before retrying.`,
+      );
+    }
     return bridgeRequest(await discoverBridge(), "execute", input);
   }
 }
@@ -158,6 +197,7 @@ const breakpoint = z.object({
 });
 
 function register(name, description, inputSchema, action, annotations = {}) {
+  if (annotations.readOnlyHint) readOnlyActions.add(action);
   server.registerTool(
     name,
     { description, inputSchema, annotations },

@@ -339,6 +339,48 @@ describe("Logos agent runtime", () => {
     expect(events.at(-1)).toMatchObject({ kind: "result", isError: false });
   });
 
+  it("classifies upstream failures by status instead of response body text", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        "upstream gateway error: the origin returned 403 unauthorized for an unrelated hop",
+        { status: 502 },
+      )) as typeof fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root, { resume: "status-classification" }),
+      hooks,
+      fakeAuth("api-key"),
+      sessionsDir,
+    );
+
+    await runtime.prompt("do the work");
+
+    // A 5xx whose body merely mentions 403/unauthorized is a tool failure, not
+    // a sign-out, so the turn must be reported as an error and kept on disk.
+    expect(events.some((event) => event.kind === "auth-required")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ kind: "error" });
+    await runtime.dispose();
+    const saved = JSON.parse(
+      await fs.readFile(path.join(sessionsDir, "status-classification.json"), "utf8"),
+    ) as { history: Array<Record<string, unknown>> };
+    expect(saved.history.at(-1)).toMatchObject({ role: "user" });
+  });
+
+  it("asks for sign-in when the transport itself rejects the credential", async () => {
+    globalThis.fetch = (async () =>
+      new Response("no diagnostic text here", { status: 401 })) as typeof fetch;
+    const runtime = await LogosAgentRuntime.create(
+      request(root),
+      hooks,
+      fakeAuth("api-key"),
+      sessionsDir,
+    );
+
+    await runtime.prompt("do the work");
+
+    expect(events.at(-1)).toMatchObject({ kind: "auth-required" });
+    expect(events.some((event) => event.kind === "error")).toBe(false);
+  });
+
   it("rejects an invalid Finish call and keeps the loop running", async () => {
     let calls = 0;
     globalThis.fetch = (async () => {
@@ -892,6 +934,7 @@ describe("Logos agent runtime", () => {
         capabilities: {},
       }),
       setBreakpoints: async () => [],
+      source: async () => { throw new Error("not used"); },
       request: async <T = unknown>(sessionId: string, command: string, args?: Record<string, unknown>) => {
         debugRequests.push({ sessionId, command, args });
         return {
@@ -977,6 +1020,7 @@ describe("Logos agent runtime", () => {
       configurations: async () => ({ path: null, configurations: [] }),
       startConfiguration: async () => session,
       setBreakpoints: async () => [],
+      source: async () => { throw new Error("not used"); },
       request: async <T = unknown>(sessionId: string, command: string, args?: Record<string, unknown>) => {
         requests.push({ sessionId, command, args });
         return {

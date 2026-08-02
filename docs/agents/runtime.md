@@ -75,8 +75,10 @@ compatibility shortcut for `DAP` evaluation.
 Third-party Agents can use the same control plane through the project `logos-debug`
 MCP server. Its stdio proxy discovers an authenticated loopback bridge published by a
 running Logos process; it only connects when that Logos window has the same canonical
-workspace open. Discovery files are private to the current OS user and contain a
-per-launch random token. See [Debugging with `launch.json`](../debugging/launch-json.md#agent-and-mcp-control).
+workspace open. Discovery files live under `~/.logos/debug-mcp`, are private to the
+current OS user, and contain a per-launch random token. Read-only tools run without a
+prompt; a mutation whose result never comes back is reported rather than resent. See
+[Debugging with `launch.json`](../debugging/launch-json.md#agent-and-mcp-control).
 
 ## ACP Registry
 

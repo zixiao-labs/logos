@@ -213,6 +213,11 @@ export interface DapEvaluateResult {
   valueLocationReference?: number;
 }
 
+export interface DapSourceResult {
+  content: string;
+  mimeType?: string;
+}
+
 export interface DebugAdapterExecutable {
   type: "executable";
   command: string;
