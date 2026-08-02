@@ -1550,6 +1550,12 @@ export function registerDebugService(
     }
     return response;
   };
+  const assertControlledSourcePath = async (sourcePath: string): Promise<string> => {
+    if (!ctx.workspaceAccess) {
+      throw new Error("Workspace access controller is required for source path requests.");
+    }
+    return ctx.workspaceAccess.assertPath(sourcePath);
+  };
   const setSessionBreakpoints = async (
     sessionId: string,
     sourcePath: string,
@@ -1557,12 +1563,8 @@ export function registerDebugService(
   ) => {
     const session = sessions.get(sessionId);
     if (!session) throw new Error(`Debug session '${sessionId}' is not running`);
-    const controlledPath = await ctx.workspaceAccess?.assertPath(sourcePath);
-    return sendBreakpointsToSessionTree(
-      session,
-      controlledPath ?? sourcePath,
-      breakpoints,
-    );
+    const controlledPath = await assertControlledSourcePath(sourcePath);
+    return sendBreakpointsToSessionTree(session, controlledPath, breakpoints);
   };
   /**
    * Read source that the adapter exposes. `sourcePath` is the only DAP path
@@ -1575,12 +1577,49 @@ export function registerDebugService(
     sourcePath?: string,
   ) => {
     const controlledPath = sourcePath
-      ? ((await ctx.workspaceAccess?.assertPath(sourcePath)) ?? sourcePath)
+      ? await assertControlledSourcePath(sourcePath)
       : undefined;
     return requestSession<DapSourceResult>(sessionId, "source", {
       source: controlledPath ? { path: controlledPath } : {},
       sourceReference,
     });
+  };
+  const handleDebugRequest = async (
+    sessionId: string,
+    command: string,
+    args?: DapArguments,
+  ): Promise<DapResponse> => {
+    if (command === "source") {
+      const source = asArguments(args?.source);
+      const sourcePath = typeof source.path === "string" ? source.path : undefined;
+      const sourceReference =
+        typeof args?.sourceReference === "number"
+          ? args.sourceReference
+          : typeof source.sourceReference === "number"
+            ? source.sourceReference
+            : 0;
+      return sourceFromSession(sessionId, sourceReference, sourcePath);
+    }
+    if (command === "setBreakpoints") {
+      const source = asArguments(args?.source);
+      const sourcePath = typeof source.path === "string" ? source.path : "";
+      if (!sourcePath) {
+        throw new Error("A source path is required for setBreakpoints");
+      }
+      const breakpoints = Array.isArray(args?.breakpoints)
+        ? (args.breakpoints as DapSourceBreakpoint[])
+        : [];
+      const result = await setSessionBreakpoints(sessionId, sourcePath, breakpoints);
+      return {
+        seq: 0,
+        type: "response",
+        request_seq: 0,
+        command: "setBreakpoints",
+        success: true,
+        body: { breakpoints: result },
+      };
+    }
+    return requestSession(sessionId, command, args);
   };
   const stopSessionById = async (
     sessionId: string,
@@ -1719,7 +1758,7 @@ export function registerDebugService(
       sessionId: string,
       command: string,
       args?: DapArguments,
-    ): Promise<DapResponse> => requestSession(sessionId, command, args),
+    ): Promise<DapResponse> => handleDebugRequest(sessionId, command, args),
   );
   ipcMain.handle(
     CH.debugSetBreakpoints,

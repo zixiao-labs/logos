@@ -18,6 +18,7 @@ import type {
 import type { ServiceContext } from "./context";
 import {
   extensionManifestId,
+  MANIFEST_MAX_BYTES,
   normalizeSafePackagePath,
   parseExtensionManifestJson,
   parseExtensionRegistryJson,
@@ -263,13 +264,13 @@ async function readArchiveManifest(zip: yauzl.ZipFile): Promise<LogosExtensionMa
         return;
       }
       if (
-        entry.uncompressedSize > 1024 * 1024 ||
+        entry.uncompressedSize > MANIFEST_MAX_BYTES ||
         isUnsafeUnixFileType(entry, false)
       ) {
         fail(new Error("Extension manifest entry is invalid."));
         return;
       }
-      void readZipEntry(zip, entry, 1024 * 1024)
+      void readZipEntry(zip, entry, MANIFEST_MAX_BYTES)
         .then(buffer => {
           if (settled) return;
           settled = true;
@@ -497,18 +498,26 @@ async function makeTreeReadOnly(root: string): Promise<void> {
 async function removeManagedTree(root: string): Promise<void> {
   let entries;
   try {
-    await fs.chmod(root, 0o700);
+    await fs.chmod(root, 0o700).catch(() => undefined);
     entries = await fs.readdir(root, { withFileTypes: true });
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return;
     throw error;
   }
   for (const entry of entries) {
+    const target = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      await removeManagedTree(path.join(root, entry.name));
+      await removeManagedTree(target);
+    } else if (entry.isFile()) {
+      await fs.chmod(target, 0o700).catch(() => undefined);
     }
   }
-  await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 100,
+  });
 }
 
 async function validateExistingContent(
@@ -712,23 +721,27 @@ export function registerExtensionService(ctx: ServiceContext): () => void {
 
   /** Content is addressed by digest, so anything no pointer references is dead. */
   async function collectOrphanContent(): Promise<void> {
-    const referenced = new Set(
-      [...(await loadInstallRecords(recordsDir)).values()].map(record =>
-        record.digest.slice("sha256:".length),
-      ),
-    );
-    let names: string[];
     try {
-      names = await fs.readdir(contentDir);
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") return;
-      throw error;
-    }
-    for (const name of names) {
-      if (!/^[a-f0-9]{64}$/.test(name) || referenced.has(name)) continue;
-      // Best effort: a directory that cannot be removed right now is retried on
-      // the next mutation rather than failing an otherwise successful install.
-      await removeManagedTree(path.join(contentDir, name)).catch(() => undefined);
+      const referenced = new Set(
+        [...(await loadInstallRecords(recordsDir)).values()].map(record =>
+          record.digest.slice("sha256:".length),
+        ),
+      );
+      let names: string[];
+      try {
+        names = await fs.readdir(contentDir);
+      } catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT") return;
+        throw error;
+      }
+      for (const name of names) {
+        if (!/^[a-f0-9]{64}$/.test(name) || referenced.has(name)) continue;
+        // Best effort: a directory that cannot be removed right now is retried on
+        // the next mutation rather than failing an otherwise successful install.
+        await removeManagedTree(path.join(contentDir, name)).catch(() => undefined);
+      }
+    } catch {
+      // Best effort: retry orphan cleanup on the next install/uninstall mutation.
     }
   }
 

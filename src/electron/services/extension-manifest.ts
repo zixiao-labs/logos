@@ -5,7 +5,7 @@ import type {
 } from "@logos-editor/extension-api";
 import { z } from "zod";
 
-const MANIFEST_MAX_BYTES = 1024 * 1024;
+export const MANIFEST_MAX_BYTES = 1024 * 1024;
 const REGISTRY_MAX_BYTES = 2 * 1024 * 1024;
 const JSON_MAX_DEPTH = 32;
 const JSON_MAX_NODES = 20_000;

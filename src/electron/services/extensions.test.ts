@@ -329,6 +329,21 @@ describe("extension registry and installer", () => {
     }).toEqual({ orphan: false, installed: true });
   });
 
+  it("does not fail uninstall when orphan cleanup cannot scan the content store", async () => {
+    const body = Buffer.from(JSON.stringify(manifest()));
+    const { ipc } = await setup([{ name: "extension.json", body }]);
+    await ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsInstall, "example.sample");
+
+    const contentDir = path.join(userDataDir, "extensions", "content");
+    await fs.chmod(contentDir, 0o000);
+
+    await expect(
+      ipc.invoke<ExtensionRegistrySnapshot>(CH.extensionsUninstall, "other.thing"),
+    ).resolves.toMatchObject({ status: "ready" });
+
+    await fs.chmod(contentDir, 0o700);
+  });
+
   it("does not expose the development registry in packaged mode", async () => {
     const ipc = createIpcHarness();
     registerExtensionService({
