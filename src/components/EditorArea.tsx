@@ -11,6 +11,8 @@ import { ExtensionsView } from "./ExtensionsView";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { Welcome } from "./Welcome";
 import { GitDiffEditor } from "./GitDiffEditor";
+import { buildBreadcrumbs } from "../lib/breadcrumbs";
+import { MultiGitDiffEditor } from "./MultiGitDiffEditor";
 
 export function EditorArea() {
   const t = useT();
@@ -20,6 +22,7 @@ export function EditorArea() {
   const workspaceFolders = useStore((s) => s.workspaceFolders);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const openPreview = useStore((s) => s.openPreview);
+  const revealInExplorer = useStore((s) => s.revealInExplorer);
 
   const active = tabs.find((tb) => tb.id === activeTabId) ?? null;
 
@@ -44,23 +47,9 @@ export function EditorArea() {
     }
   }
 
-  const activeWorkspaceRoot =
-    active?.kind === "file" && active.path
-      ? (workspaceFolders.find(
-          (folder) =>
-            active.path === folder ||
-            active.path!.startsWith(`${folder}/`) ||
-            active.path!.startsWith(`${folder}\\`),
-        ) ?? root)
-      : null;
   const crumbs =
     active?.kind === "file" && active.path
-      ? (activeWorkspaceRoot
-          ? active.path
-              .slice(activeWorkspaceRoot.length)
-              .replace(/^[\\/]/, "")
-          : active.path
-        ).split(/[\\/]/)
+      ? buildBreadcrumbs(active.path, workspaceFolders, root)
       : [];
 
   return (
@@ -84,8 +73,8 @@ export function EditorArea() {
                     ? "extensions"
                     : tab.kind === "preview"
                       ? "preview"
-                      : tab.kind === "diff"
-                          ? "git"
+                      : tab.kind === "diff" || tab.kind === "multi-diff"
+                        ? "git"
                         : "file"
               }
               size={14}
@@ -103,16 +92,32 @@ export function EditorArea() {
       </div>
 
       {active?.kind === "file" && (
-        <div className="breadcrumbs">
-          {crumbs.map((c, i) => (
-            <span key={i} className="crumb">
-              {c}
-              {i < crumbs.length - 1 && (
-                <Icon name="chevron-right" size={12} style={{ margin: "0 2px" }} />
-              )}
-            </span>
-          ))}
-          <div style={{ flex: 1 }} />
+        <nav className="breadcrumbs" aria-label="File path">
+          <div className="breadcrumb-path">
+            {crumbs.map((crumb, i) => (
+              <span key={crumb.path} className="breadcrumb-segment">
+                <button
+                  type="button"
+                  className={`breadcrumb-item ${crumb.kind === "file" ? "current" : ""}`}
+                  title={`${t("explorer.reveal")}: ${crumb.path}`}
+                  aria-current={crumb.kind === "file" ? "page" : undefined}
+                  onClick={() =>
+                    revealInExplorer(crumb.path, crumb.kind === "folder")
+                  }
+                >
+                  {crumb.label}
+                </button>
+                {i < crumbs.length - 1 && (
+                  <Icon
+                    name="chevron-right"
+                    size={11}
+                    className="breadcrumb-chevron"
+                  />
+                )}
+              </span>
+            ))}
+          </div>
+          <div className="breadcrumb-spacer" />
           {active.externalChange && active.path && (
             <button
               className="external-change"
@@ -133,20 +138,20 @@ export function EditorArea() {
               <Icon name="preview" />
             </button>
           )}
-        </div>
+        </nav>
       )}
 
       <div className="editor-host">
         {(active?.kind === "file" || active?.kind === "debug-source") &&
           active.path && (
-          <MonacoEditor
-            key={active.path}
-            path={active.path}
-            language={active.language ?? "plaintext"}
-            content={active.content}
-            readOnly={active.content !== undefined}
-            debugPosition={active.debugPosition}
-          />
+            <MonacoEditor
+              key={active.path}
+              path={active.path}
+              language={active.language ?? "plaintext"}
+              content={active.content}
+              readOnly={active.content !== undefined}
+              debugPosition={active.debugPosition}
+            />
           )}
         {active?.kind === "welcome" && <Welcome />}
         {active?.kind === "diff" && active.diff && (
@@ -156,6 +161,9 @@ export function EditorArea() {
             staged={active.diff.staged}
             language={active.language ?? "plaintext"}
           />
+        )}
+        {active?.kind === "multi-diff" && active.multiDiff && (
+          <MultiGitDiffEditor root={active.multiDiff.root} />
         )}
         {active?.kind === "settings" && <SettingsView />}
         {active?.kind === "extensions" && <ExtensionsView />}

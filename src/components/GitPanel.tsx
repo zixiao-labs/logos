@@ -19,6 +19,7 @@ export function GitPanel() {
   const gitPush = useStore((s) => s.gitPush);
   const gitSync = useStore((s) => s.gitSync);
   const openGitDiff = useStore((s) => s.openGitDiff);
+  const openMultiGitDiff = useStore((s) => s.openMultiGitDiff);
   const [message, setMessage] = useState("");
 
   async function run(fn: () => Promise<unknown>) {
@@ -191,6 +192,14 @@ export function GitPanel() {
           </span>
         )}
         <div className="actions">
+          <button
+            className="icon-btn"
+            title={t("git.viewAllChanges")}
+            disabled={(git?.changes.length ?? 0) === 0}
+            onClick={() => openMultiGitDiff(root)}
+          >
+            <Icon name="files" />
+          </button>
           <button
             className="icon-btn"
             title={t("git.commit")}

@@ -430,17 +430,62 @@ textarea.field {
 .breadcrumbs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 14px;
-  font-size: 11.5px;
+  height: 28px;
+  padding: 0 8px;
   color: var(--muted);
   border-bottom: 1px solid var(--separator);
   background: var(--background);
   flex-shrink: 0;
+  min-width: 0;
 }
-.breadcrumbs .crumb:last-child {
+.breadcrumb-path {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+.breadcrumb-segment {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex-shrink: 1;
+}
+.breadcrumb-item {
+  min-width: 0;
+  max-width: 220px;
+  height: 22px;
+  padding: 0 5px;
+  overflow: hidden;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.breadcrumb-item:hover {
   color: var(--foreground);
+  background: var(--surface-secondary);
+}
+.breadcrumb-item:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
+.breadcrumb-item.current {
+  color: var(--foreground);
+}
+.breadcrumb-chevron {
+  margin: 0 1px;
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+.breadcrumb-spacer {
+  flex: 1;
+  min-width: 8px;
 }
 .editor-host {
   flex: 1;
@@ -450,6 +495,136 @@ textarea.field {
 .monaco-container {
   position: absolute;
   inset: 0;
+}
+
+/* ---- multi-file diff --------------------------------------------------- */
+.multi-diff-scroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background: var(--background);
+}
+.multi-diff-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--separator);
+  background: color-mix(in srgb, var(--background) 94%, transparent);
+  backdrop-filter: blur(10px);
+}
+.multi-diff-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+.multi-diff-toolbar-spacer {
+  flex: 1;
+}
+.multi-diff-section {
+  position: relative;
+  border-bottom: 1px solid var(--separator);
+}
+.multi-diff-section-header {
+  position: sticky;
+  top: 36px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 10px 0 6px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-secondary);
+  box-shadow: 0 1px 4px color-mix(in srgb, #000 14%, transparent);
+}
+.multi-diff-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.multi-diff-collapse:hover {
+  color: var(--foreground);
+  background: var(--surface-tertiary);
+}
+.multi-diff-file {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 5px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.multi-diff-file:hover {
+  background: var(--surface-tertiary);
+}
+.multi-diff-file-name {
+  color: var(--foreground);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.multi-diff-file-path {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multi-diff-kind {
+  margin-left: auto;
+  padding: 2px 6px;
+  color: var(--muted);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.multi-diff-body {
+  position: relative;
+  min-height: 96px;
+  max-height: 4000px;
+  background: var(--background);
+}
+.multi-diff-monaco {
+  position: absolute;
+  inset: 0;
+}
+.multi-diff-state {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+  color: var(--muted);
+  background: var(--background);
+  font-size: 12px;
+}
+.multi-diff-retry {
+  width: auto;
 }
 
 /* ---- bottom panel -------------------------------------------------------- */

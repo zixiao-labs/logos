@@ -9,6 +9,11 @@ import {
   prepareUserResourceOperation,
   reopenUserResourceOperation,
 } from "../lib/lsp-monaco";
+import {
+  canonicalPath,
+  directoriesToReveal,
+  workspaceRootForPath,
+} from "../lib/breadcrumbs";
 
 interface EditState {
   parent: string;
@@ -28,6 +33,8 @@ export function Explorer() {
   const removeWorkspaceFolder = useStore((s) => s.removeWorkspaceFolder);
   const gitRepositories = useStore((s) => s.gitRepositories);
   const refreshGit = useStore((s) => s.refreshGit);
+  const revealTarget = useStore((s) => s.explorerRevealTarget);
+  const clearRevealTarget = useStore((s) => s.clearExplorerRevealTarget);
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [children, setChildren] = useState<Record<string, FileEntry[]>>({});
@@ -36,6 +43,7 @@ export function Explorer() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(
     null,
   );
+  const nodeRefs = useRef(new Map<string, HTMLDivElement>());
 
   const gitMap: Record<string, string> = {};
   for (const [repositoryRoot, repository] of Object.entries(gitRepositories)) {
@@ -47,9 +55,59 @@ export function Explorer() {
 
   const loadChildren = useCallback(async (dir: string) => {
     const listing = await window.logos.fs.readDir(dir);
-    setChildren((c) => ({ ...c, [dir]: listing.entries }));
+    setChildren((c) => ({
+      ...c,
+      [dir]: listing.entries,
+      [canonicalPath(dir)]: listing.entries,
+    }));
     return listing.entries;
   }, []);
+
+  useEffect(() => {
+    if (!revealTarget) return;
+    const owner = workspaceRootForPath(
+      revealTarget.path,
+      workspaceFolders,
+      root,
+    );
+    if (!owner) {
+      clearRevealTarget();
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const directories = directoriesToReveal(
+        revealTarget.path,
+        revealTarget.isDirectory,
+        owner,
+      );
+      await Promise.all(directories.map((directory) => loadChildren(directory)));
+      if (cancelled) return;
+      setExpanded((previous) => {
+        const next = new Set(previous);
+        directories.forEach((directory) => next.add(canonicalPath(directory)));
+        return next;
+      });
+      setSelected(canonicalPath(revealTarget.path));
+      clearRevealTarget();
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          nodeRefs.current
+            .get(canonicalPath(revealTarget.path))
+            ?.scrollIntoView({ block: "nearest" });
+        });
+      });
+    })().catch(() => clearRevealTarget());
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    clearRevealTarget,
+    loadChildren,
+    revealTarget,
+    root,
+    workspaceFolders,
+  ]);
 
   // (Re)load every root whenever the workspace changes, and watch all of them.
   useEffect(() => {
@@ -88,10 +146,13 @@ export function Explorer() {
   async function toggle(dir: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(dir)) next.delete(dir);
-      else {
-        next.add(dir);
-        if (!children[dir]) void loadChildren(dir);
+      const key = canonicalPath(dir);
+      if (next.has(dir) || next.has(key)) {
+        next.delete(dir);
+        next.delete(key);
+      } else {
+        next.add(key);
+        if (!children[dir] && !children[key]) void loadChildren(dir);
       }
       return next;
     });
@@ -245,12 +306,17 @@ export function Explorer() {
 
   const renderNode = (entry: FileEntry, depth: number): React.ReactNode => {
     const isDir = entry.type === "directory";
-    const isOpen = expanded.has(entry.path);
+    const entryKey = canonicalPath(entry.path);
+    const isOpen = expanded.has(entry.path) || expanded.has(entryKey);
     const status = gitMap[entry.path.replace(/\\/g, "/")];
     return (
       <div key={entry.path}>
         <div
-          className={`tree-row ${selected === entry.path ? "selected" : ""}`}
+          ref={(node) => {
+            if (node) nodeRefs.current.set(entryKey, node);
+            else nodeRefs.current.delete(entryKey);
+          }}
+          className={`tree-row ${selected === entry.path || selected === entryKey ? "selected" : ""}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           onClick={() => {
             setSelected(entry.path);
@@ -285,7 +351,7 @@ export function Explorer() {
             {edit?.parent === entry.path && edit.mode === "create"
               ? renderEditRow(depth + 1)
               : null}
-            {(children[entry.path] ?? []).map((c) =>
+            {(children[entry.path] ?? children[entryKey] ?? []).map((c) =>
               edit?.mode === "rename" && edit.target === c.path
                 ? renderEditRow(depth + 1)
                 : renderNode(c, depth + 1),

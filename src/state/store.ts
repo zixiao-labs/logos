@@ -31,6 +31,7 @@ import type {
 } from "../shared/types";
 import { basename, languageFromPath } from "../lib/language";
 import { notifyResult } from "../lib/toast";
+import { translate } from "../i18n/locales";
 import {
   DEFAULT_DEBUG_CONFIGURATION,
   parseDebugConfigurationFile,
@@ -62,6 +63,7 @@ import type {
 export type TabKind =
   | "file"
   | "diff"
+  | "multi-diff"
   | "debug-source"
   | "preview"
   | "settings"
@@ -80,6 +82,7 @@ export interface EditorTab {
   debugPosition?: { line: number; column: number };
   debugSessionId?: string;
   diff?: { root: string; path: string; staged: boolean };
+  multiDiff?: { root: string };
 }
 
 export type SidebarView =
@@ -262,6 +265,7 @@ interface LogosState {
   tabs: EditorTab[];
   activeTabId: string | null;
   cursor: { line: number; col: number };
+  explorerRevealTarget: { path: string; isDirectory: boolean } | null;
 
   terminals: TerminalInstance[];
   activeTerminalId: string | null;
@@ -310,12 +314,15 @@ interface LogosState {
 
   openFile(path: string): void;
   openGitDiff(path: string, staged: boolean, root?: string): void;
+  openMultiGitDiff(root?: string): void;
   openSpecial(kind: "settings" | "extensions" | "welcome"): void;
   openPreview(path: string): void;
   closeTab(id: string): void;
   setActiveTab(id: string): void;
   setDirty(id: string, dirty: boolean): void;
   setCursor(line: number, col: number): void;
+  revealInExplorer(path: string, isDirectory: boolean): void;
+  clearExplorerRevealTarget(): void;
 
   setSidebarView(v: SidebarView): void;
   toggleSidebar(): void;
@@ -1051,6 +1058,7 @@ export const useStore = create<LogosState>((set, get) => ({
   tabs: [makeWelcomeTab()],
   activeTabId: "welcome",
   cursor: { line: 1, col: 1 },
+  explorerRevealTarget: null,
 
   terminals: [],
   activeTerminalId: null,
@@ -1338,6 +1346,26 @@ export const useStore = create<LogosState>((set, get) => ({
       activeTabId: id,
     }));
   },
+  openMultiGitDiff(requestedRoot) {
+    const root = requestedRoot ?? get().gitRoot ?? get().root;
+    if (!root) return;
+    const id = `multi-diff:${root}:uncommitted`;
+    const tab: EditorTab = {
+      id,
+      kind: "multi-diff",
+      name: translate(
+        get().settings["workbench.language"],
+        "git.uncommittedChanges",
+      ),
+      multiDiff: { root },
+    };
+    set((state) => ({
+      tabs: state.tabs.some((item) => item.id === id)
+        ? state.tabs
+        : [...state.tabs.filter((item) => item.kind !== "welcome"), tab],
+      activeTabId: id,
+    }));
+  },
   openSpecial(kind) {
     const id = kind;
     const names: Record<string, string> = {
@@ -1391,6 +1419,16 @@ export const useStore = create<LogosState>((set, get) => ({
   },
   setCursor(line, col) {
     set({ cursor: { line, col } });
+  },
+  revealInExplorer(path, isDirectory) {
+    set({
+      sidebarView: "explorer",
+      sidebarVisible: true,
+      explorerRevealTarget: { path, isDirectory },
+    });
+  },
+  clearExplorerRevealTarget() {
+    set({ explorerRevealTarget: null });
   },
 
   setSidebarView(v) {
