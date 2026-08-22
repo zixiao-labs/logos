@@ -30,6 +30,7 @@ describe("editor breadcrumbs", () => {
 
   it("normalizes Windows paths and matches drive letters case-insensitively", () => {
     expect(canonicalPath("C:\\work\\src\\main.ts")).toBe("C:/work/src/main.ts");
+    expect(canonicalPath("C:\\")).toBe("C:/");
     expect(
       workspaceRootForPath("c:/work/src/main.ts", ["C:\\work"], null),
     ).toBe("C:/work");
@@ -50,6 +51,10 @@ describe("editor breadcrumbs", () => {
       "/workspace",
       "/workspace/src",
       "/workspace/src/components",
+    ]);
+    expect(directoriesToReveal("C:\\src\\main.ts", false, "C:\\")).toEqual([
+      "C:/",
+      "C:/src",
     ]);
   });
 });

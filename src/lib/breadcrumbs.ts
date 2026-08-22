@@ -9,13 +9,15 @@ export interface BreadcrumbItem {
 function joinCanonical(directory: string, relativePath: string): string {
   const base = canonicalPath(directory);
   const relative = relativePath.replace(/^\/+/, "");
-  return canonicalPath(`${base === "/" ? "" : base}/${relative}`);
+  const prefix = base === "/" ? "" : base.replace(/\/+$/, "");
+  return canonicalPath(`${prefix}/${relative}`);
 }
 
 /** Use one separator for comparisons and renderer-side filesystem calls. */
 export function canonicalPath(value: string): string {
   const normalized = value.replace(/\\/g, "/");
   if (normalized === "/") return normalized;
+  if (/^[A-Za-z]:\/+$/u.test(normalized)) return normalized.slice(0, 3);
   return normalized.replace(/\/+$/, "");
 }
 
@@ -26,10 +28,12 @@ export function pathIsWithin(path: string, directory: string): boolean {
     /^[A-Za-z]:\//.test(candidate) || /^[A-Za-z]:\//.test(parent);
   const comparableCandidate = caseInsensitive ? candidate.toLowerCase() : candidate;
   const comparableParent = caseInsensitive ? parent.toLowerCase() : parent;
-  if (comparableParent === "/") return comparableCandidate.startsWith("/");
+  const descendantPrefix = comparableParent.endsWith("/")
+    ? comparableParent
+    : `${comparableParent}/`;
   return (
     comparableCandidate === comparableParent ||
-    comparableCandidate.startsWith(`${comparableParent}/`)
+    comparableCandidate.startsWith(descendantPrefix)
   );
 }
 
@@ -95,8 +99,11 @@ export function directoriesToReveal(
     : target.includes("/")
       ? target.slice(0, target.lastIndexOf("/")) || "/"
       : target;
-  if (!pathIsWithin(directory, root)) return [];
-  const relative = directory.slice(root.length).replace(/^\/+/, "");
+  const canonicalDirectory = /^[A-Za-z]:$/u.test(directory)
+    ? `${directory}/`
+    : directory;
+  if (!pathIsWithin(canonicalDirectory, root)) return [];
+  const relative = canonicalDirectory.slice(root.length).replace(/^\/+/, "");
   const segments = relative.split("/").filter(Boolean);
   const directories = [root];
   for (let index = 0; index < segments.length; index += 1) {

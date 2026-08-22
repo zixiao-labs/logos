@@ -92,7 +92,7 @@ export function EditorArea() {
       </div>
 
       {active?.kind === "file" && (
-        <nav className="breadcrumbs" aria-label="File path">
+        <nav className="breadcrumbs" aria-label={t("editor.filePath")}>
           <div className="breadcrumb-path">
             {crumbs.map((crumb, i) => (
               <span key={crumb.path} className="breadcrumb-segment">

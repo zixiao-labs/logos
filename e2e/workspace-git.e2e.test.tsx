@@ -72,6 +72,7 @@ describe("multi-root workbench", () => {
   let graph = initialGraph;
   let gitChanged: (root: string) => void = () => undefined;
   let statusRoots: string[] = [];
+  let fileDiffCalls: Array<[root: string, path: string, staged: boolean]> = [];
 
   beforeEach(() => {
     host = document.createElement("div");
@@ -80,6 +81,7 @@ describe("multi-root workbench", () => {
     reactRoot = createRoot(host);
     graph = initialGraph;
     statusRoots = [];
+    fileDiffCalls = [];
 
     const logos = {
       fs: {
@@ -114,12 +116,15 @@ describe("multi-root workbench", () => {
         recent: async () => [],
       },
       git: {
-        fileDiff: async (_root: string, file: string, staged: boolean) => ({
-          path: file,
-          staged,
-          original: "const value = 1;\n",
-          modified: "const value = 2;\n",
-        }),
+        fileDiff: async (root: string, file: string, staged: boolean) => {
+          fileDiffCalls.push([root, file, staged]);
+          return {
+            path: file,
+            staged,
+            original: "const value = 1;\n",
+            modified: "const value = 2;\n",
+          };
+        },
         graph: async () => graph,
         commitDetails: async (_root: string, hash: string) => ({
           ...graph.find(commit => commit.hash === hash)!,
@@ -212,6 +217,10 @@ describe("multi-root workbench", () => {
     expect(host.querySelectorAll("[data-diff-excerpt]")).toHaveLength(2);
     expect(host.textContent).toContain("Index");
     expect(host.textContent).toContain("Working Tree");
+    expect(fileDiffCalls).toEqual([
+      [APP, "src/main.ts", true],
+      [APP, "src/main.ts", false],
+    ]);
   });
 
   it("renders commit topology and refreshes Git Graph from watcher events", async () => {

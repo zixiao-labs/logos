@@ -97,7 +97,9 @@ export function Explorer() {
             ?.scrollIntoView({ block: "nearest" });
         });
       });
-    })().catch(() => clearRevealTarget());
+    })().catch(() => {
+      if (!cancelled) clearRevealTarget();
+    });
     return () => {
       cancelled = true;
     };
@@ -144,15 +146,18 @@ export function Explorer() {
   }, [workspaceFolders, expanded, loadChildren, refreshGit]);
 
   async function toggle(dir: string) {
+    const key = canonicalPath(dir);
+    const isExpanded = expanded.has(dir) || expanded.has(key);
+    if (!isExpanded && !children[dir] && !children[key]) {
+      void loadChildren(dir);
+    }
     setExpanded((prev) => {
       const next = new Set(prev);
-      const key = canonicalPath(dir);
-      if (next.has(dir) || next.has(key)) {
+      if (isExpanded) {
         next.delete(dir);
         next.delete(key);
       } else {
         next.add(key);
-        if (!children[dir] && !children[key]) void loadChildren(dir);
       }
       return next;
     });
