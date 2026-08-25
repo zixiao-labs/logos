@@ -7,5 +7,6 @@ release
 build
 coverage
 test-results
-.zed
-.codex
+/.zed
+/.codex
+/.idea

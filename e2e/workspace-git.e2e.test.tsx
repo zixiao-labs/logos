@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { Explorer } from "../src/components/Explorer";
 import { GitPanel } from "../src/components/GitPanel";
 import { GitGraphPanel } from "../src/components/GitGraphPanel";
+import { MultiGitDiffEditor } from "../src/components/MultiGitDiffEditor";
 import type { LogosAPI } from "../src/shared/api";
 import type { GitGraphEntry, GitStatus } from "../src/shared/types";
 import { useStore } from "../src/state/store";
@@ -26,6 +27,22 @@ const cleanStatus: GitStatus = {
   behind: 0,
   changes: [],
   clean: true,
+};
+
+const partialStatus: GitStatus = {
+  isRepo: true,
+  branch: "main",
+  ahead: 0,
+  behind: 0,
+  changes: [
+    {
+      path: "src/main.ts",
+      index: "M",
+      working: "M",
+      staged: true,
+    },
+  ],
+  clean: false,
 };
 
 const initialGraph: GitGraphEntry[] = [
@@ -55,6 +72,7 @@ describe("multi-root workbench", () => {
   let graph = initialGraph;
   let gitChanged: (root: string) => void = () => undefined;
   let statusRoots: string[] = [];
+  let fileDiffCalls: Array<[root: string, path: string, staged: boolean]> = [];
 
   beforeEach(() => {
     host = document.createElement("div");
@@ -63,19 +81,27 @@ describe("multi-root workbench", () => {
     reactRoot = createRoot(host);
     graph = initialGraph;
     statusRoots = [];
+    fileDiffCalls = [];
 
     const logos = {
       fs: {
-        readDir: async (folder: string) => ({
-          path: folder,
-          entries: [
-            {
-              name: folder === APP ? "src" : "README.md",
-              path: `${folder}/${folder === APP ? "src" : "README.md"}`,
-              type: folder === APP ? "directory" : "file",
-            },
-          ],
-        }),
+        readDir: async (folder: string) => {
+          const entry =
+            folder === APP
+              ? { name: "src", path: `${APP}/src`, type: "directory" as const }
+              : folder === `${APP}/src`
+                ? {
+                    name: "main.ts",
+                    path: `${APP}/src/main.ts`,
+                    type: "file" as const,
+                  }
+                : {
+                    name: "README.md",
+                    path: `${folder}/README.md`,
+                    type: "file" as const,
+                  };
+          return { path: folder, entries: [entry] };
+        },
         watch: async () => undefined,
         unwatch: async () => undefined,
         onWatchEvent: () => () => undefined,
@@ -90,6 +116,15 @@ describe("multi-root workbench", () => {
         recent: async () => [],
       },
       git: {
+        fileDiff: async (root: string, file: string, staged: boolean) => {
+          fileDiffCalls.push([root, file, staged]);
+          return {
+            path: file,
+            staged,
+            original: "const value = 1;\n",
+            modified: "const value = 2;\n",
+          };
+        },
         graph: async () => graph,
         commitDetails: async (_root: string, hash: string) => ({
           ...graph.find(commit => commit.hash === hash)!,
@@ -146,6 +181,46 @@ describe("multi-root workbench", () => {
     add!.click();
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(host.textContent).toContain("tools");
+  });
+
+  it("reveals every breadcrumb ancestor and selects the target file", async () => {
+    reactRoot.render(<Explorer />);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    useStore.getState().revealInExplorer(`${APP}/src/main.ts`, false);
+    await new Promise(resolve => setTimeout(resolve, 60));
+
+    expect(useStore.getState().sidebarView).toBe("explorer");
+    expect(host.querySelector(".tree-row.selected")?.textContent).toContain(
+      "main.ts",
+    );
+  });
+
+  it("opens and renders staged plus working-tree excerpts in one diff surface", async () => {
+    useStore.setState({
+      git: partialStatus,
+      gitRepositories: { [APP]: { status: partialStatus, head: null } },
+    });
+    reactRoot.render(<GitPanel />);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    host
+      .querySelector<HTMLButtonElement>('button[title="View All Changes"]')!
+      .click();
+    const tab = useStore
+      .getState()
+      .tabs.find(candidate => candidate.id === `multi-diff:${APP}:uncommitted`);
+    expect(tab).toMatchObject({ kind: "multi-diff", multiDiff: { root: APP } });
+
+    reactRoot.render(<MultiGitDiffEditor root={APP} />);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    expect(host.querySelectorAll("[data-diff-excerpt]")).toHaveLength(2);
+    expect(host.textContent).toContain("Index");
+    expect(host.textContent).toContain("Working Tree");
+    expect(fileDiffCalls).toEqual([
+      [APP, "src/main.ts", true],
+      [APP, "src/main.ts", false],
+    ]);
   });
 
   it("renders commit topology and refreshes Git Graph from watcher events", async () => {
