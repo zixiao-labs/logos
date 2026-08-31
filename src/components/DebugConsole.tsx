@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { useT } from "../i18n";
+import { stripAnsiControlSequences } from "../lib/ansi";
 import type { DebugConsoleEntry } from "../shared/dap";
 import { useStore } from "../state/store";
 
@@ -36,7 +37,9 @@ export function DebugConsole() {
   const rows = useMemo<DebugConsoleRow[]>(
     () =>
       entries.flatMap((entry) => {
-        const lines = entry.output.split(/\r\n|\r|\n/);
+        const output = stripAnsiControlSequences(entry.output);
+        if (!output) return [];
+        const lines = output.split(/\r\n|\r|\n/);
         if (lines.length > 1 && lines.at(-1) === "") lines.pop();
         return lines.map((output, index) => ({
           id: `${entry.id}:${index}`,

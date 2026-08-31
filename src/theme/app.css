@@ -733,12 +733,17 @@ textarea.field {
   flex-shrink: 0;
   padding: 4px;
   gap: 2px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .terminal-tab {
   display: flex;
   align-items: center;
   gap: 6px;
   height: 26px;
+  flex-shrink: 0;
+  min-width: 0;
   padding: 0 8px;
   border-radius: 5px;
   font-size: 12px;
@@ -746,6 +751,17 @@ textarea.field {
   border: none;
   background: transparent;
   text-align: left;
+}
+.terminal-tab-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-tab > svg,
+.terminal-tab > .icon-btn {
+  flex-shrink: 0;
 }
 .terminal-tab.active {
   background: var(--surface-secondary);

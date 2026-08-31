@@ -278,7 +278,7 @@ export function Panel() {
                       onClick={() => setActiveTerminal(term.id)}
                     >
                       <Icon name="terminal" size={13} />
-                      <span style={{ flex: 1, overflow: "hidden" }}>
+                      <span className="terminal-tab-name" title={term.name}>
                         {term.name}
                       </span>
                       <span
