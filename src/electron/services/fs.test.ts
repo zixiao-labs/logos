@@ -14,6 +14,7 @@ import type {
   DirListing,
   FileSnapshot,
   FileStat,
+  TextSearchMatch,
 } from "../../shared/types";
 import { createIpcHarness } from "../../test/ipc-harness";
 import type { ServiceContext } from "./context";
@@ -98,6 +99,55 @@ describe("filesystem service", () => {
 
     expect(await service.invoke<string>(CH.fsReadFile, file)).toBe("new");
     await expect(service.invoke(CH.fsCreateFile, file, "replace")).rejects.toThrow();
+  });
+
+  it("searches workspace text with stable locations and skips generated or binary files", async () => {
+    await Promise.all([
+      fs.mkdir(path.join(root, "src")),
+      fs.mkdir(path.join(root, "dist")),
+      fs.mkdir(path.join(root, "node_modules")),
+    ]);
+    await Promise.all([
+      fs.writeFile(
+        path.join(root, "src", "app.ts"),
+        "const Multibuffer = true;\n// multibuffer again\n",
+      ),
+      fs.writeFile(path.join(root, "dist", "generated.js"), "multibuffer"),
+      fs.writeFile(path.join(root, "node_modules", "dep.js"), "multibuffer"),
+      fs.writeFile(path.join(root, "asset.bin"), Buffer.from([0, 1, 2, 3])),
+    ]);
+
+    const searchedFile = await fs.realpath(path.join(root, "src", "app.ts"));
+    const matches = await service.invoke<TextSearchMatch[]>(
+      CH.fsSearchText,
+      root,
+      "multibuffer",
+      { maxResults: 10 },
+    );
+    expect(matches).toEqual([
+      {
+        path: searchedFile,
+        line: 1,
+        column: 7,
+        endColumn: 18,
+        text: "const Multibuffer = true;",
+      },
+      {
+        path: searchedFile,
+        line: 2,
+        column: 4,
+        endColumn: 15,
+        text: "// multibuffer again",
+      },
+    ]);
+
+    const sensitive = await service.invoke<TextSearchMatch[]>(
+      CH.fsSearchText,
+      root,
+      "Multibuffer",
+      { caseSensitive: true },
+    );
+    expect(sensitive).toHaveLength(1);
   });
 
   it("optimistically detects conflicts and serializes local writes", async () => {

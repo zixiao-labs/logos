@@ -8,6 +8,7 @@ export const CH = {
   fsReadDir: "fs:readDir",
   fsReadFile: "fs:readFile",
   fsReadFileSnapshot: "fs:readFileSnapshot",
+  fsSearchText: "fs:searchText",
   fsWriteFile: "fs:writeFile",
   fsWriteFileConditional: "fs:writeFileConditional",
   fsStat: "fs:stat",

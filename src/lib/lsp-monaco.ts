@@ -33,6 +33,7 @@ import {
 } from "./lsp-client";
 import { applyLspTextEdits, isSafeWordPattern } from "./lsp-utils";
 import { notify, notifyError, notifyInfo } from "./toast";
+import { createMultiBufferDocument } from "./multibuffer";
 
 /**
  * Bridges the in-renderer Monaco editor to the language servers managed by the
@@ -1244,6 +1245,78 @@ export function openLspSymbolResult(result: LspSymbolResult) {
     }),
   );
   useStore.getState().openFile(result.path);
+}
+
+function openLocationsInMultiBuffer(
+  id: string,
+  title: string,
+  kind: "reference" | "definition",
+  locations: Array<{ uri: monaco.Uri; range: monaco.IRange }>,
+) {
+  if (!locations.length) {
+    notifyInfo(`No ${title.toLocaleLowerCase()} found`);
+    return;
+  }
+  useStore.getState().openMultiBuffer(
+    createMultiBufferDocument(
+      id,
+      title,
+      kind,
+      locations.map((location, index) => ({
+        id: `${location.uri.fsPath}:${location.range.startLineNumber}:${location.range.startColumn}:${index}`,
+        path: location.uri.fsPath,
+        startLine: location.range.startLineNumber,
+        startColumn: location.range.startColumn,
+        endLine: location.range.endLineNumber,
+        endColumn: location.range.endColumn,
+      })),
+    ),
+  );
+}
+
+export async function showLspReferencesInMultiBuffer(
+  model: monaco.editor.ITextModel,
+  position: monaco.IPosition,
+) {
+  const response = await requestForModel<LspLocation[]>(
+    model,
+    "referencesProvider",
+    "textDocument/references",
+    {
+      position: lspPos(position),
+      context: { includeDeclaration: true },
+    },
+  );
+  openLocationsInMultiBuffer(
+    `references:${model.uri.toString()}:${position.lineNumber}:${position.column}`,
+    "References",
+    "reference",
+    toLocations(response?.result ?? null),
+  );
+}
+
+export async function showLspDefinitionsInMultiBuffer(
+  model: monaco.editor.ITextModel,
+  position: monaco.IPosition,
+  typeDefinition = false,
+) {
+  const title = typeDefinition ? "Type Definitions" : "Definitions";
+  const response = await requestForModel<unknown>(
+    model,
+    typeDefinition ? "typeDefinitionProvider" : "definitionProvider",
+    typeDefinition ? "textDocument/typeDefinition" : "textDocument/definition",
+    { position: lspPos(position) },
+  );
+  const links = toLocationLinks(response?.result);
+  openLocationsInMultiBuffer(
+    `${typeDefinition ? "type-definitions" : "definitions"}:${model.uri.toString()}:${position.lineNumber}:${position.column}`,
+    title,
+    "definition",
+    (links ?? []).map((link) => ({
+      uri: link.uri,
+      range: link.targetSelectionRange ?? link.range,
+    })),
+  );
 }
 
 export async function lspWorkspaceSymbols(

@@ -1,11 +1,18 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useStore, type PanelTab, type StoredLspLog } from "../state/store";
+import {
+  useStore,
+  type Diagnostic,
+  type PanelTab,
+  type StoredLspLog,
+} from "../state/store";
 import { useT } from "../i18n";
 import { basename } from "../lib/language";
 import type { LspLogLevel } from "../shared/types";
 import { Icon } from "./Icon";
 import { TerminalView } from "./TerminalView";
 import { DebugConsole } from "./DebugConsole";
+import { createMultiBufferDocument } from "../lib/multibuffer";
+import { openLspSymbolResult } from "../lib/lsp-monaco";
 
 const TABS: { id: PanelTab; key: string }[] = [
   { id: "problems", key: "panel.problems" },
@@ -125,6 +132,7 @@ export function Panel() {
   const setActiveTerminal = useStore((s) => s.setActiveTerminal);
   const diagnostics = useStore((s) => s.diagnostics);
   const openFile = useStore((s) => s.openFile);
+  const openMultiBuffer = useStore((s) => s.openMultiBuffer);
   const lspLogs = useStore((s) => s.lspLogs);
   const clearLspLogs = useStore((s) => s.clearLspLogs);
   const debugConsole = useStore((s) => s.debug.console);
@@ -146,6 +154,38 @@ export function Panel() {
     scrollTop: 0,
     height: 0,
   });
+  const problemLocations = useMemo(
+    () =>
+      Object.entries(diagnostics).flatMap(([path, items]) =>
+        items.map((diagnostic, index) => ({
+          id: `${path}:${diagnostic.startLine}:${diagnostic.startCol}:${index}`,
+          path,
+          startLine: diagnostic.startLine,
+          startColumn: diagnostic.startCol,
+          endLine: diagnostic.endLine,
+          endColumn: diagnostic.endCol,
+          label: diagnostic.message,
+          severity: diagnostic.severity,
+        })),
+      ),
+    [diagnostics],
+  );
+
+  const openDiagnostic = useCallback(
+    (path: string, diagnostic: Diagnostic) => {
+      openLspSymbolResult({
+        name: diagnostic.message,
+        path,
+        range: {
+          startLineNumber: diagnostic.startLine,
+          startColumn: diagnostic.startCol,
+          endLineNumber: diagnostic.endLine,
+          endColumn: diagnostic.endCol,
+        },
+      });
+    },
+    [],
+  );
 
   const syncOutputViewport = useCallback(() => {
     const el = outputRef.current;
@@ -238,6 +278,25 @@ export function Panel() {
             {t("panel.clear")}
           </button>
         )}
+        {panelTab === "problems" && problemLocations.length > 0 && (
+          <button
+            className="icon-btn"
+            data-testid="open-problems-multibuffer"
+            title={t("multibuffer.openProblems")}
+            onClick={() =>
+              openMultiBuffer(
+                createMultiBufferDocument(
+                  "diagnostics",
+                  t("panel.problems"),
+                  "diagnostic",
+                  problemLocations,
+                ),
+              )
+            }
+          >
+            <Icon name="split" size={14} />
+          </button>
+        )}
         {panelTab === "debug" && debugConsole.length > 0 && (
           <button className="btn ghost" style={{ width: "auto" }} onClick={clearDebugConsole}>
             {t("panel.clear")}
@@ -328,7 +387,7 @@ export function Panel() {
                       <div
                         key={i}
                         className="search-result"
-                        onClick={() => openFile(path)}
+                        onClick={() => openDiagnostic(path, d)}
                       >
                         <Icon
                           name={d.severity === 1 ? "error" : "warning"}

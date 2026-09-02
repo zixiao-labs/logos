@@ -18,6 +18,8 @@ import type {
   DirListing,
   FileStat,
   FileSnapshot,
+  TextSearchMatch,
+  TextSearchOptions,
   ConditionalWriteResult,
   FsWatchEvent,
   GitBranch,
@@ -75,6 +77,11 @@ export interface LogosAPI {
     readDir(path: string): Promise<DirListing>;
     readFile(path: string): Promise<string>;
     readFileSnapshot(path: string): Promise<FileSnapshot>;
+    searchText(
+      root: string,
+      query: string,
+      options?: TextSearchOptions,
+    ): Promise<TextSearchMatch[]>;
     writeFile(path: string, content: string): Promise<void>;
     /**
      * Detects conflicts before an atomic replacement. Portable filesystems do

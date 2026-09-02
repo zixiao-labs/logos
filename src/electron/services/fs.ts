@@ -8,12 +8,29 @@ import type {
   FileEntry,
   FileSnapshot,
   FileStat,
+  TextSearchMatch,
+  TextSearchOptions,
 } from "../../shared/types";
 import type { ServiceContext } from "./context";
 
 /** Directories we never want to descend into or list eagerly. */
 const IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
 const WATCH_IGNORED = new Set([".git", "node_modules", ".DS_Store"]);
+const SEARCH_IGNORED = new Set([
+  ...IGNORED,
+  ".nasti",
+  ".next",
+  ".cache",
+  "build",
+  "coverage",
+  "dist",
+  "out",
+  "release",
+  "target",
+]);
+const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
+const MAX_SEARCH_FILES = 20_000;
+const SEARCH_CONCURRENCY = 16;
 
 function fileRevision(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -79,6 +96,92 @@ async function readDir(dirPath: string): Promise<DirListing> {
   return { path: dirPath, entries };
 }
 
+async function collectSearchFiles(root: string): Promise<string[]> {
+  const directories = [root];
+  const files: string[] = [];
+  while (directories.length && files.length < MAX_SEARCH_FILES) {
+    const directory = directories.shift();
+    if (!directory) break;
+    let entries;
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (SEARCH_IGNORED.has(entry.name)) continue;
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) directories.push(full);
+      else if (entry.isFile()) files.push(full);
+      if (files.length >= MAX_SEARCH_FILES) break;
+    }
+  }
+  return files.sort((a, b) => a.localeCompare(b));
+}
+
+async function searchFile(
+  filePath: string,
+  query: string,
+  caseSensitive: boolean,
+  maxMatches: number,
+): Promise<TextSearchMatch[]> {
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size > MAX_SEARCH_FILE_BYTES) return [];
+    const buffer = await fs.readFile(filePath);
+    if (buffer.includes(0)) return [];
+    const content = buffer.toString("utf8");
+    const needle = caseSensitive ? query : query.toLocaleLowerCase();
+    const matches: TextSearchMatch[] = [];
+    for (const [index, text] of content.split(/\r?\n/).entries()) {
+      const haystack = caseSensitive ? text : text.toLocaleLowerCase();
+      let offset = 0;
+      while (offset <= haystack.length - needle.length) {
+        const found = haystack.indexOf(needle, offset);
+        if (found === -1) break;
+        matches.push({
+          path: filePath,
+          line: index + 1,
+          column: found + 1,
+          endColumn: found + query.length + 1,
+          text,
+        });
+        if (matches.length >= maxMatches) return matches;
+        offset = found + Math.max(needle.length, 1);
+      }
+    }
+    return matches;
+  } catch {
+    return [];
+  }
+}
+
+async function searchText(
+  root: string,
+  query: string,
+  options: TextSearchOptions = {},
+): Promise<TextSearchMatch[]> {
+  if (!query) return [];
+  const files = await collectSearchFiles(root);
+  const maxResults = Math.max(1, Math.min(options.maxResults ?? 1000, 5000));
+  const results: TextSearchMatch[] = [];
+  for (let index = 0; index < files.length; index += SEARCH_CONCURRENCY) {
+    const batch = await Promise.all(
+      files
+        .slice(index, index + SEARCH_CONCURRENCY)
+        .map((file) =>
+          searchFile(file, query, Boolean(options.caseSensitive), maxResults),
+        ),
+    );
+    for (const matches of batch) {
+      results.push(...matches.slice(0, maxResults - results.length));
+      if (results.length >= maxResults) return results;
+    }
+  }
+  return results;
+}
+
 export function registerFsService(ctx: ServiceContext): () => void {
   const { ipcMain } = ctx;
   const workspaceAccess = ctx.workspaceAccess;
@@ -98,6 +201,12 @@ export function registerFsService(ctx: ServiceContext): () => void {
 
   ipcMain.handle(CH.fsReadFileSnapshot, async (_e, p: string) =>
     readFileSnapshot(await workspaceAccess.assertPath(p)),
+  );
+
+  ipcMain.handle(
+    CH.fsSearchText,
+    async (_e, root: string, query: string, options?: TextSearchOptions) =>
+      searchText(await workspaceAccess.assertPath(root), query, options),
   );
 
   ipcMain.handle(CH.fsWriteFile, async (_e, p: string, content: string) => {

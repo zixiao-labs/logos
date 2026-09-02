@@ -46,6 +46,19 @@ export interface FsWatchEvent {
   path: string;
 }
 
+export interface TextSearchOptions {
+  caseSensitive?: boolean;
+  maxResults?: number;
+}
+
+export interface TextSearchMatch {
+  path: string;
+  line: number;
+  column: number;
+  endColumn: number;
+  text: string;
+}
+
 // ---------------------------------------------------------------------------
 // Workspace
 // ---------------------------------------------------------------------------
