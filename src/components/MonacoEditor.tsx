@@ -8,7 +8,9 @@ import {
   lspSaveDoc,
   lspWillSaveDoc,
   showLspHierarchy,
+  showLspDefinitionsInMultiBuffer,
   showLspMonikers,
+  showLspReferencesInMultiBuffer,
   takeLspNavigationTarget,
 } from "../lib/lsp-monaco";
 import { serverIdForLanguage } from "../lib/language";
@@ -186,7 +188,7 @@ async function confirmExternalOverwrite(path: string): Promise<string | null> {
   return choice?.title === overwriteTitle ? snapshot.revision : null;
 }
 
-function defineThemes() {
+export function defineEditorThemes() {
   if (themesDefined) return;
   themesDefined = true;
   monaco.editor.defineTheme("logos-dark", {
@@ -213,7 +215,7 @@ function defineThemes() {
   });
 }
 
-function editorOptions(
+export function sharedEditorOptions(
   settings: ReturnType<typeof useStore.getState>["settings"],
 ): monaco.editor.IStandaloneEditorConstructionOptions {
   return {
@@ -277,7 +279,7 @@ export function MonacoEditor({
   // Create the editor once.
   useEffect(() => {
     if (!hostRef.current) return;
-    defineThemes();
+    defineEditorThemes();
     const editor = monaco.editor.create(hostRef.current, {
       automaticLayout: true,
       theme:
@@ -290,7 +292,7 @@ export function MonacoEditor({
       padding: { top: 8 },
       fixedOverflowWidgets: true,
       readOnly,
-      ...editorOptions(useStore.getState().settings),
+      ...sharedEditorOptions(useStore.getState().settings),
     });
     editorRef.current = editor;
     breakpointDecorationsRef.current = editor.createDecorationsCollection();
@@ -311,6 +313,41 @@ export function MonacoEditor({
         run,
       });
     }
+    editor.addAction({
+      id: "logos.lsp.findReferencesInMultibuffer",
+      label: "Find All References in Multibuffer",
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.9,
+      run: (candidate) => {
+        const model = candidate.getModel();
+        const position = candidate.getPosition();
+        if (model && position) void showLspReferencesInMultiBuffer(model, position);
+      },
+    });
+    editor.addAction({
+      id: "logos.lsp.goToDefinitionInMultibuffer",
+      label: "Go to Definition in Multibuffer",
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.91,
+      run: (candidate) => {
+        const model = candidate.getModel();
+        const position = candidate.getPosition();
+        if (model && position) void showLspDefinitionsInMultiBuffer(model, position);
+      },
+    });
+    editor.addAction({
+      id: "logos.lsp.goToTypeDefinitionInMultibuffer",
+      label: "Go to Type Definition in Multibuffer",
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.92,
+      run: (candidate) => {
+        const model = candidate.getModel();
+        const position = candidate.getPosition();
+        if (model && position) {
+          void showLspDefinitionsInMultiBuffer(model, position, true);
+        }
+      },
+    });
 
     const cursorSub = editor.onDidChangeCursorPosition((e) =>
       setCursor(e.position.lineNumber, e.position.column),
@@ -632,7 +669,7 @@ export function MonacoEditor({
 
   // Apply settings live.
   useEffect(() => {
-    editorRef.current?.updateOptions(editorOptions(settings));
+    editorRef.current?.updateOptions(sharedEditorOptions(settings));
     monaco.editor.setTheme(
       settings["workbench.theme"] === "dark" ? "logos-dark" : "logos-light",
     );

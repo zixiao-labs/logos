@@ -627,6 +627,183 @@ textarea.field {
   width: auto;
 }
 
+/* ---- multibuffer -------------------------------------------------------- */
+.multibuffer-surface {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--background);
+}
+.multibuffer-toolbar {
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 5px 10px 5px 14px;
+  gap: 4px;
+  border-bottom: 1px solid var(--separator);
+  background: color-mix(in srgb, var(--background) 94%, transparent);
+  flex-shrink: 0;
+}
+.multibuffer-summary {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 9px;
+  font-size: 12px;
+}
+.multibuffer-summary strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multibuffer-summary span {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.multibuffer-toolbar-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+.multibuffer-toolbar-button {
+  width: auto;
+  height: 26px;
+  padding: 0 9px;
+}
+.multibuffer-previous svg {
+  transform: rotate(180deg);
+}
+.multibuffer-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scroll-behavior: smooth;
+}
+.multibuffer-excerpt {
+  position: relative;
+  border-left: 2px solid transparent;
+}
+.multibuffer-excerpt.active {
+  border-left-color: var(--accent);
+}
+.multibuffer-divider {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  min-height: 31px;
+  padding: 0 10px 0 5px;
+  gap: 5px;
+  border-top: 1px solid var(--separator);
+  border-bottom: 1px solid var(--separator);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  backdrop-filter: blur(8px);
+}
+.multibuffer-excerpt:first-child .multibuffer-divider {
+  border-top: 0;
+}
+.multibuffer-collapse,
+.multibuffer-source {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.multibuffer-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--muted);
+  border-radius: 4px;
+}
+.multibuffer-collapse:hover,
+.multibuffer-source:hover {
+  color: var(--foreground);
+  background: var(--surface-secondary);
+}
+.multibuffer-collapse .collapsed {
+  transform: rotate(-90deg);
+}
+.multibuffer-source {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(45%, 560px);
+  height: 23px;
+  align-items: center;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-family: var(--mono-font);
+  font-size: 11.5px;
+}
+.multibuffer-source > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multibuffer-location {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.multibuffer-kind {
+  padding: 2px 6px;
+  color: var(--muted);
+  background: var(--surface-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 9.5px;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.multibuffer-kind.diagnostic {
+  color: var(--warning);
+}
+.multibuffer-message {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multibuffer-monaco {
+  position: relative;
+  width: 100%;
+  border-bottom: 1px solid var(--separator);
+  background: var(--background);
+}
+.multibuffer-placeholder {
+  height: 120px;
+  border-bottom: 1px solid var(--separator);
+  background: var(--background);
+}
+.multibuffer-state {
+  min-height: 70px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  border-bottom: 1px solid var(--separator);
+  font-size: 12px;
+}
+.multibuffer-match,
+.multibuffer-match-inline {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.multibuffer-match-error {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+.multibuffer-match-warning {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
 /* ---- bottom panel -------------------------------------------------------- */
 .bottom-panel {
   display: flex;
@@ -1820,10 +1997,20 @@ textarea.field {
   width: auto;
 }
 .lsp-results-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--separator);
   font-size: 13px;
   font-weight: 600;
+}
+.lsp-results-multibuffer {
+  width: auto;
+  height: 26px;
+  padding: 0 9px;
+  flex-shrink: 0;
 }
 .lsp-results-empty {
   padding: 18px 10px;
@@ -2202,10 +2389,44 @@ textarea.field {
 .search-box {
   padding: 8px 12px;
 }
+.multibuffer-search-box {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-bottom: 4px;
+}
+.multibuffer-search-box .icon-btn {
+  flex-shrink: 0;
+}
+.search-meta {
+  padding: 3px 12px 7px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.search-overflow {
+  padding-top: 10px;
+  text-align: center;
+}
 .search-result {
   padding: 4px 12px;
   font-size: 12px;
   cursor: pointer;
+}
+.search-text-result {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.search-result-preview {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .search-result:hover {
   background: var(--surface-secondary);

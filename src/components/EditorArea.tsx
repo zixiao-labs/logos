@@ -13,6 +13,7 @@ import { Welcome } from "./Welcome";
 import { GitDiffEditor } from "./GitDiffEditor";
 import { buildBreadcrumbs } from "../lib/breadcrumbs";
 import { MultiGitDiffEditor } from "./MultiGitDiffEditor";
+import { MultiBufferEditor } from "./MultiBufferEditor";
 
 export function EditorArea() {
   const t = useT();
@@ -75,6 +76,8 @@ export function EditorArea() {
                       ? "preview"
                       : tab.kind === "diff" || tab.kind === "multi-diff"
                         ? "git"
+                        : tab.kind === "multibuffer"
+                          ? "split"
                         : "file"
               }
               size={14}
@@ -164,6 +167,9 @@ export function EditorArea() {
         )}
         {active?.kind === "multi-diff" && active.multiDiff && (
           <MultiGitDiffEditor root={active.multiDiff.root} />
+        )}
+        {active?.kind === "multibuffer" && active.multiBuffer && (
+          <MultiBufferEditor document={active.multiBuffer} />
         )}
         {active?.kind === "settings" && <SettingsView />}
         {active?.kind === "extensions" && <ExtensionsView />}

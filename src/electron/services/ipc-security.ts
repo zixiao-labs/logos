@@ -61,6 +61,12 @@ const oneText = z.tuple([text()]);
 const oneId = z.tuple([identifier]);
 const onePath = z.tuple([absolutePath]);
 const rootAndPaths = z.tuple([absolutePath, stringList]);
+const textSearchOptions = z
+  .object({
+    caseSensitive: bool.optional(),
+    maxResults: positiveInteger.max(5_000).optional(),
+  })
+  .strict();
 const commitHash = text(64).regex(/^[0-9a-f]{7,64}$/i, "must be a commit hash");
 const rootAndCommitHash = z.tuple([absolutePath, commitHash]);
 const optionalBoolean = z.union([z.tuple([]), z.tuple([bool.optional()])]);
@@ -241,6 +247,10 @@ const REQUEST_POLICIES: Readonly<Partial<Record<ChannelName, RequestPolicy>>> = 
   [CH.fsReadDir]: { schema: onePath },
   [CH.fsReadFile]: { schema: onePath },
   [CH.fsReadFileSnapshot]: { schema: onePath },
+  [CH.fsSearchText]: {
+    schema: z.tuple([absolutePath, text(4_096), textSearchOptions.optional()]),
+    maxRequests: 120,
+  },
   [CH.fsWriteFile]: { schema: z.tuple([absolutePath, text(8 * 1024 * 1024)]), maxBytes: 9 * 1024 * 1024 },
   [CH.fsWriteFileConditional]: { schema: z.tuple([absolutePath, text(8 * 1024 * 1024), text(256)]), maxBytes: 9 * 1024 * 1024 },
   [CH.fsStat]: { schema: onePath },

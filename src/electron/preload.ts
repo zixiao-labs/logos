@@ -104,6 +104,8 @@ const api: LogosAPI = {
     readDir: (p) => ipcRenderer.invoke(CH.fsReadDir, p),
     readFile: (p) => ipcRenderer.invoke(CH.fsReadFile, p),
     readFileSnapshot: (p) => ipcRenderer.invoke(CH.fsReadFileSnapshot, p),
+    searchText: (root, query, options) =>
+      ipcRenderer.invoke(CH.fsSearchText, root, query, options),
     writeFile: (p, content) => ipcRenderer.invoke(CH.fsWriteFile, p, content),
     writeFileConditional: (p, content, expectedRevision) =>
       ipcRenderer.invoke(

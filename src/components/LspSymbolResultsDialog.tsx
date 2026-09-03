@@ -3,6 +3,9 @@ import { basename } from "../lib/language";
 import type { LspSymbolResult } from "../lib/lsp-monaco";
 import { openLspSymbolResult } from "../lib/lsp-monaco";
 import { Icon } from "./Icon";
+import { createMultiBufferDocument } from "../lib/multibuffer";
+import { useStore } from "../state/store";
+import { useT } from "../i18n";
 
 interface ResultsDetail {
   title: string;
@@ -10,6 +13,8 @@ interface ResultsDetail {
 }
 
 export function LspSymbolResultsDialog() {
+  const t = useT();
+  const openMultiBuffer = useStore((state) => state.openMultiBuffer);
   const [results, setResults] = useState<ResultsDetail | null>(null);
   const host = useRef<HTMLDivElement>(null);
 
@@ -29,7 +34,35 @@ export function LspSymbolResultsDialog() {
         ref={host}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="lsp-results-title">{results.title}</div>
+        <div className="lsp-results-title">
+          <span>{results.title}</span>
+          <button
+            className="btn ghost lsp-results-multibuffer"
+            disabled={results.items.length === 0}
+            onClick={() => {
+              openMultiBuffer(
+                createMultiBufferDocument(
+                  `lsp:${results.title.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+                  results.title,
+                  "reference",
+                  results.items.map((item, index) => ({
+                    id: `${item.path}:${item.range.startLineNumber}:${item.range.startColumn}:${index}`,
+                    path: item.path,
+                    startLine: item.range.startLineNumber,
+                    startColumn: item.range.startColumn,
+                    endLine: item.range.endLineNumber,
+                    endColumn: item.range.endColumn,
+                    label: item.detail ? `${item.name} · ${item.detail}` : item.name,
+                  })),
+                ),
+              );
+              setResults(null);
+            }}
+          >
+            <Icon name="split" size={13} />
+            {t("search.openInEditor")}
+          </button>
+        </div>
         <div className="palette-list">
           {results.items.map((item, index) => (
             <div

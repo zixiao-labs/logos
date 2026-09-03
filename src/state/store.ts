@@ -32,6 +32,7 @@ import type {
 import { basename, languageFromPath } from "../lib/language";
 import { notifyResult } from "../lib/toast";
 import { translate } from "../i18n/locales";
+import type { MultiBufferDocument } from "../lib/multibuffer";
 import {
   DEFAULT_DEBUG_CONFIGURATION,
   parseDebugConfigurationFile,
@@ -64,6 +65,7 @@ export type TabKind =
   | "file"
   | "diff"
   | "multi-diff"
+  | "multibuffer"
   | "debug-source"
   | "preview"
   | "settings"
@@ -83,6 +85,7 @@ export interface EditorTab {
   debugSessionId?: string;
   diff?: { root: string; path: string; staged: boolean };
   multiDiff?: { root: string };
+  multiBuffer?: MultiBufferDocument;
 }
 
 export type SidebarView =
@@ -315,6 +318,7 @@ interface LogosState {
   openFile(path: string): void;
   openGitDiff(path: string, staged: boolean, root?: string): void;
   openMultiGitDiff(root?: string): void;
+  openMultiBuffer(document: MultiBufferDocument): void;
   openSpecial(kind: "settings" | "extensions" | "welcome"): void;
   openPreview(path: string): void;
   closeTab(id: string): void;
@@ -1362,6 +1366,21 @@ export const useStore = create<LogosState>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.some((item) => item.id === id)
         ? state.tabs
+        : [...state.tabs.filter((item) => item.kind !== "welcome"), tab],
+      activeTabId: id,
+    }));
+  },
+  openMultiBuffer(document) {
+    const id = `multibuffer:${document.id}`;
+    const tab: EditorTab = {
+      id,
+      kind: "multibuffer",
+      name: document.title,
+      multiBuffer: document,
+    };
+    set((state) => ({
+      tabs: state.tabs.some((item) => item.id === id)
+        ? state.tabs.map((item) => (item.id === id ? tab : item))
         : [...state.tabs.filter((item) => item.kind !== "welcome"), tab],
       activeTabId: id,
     }));
