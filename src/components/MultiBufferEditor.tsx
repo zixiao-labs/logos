@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { useT } from "../i18n";
 import { languageFromPath } from "../lib/language";
@@ -11,6 +11,8 @@ import { openLspSymbolResult } from "../lib/lsp-monaco";
 import { useStore } from "../state/store";
 import { Icon } from "./Icon";
 import { defineEditorThemes, sharedEditorOptions } from "./MonacoEditor";
+
+const SOURCE_READ_CONCURRENCY = 4;
 
 interface ExcerptCodeProps {
   documentId: string;
@@ -34,6 +36,7 @@ function sourceRange(
 
 function ExcerptCode({ documentId, excerpt, content, onOpen }: ExcerptCodeProps) {
   const host = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const onOpenRef = useRef(onOpen);
   const settings = useStore((state) => state.settings);
   const lines = useMemo(() => content.split(/\r?\n/), [content]);
@@ -85,6 +88,7 @@ function ExcerptCode({ documentId, excerpt, content, onOpen }: ExcerptCodeProps)
       padding: { top: 8, bottom: 8 },
       fixedOverflowWidgets: true,
     });
+    editorRef.current = editor;
     const decorations = editor.createDecorationsCollection(
       excerpt.matches.map((match) => {
         const range = model.validateRange(
@@ -121,26 +125,49 @@ function ExcerptCode({ documentId, excerpt, content, onOpen }: ExcerptCodeProps)
     return () => {
       mouse.dispose();
       decorations.clear();
+      if (editorRef.current === editor) editorRef.current = null;
       editor.dispose();
       model.dispose();
     };
   }, [documentId, endLine, excerpt, height, snippet, startLine]);
 
+  useEffect(() => {
+    const options = { ...sharedEditorOptions(settings) };
+    delete options.lineNumbers;
+    editorRef.current?.updateOptions(options);
+    monaco.editor.setTheme(
+      settings["workbench.theme"] === "dark" ? "logos-dark" : "logos-light",
+    );
+  }, [settings]);
+
   return <div className="multibuffer-monaco" ref={host} style={{ height }} />;
 }
 
-interface LazyExcerptCodeProps extends ExcerptCodeProps {
+interface LazyExcerptCodeProps extends Omit<ExcerptCodeProps, "content"> {
   collapsed: boolean;
+  content: string | null | undefined;
+  loadingLabel: string;
+  unavailableLabel: string;
+  onPreload(path: string): void;
 }
 
-function LazyExcerptCode(props: LazyExcerptCodeProps) {
+function LazyExcerptCode({
+  collapsed,
+  content,
+  documentId,
+  excerpt,
+  loadingLabel,
+  onOpen,
+  onPreload,
+  unavailableLabel,
+}: LazyExcerptCodeProps) {
   const placeholder = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(
     () => typeof IntersectionObserver === "undefined",
   );
 
   useEffect(() => {
-    if (visible || props.collapsed || !placeholder.current) return;
+    if (visible || collapsed || !placeholder.current) return;
     if (typeof IntersectionObserver === "undefined") {
       setVisible(true);
       return;
@@ -155,13 +182,32 @@ function LazyExcerptCode(props: LazyExcerptCodeProps) {
     );
     observer.observe(placeholder.current);
     return () => observer.disconnect();
-  }, [props.collapsed, visible]);
+  }, [collapsed, visible]);
 
-  if (props.collapsed) return null;
+  useEffect(() => {
+    if (!collapsed && visible && content === undefined) {
+      onPreload(excerpt.path);
+    }
+  }, [collapsed, content, excerpt.path, onPreload, visible]);
+
+  if (collapsed) return null;
   if (!visible) {
     return <div className="multibuffer-placeholder" ref={placeholder} />;
   }
-  return <ExcerptCode {...props} />;
+  if (content === undefined) {
+    return <div className="multibuffer-state">{loadingLabel}</div>;
+  }
+  if (content === null) {
+    return <div className="multibuffer-state">{unavailableLabel}</div>;
+  }
+  return (
+    <ExcerptCode
+      documentId={documentId}
+      excerpt={excerpt}
+      content={content}
+      onOpen={onOpen}
+    />
+  );
 }
 
 export function MultiBufferEditor({ document }: { document: MultiBufferDocument }) {
@@ -173,22 +219,63 @@ export function MultiBufferEditor({ document }: { document: MultiBufferDocument 
     document.excerpts[0]?.id ?? null,
   );
   const scrollHost = useRef<HTMLDivElement>(null);
+  const sourceLoader = useRef<{
+    document: MultiBufferDocument;
+    load(path: string): void;
+  } | null>(null);
+  const pendingSourceLoads = useRef(new Set<string>());
+  const requestSourceLoad = useCallback(
+    (path: string) => {
+      const loader = sourceLoader.current;
+      if (loader?.document === document) loader.load(path);
+      else pendingSourceLoads.current.add(path);
+    },
+    [document],
+  );
 
   useEffect(() => {
     let cancelled = false;
     setContents({});
     setCollapsed(new Set());
     setActiveExcerptId(document.excerpts[0]?.id ?? null);
-    const paths = [...new Set(document.excerpts.map((excerpt) => excerpt.path))];
-    void Promise.all(
-      paths.map(async (path) => {
-        const content = await window.logos.fs.readFile(path).catch(() => null);
-        if (cancelled) return;
-        setContents((current) => ({ ...current, [path]: content }));
-      }),
-    );
+    const paths = new Set(document.excerpts.map((excerpt) => excerpt.path));
+    const requested = new Set<string>();
+    const queue: string[] = [];
+    let active = 0;
+
+    const drain = () => {
+      while (!cancelled && active < SOURCE_READ_CONCURRENCY) {
+        const path = queue.shift();
+        if (path === undefined) return;
+        active += 1;
+        void window.logos.fs
+          .readFile(path)
+          .catch(() => null)
+          .then((content) => {
+            if (cancelled) return;
+            setContents((current) => ({ ...current, [path]: content }));
+          })
+          .finally(() => {
+            active -= 1;
+            drain();
+          });
+      }
+    };
+    const load = (path: string) => {
+      if (cancelled || !paths.has(path) || requested.has(path)) return;
+      requested.add(path);
+      queue.push(path);
+      drain();
+    };
+    const loader = { document, load };
+    sourceLoader.current = loader;
+    for (const path of pendingSourceLoads.current) load(path);
+    pendingSourceLoads.current.clear();
+
     return () => {
       cancelled = true;
+      queue.length = 0;
+      if (sourceLoader.current === loader) sourceLoader.current = null;
     };
   }, [document]);
 
@@ -344,23 +431,16 @@ export function MultiBufferEditor({ document }: { document: MultiBufferDocument 
                   </span>
                 )}
               </div>
-              {content === undefined ? (
-                !isCollapsed && (
-                  <div className="multibuffer-state">{t("multibuffer.loading")}</div>
-                )
-              ) : content === null ? (
-                !isCollapsed && (
-                  <div className="multibuffer-state">{t("multibuffer.unavailable")}</div>
-                )
-              ) : (
-                <LazyExcerptCode
-                  documentId={document.id}
-                  excerpt={excerpt}
-                  content={content}
-                  collapsed={isCollapsed}
-                  onOpen={(match) => openExcerpt(excerpt, match)}
-                />
-              )}
+              <LazyExcerptCode
+                documentId={document.id}
+                excerpt={excerpt}
+                content={content}
+                collapsed={isCollapsed}
+                loadingLabel={t("multibuffer.loading")}
+                unavailableLabel={t("multibuffer.unavailable")}
+                onPreload={requestSourceLoad}
+                onOpen={(match) => openExcerpt(excerpt, match)}
+              />
             </section>
           );
         })}

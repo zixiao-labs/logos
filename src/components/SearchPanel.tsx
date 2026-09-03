@@ -31,14 +31,10 @@ export function SearchPanel() {
     }
     setLoading(true);
     const timer = window.setTimeout(() => {
-      const perRootLimit = Math.max(
-        100,
-        Math.ceil(MAX_RESULTS / workspaceFolders.length),
-      );
       void Promise.all(
         workspaceFolders.map((folder) =>
           window.logos.fs
-            .searchText(folder, trimmed, { maxResults: perRootLimit })
+            .searchText(folder, trimmed, { maxResults: MAX_RESULTS })
             .catch(() => []),
         ),
       ).then((matches) => {

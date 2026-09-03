@@ -30,6 +30,7 @@ const SEARCH_IGNORED = new Set([
 ]);
 const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
 const MAX_SEARCH_FILES = 20_000;
+const MAX_SEARCH_DIRECTORIES = MAX_SEARCH_FILES;
 const SEARCH_CONCURRENCY = 16;
 
 function fileRevision(content: string): string {
@@ -98,9 +99,14 @@ async function readDir(dirPath: string): Promise<DirListing> {
 
 async function collectSearchFiles(root: string): Promise<string[]> {
   const directories = [root];
+  let directoryIndex = 0;
   const files: string[] = [];
-  while (directories.length && files.length < MAX_SEARCH_FILES) {
-    const directory = directories.shift();
+  while (
+    directoryIndex < directories.length &&
+    directoryIndex < MAX_SEARCH_DIRECTORIES &&
+    files.length < MAX_SEARCH_FILES
+  ) {
+    const directory = directories[directoryIndex++];
     if (!directory) break;
     let entries;
     try {
@@ -112,8 +118,9 @@ async function collectSearchFiles(root: string): Promise<string[]> {
     for (const entry of entries) {
       if (SEARCH_IGNORED.has(entry.name)) continue;
       const full = path.join(directory, entry.name);
-      if (entry.isDirectory()) directories.push(full);
-      else if (entry.isFile()) files.push(full);
+      if (entry.isDirectory()) {
+        if (directories.length < MAX_SEARCH_DIRECTORIES) directories.push(full);
+      } else if (entry.isFile()) files.push(full);
       if (files.length >= MAX_SEARCH_FILES) break;
     }
   }

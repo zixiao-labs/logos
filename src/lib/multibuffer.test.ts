@@ -90,4 +90,28 @@ describe("multibuffer excerpts", () => {
       endColumn: 1,
     });
   });
+
+  it("uses the default context for non-finite context values", () => {
+    for (const contextLines of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+    ]) {
+      const [excerpt] = buildMultiBufferExcerpts(
+        "manual",
+        [
+          {
+            path: "/workspace/a.ts",
+            startLine: 10,
+            startColumn: 1,
+            endLine: 10,
+            endColumn: 2,
+          },
+        ],
+        contextLines,
+      );
+
+      expect(excerpt).toMatchObject({ startLine: 8, endLine: 12 });
+    }
+  });
 });

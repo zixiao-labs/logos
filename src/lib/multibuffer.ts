@@ -42,6 +42,8 @@ export interface MultiBufferLocation extends MultiBufferSourceRange {
   severity?: number;
 }
 
+const DEFAULT_CONTEXT_LINES = 2;
+
 function positiveInteger(value: number, fallback: number): number {
   return Number.isFinite(value) ? Math.max(1, Math.floor(value)) : fallback;
 }
@@ -75,9 +77,11 @@ function normalizeLocation(
 export function buildMultiBufferExcerpts(
   kind: MultiBufferExcerptKind,
   locations: MultiBufferLocation[],
-  contextLines = 2,
+  contextLines = DEFAULT_CONTEXT_LINES,
 ): MultiBufferExcerpt[] {
-  const context = Math.max(0, Math.floor(contextLines));
+  const context = Number.isFinite(contextLines)
+    ? Math.max(0, Math.floor(contextLines))
+    : DEFAULT_CONTEXT_LINES;
   const sorted = locations
     .map(normalizeLocation)
     .sort(
@@ -130,7 +134,7 @@ export function createMultiBufferDocument(
   title: string,
   kind: MultiBufferExcerptKind,
   locations: MultiBufferLocation[],
-  contextLines = 2,
+  contextLines = DEFAULT_CONTEXT_LINES,
 ): MultiBufferDocument {
   return {
     id,
