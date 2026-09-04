@@ -19,6 +19,7 @@ Current status: Actively developing
 
 ## Documentation
 
+- [Vim / Helix modal editing](docs/editor/modal-editing.md)
 - [Debugging with `launch.json`](docs/debugging/launch-json.md), including Agent/MCP control, the `$setup-launch-json` Skill, and VS Code compatibility
 - [Agent runtimes, authentication, ACP Registry, and Agent Debug](docs/agents/runtime.md)
 - [MCP project configuration, external Agent formats, and approval flow](docs/agents/mcp-json.md)

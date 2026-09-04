@@ -17,6 +17,7 @@ import { serverIdForLanguage } from "../lib/language";
 import { createInlineBlameDecorationOptions } from "../lib/git-blame";
 import type { DebugBreakpointState } from "../shared/dap";
 import type { FileSnapshot } from "../shared/types";
+import { bindEditorKeymap, useEditorMode } from "../lib/editor-keymap";
 
 /** path -> last-saved content, for dirty tracking. */
 const baselines = new Map<string, string>();
@@ -384,11 +385,24 @@ export function MonacoEditor({
       if (!readOnly) void saveCurrent(editor, setDirty);
     };
     window.addEventListener("logos:save", onSave);
+    const keymap = bindEditorKeymap(editor, {
+      save: readOnly ? undefined : () => saveCurrent(editor, setDirty),
+      close: () => {
+        const model = editor.getModel();
+        const tab = useStore.getState().tabs.find(item => item.path === (readOnly ? path : model?.uri.fsPath));
+        return tab ? closeTabSafely(tab.id) : Promise.resolve(false);
+      },
+    });
 
     // C2: when a cold language server becomes ready, re-trigger the suggest
     // widget on the focused editor so completions appear without retyping.
     const onLspReady = (e: Event) => {
       if (!editor.hasTextFocus()) return;
+      const mode = useEditorMode.getState();
+      if (
+        useStore.getState().settings["workbench.keymap"] !== "default" &&
+        (mode.editorId !== editor.getId() || mode.mode !== "insert")
+      ) return;
       const model = editor.getModel();
       if (!model) return;
       const { serverId } = (e as CustomEvent<{ serverId: string }>).detail;
@@ -424,6 +438,7 @@ export function MonacoEditor({
       window.removeEventListener("logos:lsp-navigate", onNavigate);
       cursorSub.dispose();
       mouseSub.dispose();
+      keymap.dispose();
       breakpointDecorationsRef.current = null;
       stackDecorationsRef.current = null;
       inlineBlameDecorationsRef.current = null;
@@ -683,10 +698,10 @@ async function saveCurrent(
   setDirty: (id: string, dirty: boolean) => void,
 ) {
   const model = editor.getModel();
-  if (!model) return;
+  if (!model) return false;
   const p = model.uri.fsPath;
   const expectedRevision = await confirmExternalOverwrite(p);
-  if (!expectedRevision) return;
+  if (!expectedRevision) return false;
   await lspWillSaveDoc(p, model.getLanguageId());
   const content = model.getValue();
   const result = await window.logos.fs.writeFileConditional(
@@ -696,7 +711,7 @@ async function saveCurrent(
   );
   if (result.status === "conflict") {
     markExternalConflict(p, result.current);
-    return;
+    return false;
   }
   baselines.set(p, content);
   baselineRevisions.set(p, result.revision);
@@ -708,6 +723,7 @@ async function saveCurrent(
   }));
   // F1: tell the language server the document was saved (save-time linting).
   lspSaveDoc(p, model.getLanguageId(), content);
+  return true;
 }
 
 function showLspHierarchyForEditor(

@@ -39,6 +39,7 @@ export function App() {
   // Global keyboard shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const s = useStore.getState();
       const debugSession = s.debug.activeSessionId
         ? s.debug.sessions[s.debug.activeSessionId]

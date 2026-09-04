@@ -9,6 +9,7 @@ import {
   type GitDiffExcerpt,
 } from "../lib/git-multidiff";
 import { Icon } from "./Icon";
+import { bindEditorKeymap } from "../lib/editor-keymap";
 
 interface MultiGitDiffEditorProps {
   root: string;
@@ -55,6 +56,8 @@ function InlineDiffExcerpt({
       padding: { top: 8, bottom: 8 },
     });
     editorRef.current = editor;
+    const originalKeymap = bindEditorKeymap(editor.getOriginalEditor());
+    const modifiedKeymap = bindEditorKeymap(editor.getModifiedEditor());
 
     const syncHeight = () => {
       const contentHeight = Math.max(
@@ -72,6 +75,8 @@ function InlineDiffExcerpt({
     const diffUpdated = editor.onDidUpdateDiff(syncHeight);
 
     return () => {
+      originalKeymap.dispose();
+      modifiedKeymap.dispose();
       originalSize.dispose();
       modifiedSize.dispose();
       diffUpdated.dispose();

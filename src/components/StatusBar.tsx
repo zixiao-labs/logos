@@ -6,6 +6,7 @@ import {
   formatStatusBarBlame,
 } from "../lib/git-blame";
 import { Icon, type IconName } from "./Icon";
+import { useEditorMode } from "../lib/editor-keymap";
 
 export function StatusBar() {
   const t = useT();
@@ -28,6 +29,7 @@ export function StatusBar() {
     (s) => s.settings["git.blame.statusBar.enabled"],
   );
   const currentLineBlame = useStore((s) => s.currentLineBlame);
+  const editorMode = useEditorMode();
 
   const active = tabs.find((tb) => tb.id === activeTabId);
 
@@ -78,6 +80,12 @@ export function StatusBar() {
 
   return (
     <div className="statusbar">
+      {editorMode.editorId && editorMode.keymap !== "default" && (
+        <span className="si editor-mode" role="status" aria-label="Editor mode">
+          {editorMode.keymap === "vim" ? "VIM" : "HELIX"} · {editorMode.mode.toUpperCase()}
+          {editorMode.pending && <span className="editor-mode-pending">{editorMode.pending}</span>}
+        </span>
+      )}
       {git?.isRepo && (
         <button className="si" onClick={togglePanel} title={git.branch ?? ""}>
           <Icon name="branch" size={13} />
