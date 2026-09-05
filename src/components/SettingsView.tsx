@@ -634,6 +634,7 @@ export function SettingsView() {
               <option value="vim">Vim</option>
               <option value="helix">Helix</option>
             </select>
+            <div className="setting-keymap-help">{t("settings.keymapHelp")}</div>
           </Row>
           <Row name={t("settings.fontSize")} settingKey="editor.fontSize">
             <input

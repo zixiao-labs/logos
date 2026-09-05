@@ -30,6 +30,9 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
+      // The package's browser export is UMD; select its ESM build explicitly.
+      "monaco-vim": "node_modules/monaco-vim/dist/index.mjs",
+      "monaco-editor/esm": "node_modules/monaco-editor/esm",
       "@": "src",
       "@shared": "src/shared",
       // Route monaco-editor through Nasti's per-file dev pipeline instead of the

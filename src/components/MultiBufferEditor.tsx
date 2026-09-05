@@ -11,6 +11,7 @@ import { openLspSymbolResult } from "../lib/lsp-monaco";
 import { useStore } from "../state/store";
 import { Icon } from "./Icon";
 import { defineEditorThemes, sharedEditorOptions } from "./MonacoEditor";
+import { bindEditorKeymap } from "../lib/editor-keymap";
 
 const SOURCE_READ_CONCURRENCY = 4;
 
@@ -89,6 +90,7 @@ function ExcerptCode({ documentId, excerpt, content, onOpen }: ExcerptCodeProps)
       fixedOverflowWidgets: true,
     });
     editorRef.current = editor;
+    const keymap = bindEditorKeymap(editor);
     const decorations = editor.createDecorationsCollection(
       excerpt.matches.map((match) => {
         const range = model.validateRange(
@@ -124,6 +126,7 @@ function ExcerptCode({ documentId, excerpt, content, onOpen }: ExcerptCodeProps)
     });
     return () => {
       mouse.dispose();
+      keymap.dispose();
       decorations.clear();
       if (editorRef.current === editor) editorRef.current = null;
       editor.dispose();

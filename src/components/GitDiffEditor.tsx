@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { useStore } from "../state/store";
 import { useT } from "../i18n";
+import { bindEditorKeymap } from "../lib/editor-keymap";
 
 interface GitDiffEditorProps {
   root: string;
@@ -39,7 +40,11 @@ export function GitDiffEditor({ root, path, staged, language }: GitDiffEditorPro
       minimap: { enabled: false },
     });
     editorRef.current = editor;
+    const originalKeymap = bindEditorKeymap(editor.getOriginalEditor());
+    const modifiedKeymap = bindEditorKeymap(editor.getModifiedEditor());
     return () => {
+      originalKeymap.dispose();
+      modifiedKeymap.dispose();
       if (editorRef.current === editor) editorRef.current = null;
       clearDiffModels(editor);
       editor.dispose();

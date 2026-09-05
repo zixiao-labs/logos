@@ -1,4 +1,5 @@
 import { defineConfig } from "@lightning-js/lightning";
+import { monacoEditorPlugin } from "@nasti-toolchain/nasti";
 import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -15,9 +16,17 @@ if (typeof window !== "undefined") {
 ${readFileSync(browserRuntimeUrl, "utf8")}`;
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "monaco-vim": "node_modules/monaco-vim/dist/index.mjs",
+      "monaco-editor/esm": "node_modules/monaco-editor/esm",
+      "monaco-editor": "node_modules/monaco-editor/esm/vs/editor/editor.main.js",
+    },
+  },
   framework: "react",
   server: { hmr: false },
   plugins: [
+    monacoEditorPlugin({ languageWorkers: ["editorWorkerService"] }),
     {
       name: "logos:lightning-browser-runtime",
       enforce: "pre",
