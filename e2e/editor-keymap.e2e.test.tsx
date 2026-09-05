@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "@lightning-js/lightning";
+import { afterEach, beforeEach, describe, expect, it, vi } from "@lightning-js/lightning";
 import * as monaco from "monaco-editor";
 import { bindEditorKeymap, useEditorMode } from "../src/lib/editor-keymap";
 import { useStore } from "../src/state/store";
 import type { KeymapMode } from "../src/shared/types";
+import { HelixController } from "../src/lib/helix";
 
 // The test runner lives at a nested URL; workers are served at the server root.
 self.MonacoEnvironment = { getWorkerUrl: () => "/monacoeditorwork/editorWorkerService.worker.js" };
@@ -186,6 +187,72 @@ describe("real Monaco modal editing", () => {
     expect(model.getValue()).toBe("é\r\n中");
     keys("f中");
     expect(selected()).toBe("é\r\n中");
+  });
+
+  it("Helix cancels replacement and surround commands on non-printable keys", async () => {
+    await mode("helix");
+    const before = model.getValue();
+    for (const command of ["r", "ms"]) {
+      for (const value of ["ArrowRight", "Backspace", "Delete", "Insert", "Home", "Dead", "F2"]) {
+        keys("2" + command);
+        key(value);
+        expect(model.getValue()).toBe(before);
+        expect(useEditorMode.getState().pending).toBe("");
+      }
+    }
+    keys("rX");
+    expect(model.getLineContent(1)).toBe("Xlpha beta");
+    keys("ms(");
+    expect(model.getLineContent(1)).toBe("(X)lpha beta");
+  });
+
+  it("Helix uses physical Alt shortcut keys and redoes with Ctrl+Shift+Z", async () => {
+    model.setValue("one two two\nthree");
+    await mode("helix");
+    keys("ft");
+    key("≥", { altKey: true, code: "Period", keyCode: 190 });
+    expect(selected()).toBe("two t");
+    const selection = editor.getSelection()!;
+    key("…", { altKey: true, code: "Semicolon", keyCode: 186 });
+    expect(editor.getSelection()!.getPosition()).toEqual(selection.getSelectionStart());
+    key("%");
+    key("ß", { altKey: true, code: "KeyS", keyCode: 83 });
+    expect(editor.getSelections()).toHaveLength(2);
+    key("d");
+    const edited = model.getValue();
+    key("z", { ctrlKey: true });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(model.getValue()).toBe("one two two\nthree");
+    key("Z", { ctrlKey: true, shiftKey: true });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(model.getValue()).toBe(edited);
+  });
+
+  it("Helix caches text until content or the model changes", () => {
+    const controller = new HelixController(editor, { mode() {}, notify() {}, command() {}, prompt() {} });
+    const cached = controller as unknown as { readonly text: string };
+    const getValue = vi.spyOn(model, "getValue");
+    const other = monaco.editor.createModel("other");
+    try {
+      expect(cached.text).toBe("alpha beta\nsecond line\nthird");
+      expect(cached.text).toBe("alpha beta\nsecond line\nthird");
+      expect(getValue).not.toHaveBeenCalled();
+      model.setValue("changed");
+      expect(cached.text).toBe("changed");
+      getValue.mockClear();
+      expect(cached.text).toBe("changed");
+      expect(getValue).not.toHaveBeenCalled();
+      editor.setModel(other);
+      expect(cached.text).toBe("other");
+      model.setValue("detached edit");
+      editor.setModel(model);
+      expect(cached.text).toBe("detached edit");
+    } finally {
+      controller.dispose();
+      getValue.mockRestore();
+      editor.setModel(model);
+      other.dispose();
+    }
   });
 
   for (const keymap of ["vim", "helix"] as const) {

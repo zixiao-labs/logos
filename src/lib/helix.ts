@@ -36,6 +36,7 @@ export class HelixController implements monaco.IDisposable {
   private historyQueue = Promise.resolve();
   private lastInsert: { entry: string; texts: string[] } | null = null;
   private lastFind: { command: string; character: string } | null = null;
+  private textCache: { model: monaco.editor.ITextModel; value: string } | undefined;
 
   constructor(private editor: monaco.editor.IStandaloneCodeEditor, private ui: ModalUI) {
     this.insertMarks = editor.createDecorationsCollection();
@@ -57,6 +58,7 @@ export class HelixController implements monaco.IDisposable {
         if (this.mode !== "insert") this.normalize();
       }),
       editor.onDidChangeModelContent(() => {
+        this.textCache = undefined;
         if (this.mode === "insert") this.insertChanged = true;
       }),
     );
@@ -65,7 +67,11 @@ export class HelixController implements monaco.IDisposable {
   }
 
   private get model() { return this.editor.getModel()!; }
-  private get text() { return this.model.getValue(); }
+  private get text() {
+    const model = this.model;
+    if (this.textCache?.model !== model) this.textCache = { model, value: model.getValue() };
+    return this.textCache.value;
+  }
   private get readOnly() { return this.editor.getOption(monaco.editor.EditorOption.readOnly); }
 
   private ranges(): HelixSelection[] {
@@ -428,7 +434,7 @@ export class HelixController implements monaco.IDisposable {
     }
     if (this.mode === "insert") return false;
     if (event.ctrlKey) {
-      if (key === "z") { this.history(event.shiftKey); return true; }
+      if (key.toLowerCase() === "z") { this.history(event.shiftKey); return true; }
       const actions: Record<string, string> = { b: "cursorPageUp", f: "cursorPageDown", c: "editor.action.commentLine" };
       if (key === "u" || key === "d") {
         this.move(key === "u" ? "k" : "j", Math.max(1, Math.floor(this.editor.getLayoutInfo().height / this.editor.getOption(monaco.editor.EditorOption.lineHeight) / 2)));
@@ -441,13 +447,14 @@ export class HelixController implements monaco.IDisposable {
       return false;
     }
     if (event.altKey) {
-      if (key === ";") this.select(this.ranges().map(range => ({ anchor: range.head, head: range.anchor })));
-      else if (key === "s") this.select(regexSelections(this.text, this.ranges(), "\\r?\\n", true));
-      else if (key === "." && this.lastFind) this.find(this.lastFind.command, this.lastFind.character, 1);
+      if (event.code === "Semicolon") this.select(this.ranges().map(range => ({ anchor: range.head, head: range.anchor })));
+      else if (event.code === "KeyS") this.select(regexSelections(this.text, this.ranges(), "\\r?\\n", true));
+      else if (event.code === "Period" && this.lastFind) this.find(this.lastFind.command, this.lastFind.character, 1);
       else return false;
       return true;
     }
-    if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(key) || /^F\d+$/.test(key)) return false;
+    if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(key)) return false;
+    if (/^F\d+$/.test(key) && this.pending !== "r" && this.pending !== "ms") return false;
     if (!this.pending && /^\d$/.test(key)) {
       this.count = String(Math.min(10000, Number(this.count + key)));
       this.status();
@@ -457,6 +464,11 @@ export class HelixController implements monaco.IDisposable {
     if (this.pending) {
       const prefix = this.pending;
       this.pending = "";
+      if ((prefix === "r" || prefix === "ms") && key !== "Enter" && key !== "Tab" && (!key || nextChar(key, 0) !== key.length)) {
+        this.count = "";
+        this.status();
+        return true;
+      }
       if (prefix === "m" && (key === "i" || key === "a" || key === "s")) this.pending = "m" + key;
       else if (prefix === "g") this.goto(key, count);
       else if (prefix === '"') this.register = key;

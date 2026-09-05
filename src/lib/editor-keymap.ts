@@ -261,7 +261,16 @@ export function bindEditorKeymap(
         adapter.on("vim-command-done", () => { pending = ""; publish(); });
         controller = { dispose: () => { vimCommands.delete(adapter); adapter.dispose(); } };
         onMode({ mode: "normal" });
-      }).catch(error => notify(`Vim failed to load: ${error instanceof Error ? error.message : String(error)}`));
+      }).catch(error => {
+        if (!alive()) return;
+        shortcut.dispose();
+        controller?.dispose();
+        controller = undefined;
+        currentMode = "insert";
+        editor.updateOptions(defaults);
+        ui.mode("insert");
+        notify(`Vim failed to load: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
     publish();
   };

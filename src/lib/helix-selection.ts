@@ -113,11 +113,18 @@ export function textObject(
     return { anchor: start, head: end };
   }
   if (object === "p") {
-    start = text.lastIndexOf("\n\n", cursor) + 2;
-    if (start === 1) start = 0;
-    end = text.indexOf("\n\n", cursor);
-    if (end < 0) end = text.length;
-    else if (around) end += 2;
+    start = 0;
+    end = text.length;
+    const separator = /\r?\n\r?\n/g;
+    for (let match; (match = separator.exec(text));) {
+      if (match.index <= cursor) start = match.index + match[0].length;
+      if (match.index >= cursor) {
+        end = match.index + (around ? match[0].length : 0);
+        break;
+      }
+      // Preserve overlapping blank-line separators without splitting CRLF.
+      separator.lastIndex = match.index + (match[0].startsWith("\r") ? 2 : 1);
+    }
     return { anchor: start, head: end };
   }
   const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}", "<": ">", '"': '"', "'": "'", "`": "`" };

@@ -52,4 +52,26 @@ describe("Helix selections", () => {
     ]);
     expect(() => regexSelections(text, all, "[", false)).toThrow();
   });
+
+  for (const eol of ["\n", "\r\n"]) {
+    it(`selects inner and around paragraphs with ${JSON.stringify(eol)} line endings`, () => {
+      const paragraphs = [`first${eol}line`, "middle", "last"];
+      const separator = eol + eol;
+      const text = paragraphs.join(separator);
+      let offset = 0;
+      for (const [index, paragraph] of paragraphs.entries()) {
+        const range = characterSelection(text, offset + 1);
+        expect(textObject(text, range, "p", false)).toEqual({ anchor: offset, head: offset + paragraph.length });
+        expect(textObject(text, range, "p", true)).toEqual({
+          anchor: offset,
+          head: offset + paragraph.length + (index < paragraphs.length - 1 ? separator.length : 0),
+        });
+        offset += paragraph.length + separator.length;
+      }
+      const blanks = `first${eol}${eol}${eol}last`;
+      expect(textObject(blanks, characterSelection(blanks, blanks.length - 1), "p", false)).toEqual({
+        anchor: blanks.length - 4, head: blanks.length,
+      });
+    });
+  }
 });
