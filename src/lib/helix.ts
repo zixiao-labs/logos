@@ -464,7 +464,7 @@ export class HelixController implements monaco.IDisposable {
     if (this.pending) {
       const prefix = this.pending;
       this.pending = "";
-      if ((prefix === "r" || prefix === "ms") && key !== "Enter" && key !== "Tab" && (!key || nextChar(key, 0) !== key.length)) {
+      if ((prefix === "r" || prefix === "ms") && !(prefix === "r" && key === "Enter") && (!key || nextChar(key, 0) !== key.length)) {
         this.count = "";
         this.status();
         return true;

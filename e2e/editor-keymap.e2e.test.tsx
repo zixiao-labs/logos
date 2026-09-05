@@ -31,7 +31,7 @@ describe("real Monaco modal editing", () => {
   // cannot perform browser default text insertion, so emulate only that default
   // after asserting that the modal handler left the event unconsumed.
   function key(value: string, options: KeyboardEventInit = {}) {
-    const codes: Record<string, number> = { Escape: 27, Enter: 13, Backspace: 8, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, ":": 186, ";": 186, "/": 191, "?": 191, ".": 190, ",": 188, '"': 222, " ": 32, "[": 219, "@": 50, "!": 49, "%": 53 };
+    const codes: Record<string, number> = { Escape: 27, Enter: 13, Tab: 9, Backspace: 8, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, ":": 186, ";": 186, "/": 191, "?": 191, ".": 190, ",": 188, '"': 222, " ": 32, "[": 219, "@": 50, "!": 49, "%": 53 };
     const event = new KeyboardEvent("keydown", {
       key: value, code: value.length === 1 && /[a-z]/i.test(value) ? `Key${value.toUpperCase()}` : value,
       keyCode: codes[value] ?? value.toUpperCase().charCodeAt(0),
@@ -193,7 +193,7 @@ describe("real Monaco modal editing", () => {
     await mode("helix");
     const before = model.getValue();
     for (const command of ["r", "ms"]) {
-      for (const value of ["ArrowRight", "Backspace", "Delete", "Insert", "Home", "Dead", "F2"]) {
+      for (const value of ["ArrowRight", "Backspace", "Delete", "Insert", "Home", "Dead", "F2", "Tab", ...(command === "ms" ? ["Enter"] : [])]) {
         keys("2" + command);
         key(value);
         expect(model.getValue()).toBe(before);
@@ -204,6 +204,15 @@ describe("real Monaco modal editing", () => {
     expect(model.getLineContent(1)).toBe("Xlpha beta");
     keys("ms(");
     expect(model.getLineContent(1)).toBe("(X)lpha beta");
+  });
+
+  it("Helix replacement accepts Enter using the document line ending", async () => {
+    model.setValue("alpha\r\nbeta");
+    await mode("helix");
+    key("r");
+    key("Enter");
+    expect(model.getValue()).toBe("\r\nlpha\r\nbeta");
+    expect(useEditorMode.getState().pending).toBe("");
   });
 
   it("Helix uses physical Alt shortcut keys and redoes with Ctrl+Shift+Z", async () => {
